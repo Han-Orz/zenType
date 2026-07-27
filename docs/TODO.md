@@ -1,6 +1,6 @@
 ﻿## 当前
 
-### 🟡 v2.6.3 已发布；仅剩集市 PR / stage 工作（v2.6.2 已并入 v2.6.3）
+### 🟡 v2.6.4 已发布；仅剩集市 PR / stage 工作（v2.6.2 已并入 v2.6.3）
 - **背景**：bazaar stage/plugins.json 冻结 `siyuan-zen` 在 v1.0.6（name="ZenType"），v2.0.0 起 plugin.json name 改为 `siyuan-zen` 触发 stage 校验冲突，stage 静默保留旧数据，集市从未更新。
 - **方案**：统一改名 `zenType`（repo + plugin.json name + plugins.txt path），两步 PR 重新上架。
 - **进度**：
@@ -9,6 +9,7 @@
   - [x] 本仓库改名（plugin.json name/url/version→`zenType`, `zh_CN`→`zh-CN`, `make_dev_link.js`, README）
   - [x] GitHub repo 改名 `siyuan-zen` → `zenType`
   - [x] 发 v2.6.3 release（v2.6.2 → v2.6.3 间累积重构：cursor 模块拆分、lifecycle 工具、popover 观察者自清理；用户行为不变），见 `1b9a832` + tag `v2.6.3`
+  - [x] 发 v2.6.4 release（修复集市包缺少 README；用户行为不变）
   - [ ] PR #2 加新 path：plugins.txt 加 `Han-Orz/zenType`，等 stage 收录
   - [ ] 集市真正上线后，README 顶部"Upgrading"段可改为"已稳定，可直接装"
 - **本仓库侧**所有代码 / 文档改动已就绪，后续只等外部 PR 合并。

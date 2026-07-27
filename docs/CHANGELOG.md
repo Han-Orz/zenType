@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.6.4 (2026-07-27) — Bazaar Package Documentation
+
+修复集市包构建流程：将中英文 README 一并打入 `package.zip`，与 `plugin.json` 的 `readme` 声明保持一致。
+
+### Fixed
+- **集市包文档**：发布包现在包含根目录 `README.md` 和 `README_zh-CN.md`。
+
+---
+
 ## v2.6.3 (2026-07-05) — Cursor Submodule Split + Lifecycle Utility（稳定版）
 
 项目进入稳定期后的内部清理小版本，对用户行为基本无影响：拆 cursor、统一延迟帧追踪、修潜在 popover 观察者残留。

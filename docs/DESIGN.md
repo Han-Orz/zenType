@@ -1,4 +1,4 @@
-# zenType 设计文档（v2.6.3）
+# zenType 设计文档（v2.6.4）
 
 > **本文件合并自 `docs/FOCUS_TYPEWRITER_DESIGN.md`（已删除）+ 早期 `TODO.md`（已删除）的设计段。**
 > **代码即真相，本文档跟随代码，不是反过来。**
@@ -18,7 +18,7 @@
 
 **核心价值**：让用户进入"心流"状态 —— 不用低头找光标、不被周围段落干扰。
 **设计哲学**：聚焦服务于主动写作；默认启用以减少进入心流状态的额外操作，仍可通过命令切换。
-**当前版本**：v2.6.3（`package.json` / `plugin.json`）。
+**当前版本**：v2.6.4（`package.json` / `plugin.json`）。
 
 ---
 
@@ -1007,12 +1007,12 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 
 | 文件 | 当前 | 备注 |
 |---|---|---|
-| `package.json` `version` | `2.6.3` | v2.6.3 当前版本 |
-| `plugin.json` `version` | `2.6.3` | 同上 |
-| `docs/CHANGELOG.md` | ✅ 已维护 | 位于 docs/CHANGELOG.md，覆盖 v2.0~v2.6.3 |
+| `package.json` `version` | `2.6.4` | v2.6.4 当前版本 |
+| `plugin.json` `version` | `2.6.4` | 同上 |
+| `docs/CHANGELOG.md` | ✅ 已维护 | 位于 docs/CHANGELOG.md，覆盖 v2.0~v2.6.4 |
 
-> 当前发布版本为 v2.6.3；v2.6.2 为保行为架构重构里程碑。`version` 字段从 v2.3.0 → v2.5.0（跳过 2.4，Highlight API 重写）→ v2.6.0 → v2.6.1 → v2.6.2 → v2.6.3。
+> 当前发布版本为 v2.6.4；v2.6.2 为保行为架构重构里程碑，v2.6.4 仅修复集市包文档打包。`version` 字段从 v2.3.0 → v2.5.0（跳过 2.4，Highlight API 重写）→ v2.6.0 → v2.6.1 → v2.6.2 → v2.6.3 → v2.6.4。
 
 ---
 
-**最后更新**：2026-07-18（v2.6.3 Cursor Submodule Split + Lifecycle Utility + 文档同步）
+**最后更新**：2026-07-27（v2.6.4 集市包 README 打包修复）

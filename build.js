@@ -39,6 +39,8 @@ function copyAssets() {
   fs.copyFileSync('plugin.json', path.join(OUT_DIR, 'plugin.json'));
   fs.copyFileSync('icon.png', path.join(OUT_DIR, 'icon.png'));
   fs.copyFileSync('preview.png', path.join(OUT_DIR, 'preview.png'));
+  fs.copyFileSync('README.md', path.join(OUT_DIR, 'README.md'));
+  fs.copyFileSync('README_zh-CN.md', path.join(OUT_DIR, 'README_zh-CN.md'));
   // Sanity check: with `type: 'css-text'` the compiled CSS must end up inside
   // index.js. Look for a known selector from src/styles/index.scss.
   // (Previously also checked `#zentype-highlight-line` — removed in v2.2.1 P3
