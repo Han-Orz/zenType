@@ -2,6 +2,8 @@
 
 Smooth cursor + typewriter mode + ripple focus for distraction-free writing in SiYuan Note.
 
+![zenType preview](preview.png)
+
 > **⚠️ Upgrading from v2.x (siyuan-zen)?**
 >
 > The plugin has been renamed from `siyuan-zen` to `zenType` (v2.6.1) to resolve bazaar marketplace sync issues. SiYuan treats these as **two different plugins**, so existing users must:
@@ -29,7 +31,7 @@ Smooth cursor + typewriter mode + ripple focus for distraction-free writing in S
 
 All three modules are enabled by default. Typewriter initialization immediately enables the shared typewriter/ripple state. To toggle:
 
-- **Top bar icon** (pencil): Toggle typewriter mode + ripple focus on/off; smooth cursor stays active
+- **Top bar icon** (galaxy): Toggle typewriter mode + ripple focus on/off. The colorful planets animate when both are enabled; the smooth cursor stays active.
 - **Command palette** (Ctrl+Shift+P): Search "zenType" to see individual toggles
 
 ## Edge Cases
