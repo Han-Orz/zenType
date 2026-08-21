@@ -6,7 +6,8 @@
  *
  * 算法借鉴 Neo-Plus getselection.ts：
  *   1) 浏览器原生 Range.getClientRects()
- *   2) 空时用父 [data-node-id] 块的 bounding rect 作为 fallback（非突变）
+ *   2) 无有效 rect 时：空块使用内容区的 bounding rect；非空块从相邻真实文本节点
+ *      的边界构造 fallback（均不改 DOM）
  *
  * 设计决策：返回精简的 CursorRect 而不是 DOMRect——消费方只需要 x/y/width/height。
  * typewriter.ts / cursor.ts 直接消费，无需额外转换。
@@ -51,7 +52,7 @@ export function getCursorRect(): CursorRect | null {
   const lineHeight = getLineHeight(range.startContainer);
   const height = lineHeight * LINE_HEIGHT_RATIO;
 
-  // 垂直居中（rect.top 是 baseline，向上偏移让光标在行高中部）
+  // 垂直居中：按基础文本矩形的高度计算偏移，让光标位于行高中部
   const gap = (baseRect.height - height) / 2;
   const y = baseRect.top + gap;
   // 光标在字符末尾：right 边缘就是下一个字符的起点
@@ -61,9 +62,9 @@ export function getCursorRect(): CursorRect | null {
 }
 
 /**
- * 非突变 fallback：当 Range.getClientRects() 返回 0-height rect（典型场景：
- * 光标在空块）时，沿 startContainer 向上找 [data-node-id] 块，用块的
- * bounding rect + lineHeight 构造虚拟光标 rect。
+ * 非突变 fallback：当 Range.getClientRects() 返回 0-height rect 时，沿
+ * startContainer 向上找 [data-node-id] 块。空块使用内容区 bounding rect +
+ * lineHeight；非空块从相邻真实文本节点的边界恢复光标位置。
  *
  * 不插入 DOM，避免触发 selectionchange 级联（参考 PR 之前的 debug log
  * spam 226+ 行的根因）。

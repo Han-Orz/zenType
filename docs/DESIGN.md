@@ -2,7 +2,7 @@
 
 > **本文件合并自 `docs/FOCUS_TYPEWRITER_DESIGN.md`（已删除）+ 早期 `TODO.md`（已删除）的设计段。**
 > **代码即真相，本文档跟随代码，不是反过来。**
-> **每个决策都有"在哪行代码生效"或"从 git 历史哪条 commit 来"的引用。**
+> **当前行为优先引用文件/函数/配置名；历史决策引用对应 commit。**
 
 ---
 
@@ -13,7 +13,7 @@
 | 模式 | 一句话 | 默认 |
 |---|---|---|
 | **顺滑光标** (Smooth Cursor) | 自定义蓝色光标替换系统竖线，移动时丝滑过渡 + 边缘淡出 | ✅ ON |
-| **打字机模式** (Typewriter Mode) | 输入时光标始终停在屏幕 38% 高度（黄金分割偏上） | ✅ 默认 ON（初始化时立即启用共享状态） |
+| **打字机模式** (Typewriter Mode) | 输入时光标保持在屏幕 38%～50% 的舒适区间内 | ✅ 默认 ON（初始化时立即启用共享状态） |
 | **涟漪聚焦** (Ripple Focus) | 当前块最亮，周围块按距离渐淡 | ✅ 默认 ON（与打字机共享初始化状态） |
 
 **核心价值**：让用户进入"心流"状态 —— 不用低头找光标、不被周围段落干扰。
@@ -75,7 +75,7 @@ src/
 │   ├── inputMode.ts              # 聚焦/打字机 ON/OFF 状态 + 订阅
 │   └── inputModeTriggers.ts      # 触发适配层（语义事件 → setBothOn/Off）
 ├── utils/
-│   ├── boundary.ts               # 4 重边界检测（活跃编辑器 + AV 排除 + AABB）
+│   ├── boundary.ts               # 3 重边界检测 + 嵌套滚动容器回退
 │   ├── getCursorRect.ts          # 光标显示矩形
 │   ├── getCursorElement.ts       # 当前选区所在 DOM
 │   ├── getLineHeight.ts          # 所在行 computed lineHeight
@@ -92,7 +92,7 @@ src/
 
 ### 1.3 EventBus 订阅关系（index.ts）
 
-`src/index.ts` 在 onload 订阅思源官方 EventBus，**9 个事件统一管理生命周期**（`eventBusOffFns` 数组 + onunload 统一释放）：
+`src/index.ts` 在 onload 订阅思源官方 EventBus，**8 个事件统一管理生命周期**（`eventBusOffFns` 数组 + onunload 统一释放）：
 
 | 事件 | 触发场景 | 处理函数 |
 |---|---|---|
@@ -114,25 +114,25 @@ src/
 ### 2.1 想要的效果
 
 - 思源默认系统竖线光标 → 自定义蓝色光标替换（亮色 `#5d8cd7` / 暗色 `#8ab4f8`）
-- 移动时 **0.15s cubic-bezier 平滑过渡**（远距离按 `TRANSITION.TIERS` 表自动加长到 0.3s）
-- 停止活动 **1.1s 后**进入呼吸闪烁（9-keyframe 正弦曲线，3.5s 一周期）
+- 移动时按 `TRANSITION.TIERS` 分档平滑过渡：≤30px 为 0.07s、≤150px 为 0.15s、≤500px 为 0.21s、再远为 0.30s；曲线为 cubic-bezier
+- 停止活动 **1.1s 后**进入呼吸闪烁（5 个关键帧，3s 一周期）
 - 接近视口边缘（**顶/底对称，20px 范围内**）→ 平滑淡出 + 缩小（scale 0.6-1.0）
 - 离开视口 → 停在最后可见位置 + 完全淡出
 - 返回视口 → 平滑淡入（case C 强制 remove `.no-transition` + reflow）
 - **直角矩形**（v2.1.0 删除 `border-radius: 2px`）
-- 鼠标拖蓝 / 选中时 → 0.15s 内移动到选区末尾（transition）
+- 鼠标拖蓝 / 选中时 → 跳过过渡，立即移动到选区末尾
 
 ### 2.2 关键决策
 
-| 决策 | 值 | 文件:行 | 理由 |
+| 决策 | 值 | 代码引用 | 理由 |
 |---|---|---|---|
-| 高度 | `lineHeight × 1.05` | `config.ts:26` `CURSOR_CONFIG.HEIGHT_RATIO` | 参考版 0.88 太矮覆盖少，用户偏好 1.05 |
-| 颜色 | `#5d8cd7` / `#8ab4f8` | `styles/index.scss:10,92` | 验证过的搭配，亮/暗主题各一 |
-| 移动曲线 | `0.15s cubic-bezier(0.25, 0.1, 0.25, 1)` | `styles/index.scss:17` | 参考版同款 |
-| 长距离时长 | `TRANSITION.TIERS` 分档表 | `config.ts:89-96` | Q7：短 0.07 / 中短 0.15 / 中 0.21 / 长 0.30（用户已手动调到这套值） |
-| 呼吸动画 | `3.5s linear infinite` | `styles/index.scss:20` | linear 让关键帧间也呈正弦，避免 cubic-bezier "settle" 僵硬感 |
-| 边缘淡出区 | `EDGE_FADE.ZONE = 20` | `config.ts:68-73` | 60 太早 → 30 → 20（用户逐步收紧） |
-| 离屏缩放 | `MIN_SCALE = 0.6` | `config.ts:72` | 视觉提示但不消失 |
+| 高度 | `lineHeight × 1.05` | `config.ts` `CURSOR_CONFIG.HEIGHT_RATIO` | 参考版 0.88 太矮覆盖少，用户偏好 1.05 |
+| 颜色 | `#5d8cd7` / `#8ab4f8` | `styles/index.scss` `#zentype-cursor` / dark theme | 验证过的搭配，亮/暗主题各一 |
+| 移动曲线 | `cubic-bezier(0.25, 0.1, 0.25, 1)` | `cursor.ts` `transitionDurationForDistance()` + `styles/index.scss` | 时长由距离分档，曲线保持一致 |
+| 长距离时长 | `TRANSITION.TIERS` 分档表 | `config.ts` `TRANSITION.TIERS` | Q7：短 0.07 / 中短 0.15 / 中 0.21 / 长 0.30 |
+| 呼吸动画 | `3s 1.5s ease-in-out infinite` | `styles/index.scss` `zentype-breathe` | 操作空闲后恢复呼吸动画 |
+| 边缘淡出区 | `EDGE_FADE.ZONE = 20` | `config.ts` `EDGE_FADE.ZONE` | 60 太早 → 30 → 20（用户逐步收紧） |
+| 离屏缩放 | `MIN_SCALE = 0.6` | `config.ts` `EDGE_FADE.MIN_SCALE` | 视觉提示但不消失 |
 | 边缘对齐 | 用 `editorRect` 不用裸视口 | `cursor.ts` `doUpdateCursor()` `edgeProximity.ts` | 顶部 ~55px 是 toolbar/breadcrumb，用视口会"顶部永不到淡出区看着瞬切" |
 | 直角矩形 | 删 `border-radius: 2px` | v2.1.0 commit | 用户偏好 |
 
@@ -140,13 +140,13 @@ src/
 
 #### 2.3.1 DOM 创建 + 生命周期（`cursor.ts` `createCursorElement()`）
 
-`createCursorElement()` 创建 `#zentype-cursor` 元素，整个插件生命周期内只创建一次（id 选择器查重）。**关键 hack**：元素进 DOM 那一刻即加 `.no-transition` class + `transform: translate3d(-9999px, -9999px, 0)`，避免 init 末端 `queueUpdate()` → 首次 `doUpdateCursor()` 之间约 16ms 窗口内光标在视口左上角闪现（TODO-1 修复）。
+`createCursorElement()` 创建 `#zentype-cursor` 元素，整个插件生命周期内只创建一次（id 选择器查重）。**关键处理**：元素进 DOM 那一刻即加 `.no-transition` class + `transform: translate3d(-9999px, -9999px, 0)`，避免 init 末端 `queueUpdate()` → 首次 `doUpdateCursor()` 之间约 16ms 窗口内光标在视口左上角闪现。
 
 #### 2.3.2 位置更新主循环（`cursor.ts` `doUpdateCursor()`）
 
 **rAF 节流**：`queueUpdate()` 用 `pendingFrame` 标志保证每帧最多一次 `doUpdateCursor()`。
 
-**`doUpdateCursor()` 8 步时序**：
+**`doUpdateCursor()` 核心视觉时序**：
 1. **暂停呼吸**（操作中不需要）
 2. **读取光标矩形**（`getCursorRect()` lineHeight × 1.05，垂直居中）
 3. **计算边缘距离**（`getEdgeProximity(rect, editorRect)`）
@@ -156,7 +156,9 @@ src/
 7. **强制布局同步**（`void cursorEl.offsetHeight` 让 no-transition 立即生效）
 8. **下一帧 rAF 移除 `.no-transition`** + 1.1s 后恢复呼吸（边缘附近不恢复）
 
-#### 2.3.3 边界检测 4 重（`utils/boundary.ts:34-153`）
+以上步骤后还会绑定/刷新当前编辑器的 ResizeObserver、滚动容器监听和悬浮窗拖动监听；键盘驱动的滚动标志由 300ms 冷却计时器清零。
+
+#### 2.3.3 边界检测 3 重 + 嵌套滚动容器回退（`utils/boundary.ts`）
 
 ```
 1) getActiveEditor() 校验
@@ -169,9 +171,6 @@ src/
    └ 拿 .protyle:not(.fn__none) .protyle-content 的 bounding rect
      检查光标坐标是否在其内
    └ 不在 → 嵌套滚动容器回退（findClosestScrollableElement + rect 检查）
-
-4) （round 3 移除）弹窗/对话框/搜索框硬性排除
-   └ 这些元素不包含 .protyle-content，被 AABB 自然拒绝
 ```
 
 返回 `AllowResult { allowed, cursorElement, isOuterElement, editorRect, reason? }`。
@@ -194,7 +193,7 @@ else:
 
 #### 2.3.5 边缘 arrow 指示器（默认禁用）
 
-`EDGE_ARROW.ENABLED = false`（`config.ts:101`，TODO-2）。代码保留作为 opt-in 入口。完整功能：`#zentype-edge-arrow` 三角形（CSS border-trick），光标离屏时按 nearest edge 上下方向显示在视口边缘。**风险**：用户测试后认为不需要，默认关闭。
+`EDGE_ARROW.ENABLED = false`（`config.ts`）。代码保留作为 opt-in 入口。完整功能：`#zentype-edge-arrow` 三角形（CSS border-trick），光标离屏时按 nearest edge 上下方向显示在视口边缘。**风险**：用户测试后认为不需要，默认关闭。
 
 ### 2.4 squish / bounce 动画（已下线）
 
@@ -202,7 +201,7 @@ v2.2.x 实施过"光标跨边界时 squish/bounce 关键帧动画"（CSS Transfo
 
 ### 2.5 配置入口
 
-`config.ts:24-30` `CURSOR_CONFIG`：
+`config.ts` `CURSOR_CONFIG`：
 
 ```typescript
 HEIGHT_RATIO: 1.05      // 光标高度 = lineHeight × 此倍数
@@ -210,7 +209,7 @@ BLINK_DELAY_MS: 1100     // 停止活动后多少毫秒恢复呼吸
 ```
 
 **未开放的开关**（CSS 编译期锁死）：
-- `SMOOTH_ENABLED` / `BLINK_ENABLED` / `APPLY_TO_TITLE` / `USE_IN_MOBILE` —— 见 `config.ts:123-132` 注释
+- `SMOOTH_ENABLED` / `BLINK_ENABLED` / `APPLY_TO_TITLE` / `USE_IN_MOBILE` —— 见 `config.ts` 文件末尾注释
 
 ---
 
@@ -221,44 +220,44 @@ BLINK_DELAY_MS: 1100     // 停止活动后多少毫秒恢复呼吸
 - 输入时光标停在**舒适区间 `[38%, 50%]`**（38% 黄金分割偏上 / 50% 中线）—— 不强制固定目标位
 - **区间内不触发滚动**：光标在 38%-50% 范围内自由输入，避免累积漂移带来的"跳跃感"
 - **区间外触发滚动**：低于 38% 或高于 50% 时，smoothScroll 把光标带回最近边界
-- 平滑滚动动画，**距离分档时长**（20px 内 180ms / 60px 内 260ms / 150px 内 360ms / 400px 内 480ms / 超出 600ms）
+- 平滑滚动动画，**距离分档时长**（<20px → 180ms / <60px → 260ms / <150px → 360ms / <400px → 480ms / ≥400px → 600ms）
 - **动画曲线**：`cubic-bezier(0.25, 0.1, 0.25, 1)`（与顺滑光标一致，自然、顺滑）
-- **动画续接**：连续输入时，光标滚动"接"上一段动画继续，不会每按一次键就重启
+- **滚动中请求重同步**：连续输入时不接管当前动画，动画结束后按最新光标位置重新检查
 - **1px 阈值**：即使光标只偏离 1px 也立即触发滚动
-- **块级插入动画**：按 Enter 新建块时，新块被自然带至中心；上方块跟视窗让位（位移 = smoothScroll 的 deltaY）；下方块用 FLIP 平滑补位（位移幅度 = 自然 reflow delta）；**全部是位移，无 opacity 渐变**
+- **块级插入动画**：按 Enter 新建块时，新块被自然带入舒适区；上方块跟视窗让位（位移 = smoothScroll 的 deltaY）；下方块用 FLIP 平滑补位（位移幅度 = 自然 reflow delta）；**全部是位移，无 opacity 渐变**
 - **smoothScroll 是曲线原语**：方向（deltaY）由调用方算，调用方决定"该不该滚 + 滚多少"；smoothScroll 只管曲线和时长
 - **暂停场景不滚动**：悬浮窗 / 只读 / 嵌入块（iframe/video/PDF）
 - **暂停渐隐**：多行选中时优雅暂停（光标本身不变）
 
 ### 3.2 关键决策
 
-| 决策 | 值 | 文件:行 | 理由 |
+| 决策 | 值 | 代码引用 | 理由 |
 |---|---|---|---|
-| **舒适区间** | `[0.38, 0.50]` | `config.ts:40-41` `TYPEWRITER_CONFIG.COMFORT_ZONE` | 38%-50% 都接受，不强制固定目标；区间内不滚 |
-| **阈值** | 1px | `typewriter.ts:114` | 避免累积漂移到 40px 突然跳 |
-| **时长分档** | 180/260/360/480/600 ms | `config.ts` `TYPEWRITER_SCROLL_DURATION_TIERS` | 微调跟手 / 远跳留时间感知（v2.3.0 从 `typewriter.ts:22-29` 移到 config） |
-| **动画曲线** | `cubic-bezier(0.25, 0.1, 0.25, 1)` | `config.ts` `TYPEWRITER_SCROLL_CURVE` | 与光标一致，自然顺滑 |
-| **动画续接** | 同一 target 追加 deltaY | `typewriter.ts:33-36` | 连续输入不"卡顿重启动画" |
-| **rAF debounce** | scheduleCheck 包裹 | `typewriter.ts:68-74` | 一次按键触发 4-5 事件合并为 1 次 checkAndScroll |
-| **container 缓存** | cachedContainer by cursorElement | `typewriter.ts:14-15,97-104` | 避免每次 DOM 遍历找滚动祖先 |
-| **滚动锚点** | `editorRect`（protyle-content rect） | `typewriter.ts:110-111` | 用裸 container rect 会算错位置（祖先元素可能更大） |
-| **选择器** | `isInAllowElements` 复用 cursor 的 | `typewriter.ts:6,89` | 已被 cursor 模块验证，分屏正确 |
-| **smoothScroll API** | `smoothScroll(el, {deltaY, duration, curve})` 曲线原语 | `typewriter.ts:31-66` 重构 | v2.3.0 改造：不规定方向，只规定曲线；调用方算 deltaY |
-| **块级插入动画** | FLIP | `typewriter.ts` `animateBlockShift()` | 参考 cursor.ts round 4 fix 模式：键盘事件打标 + 150ms cooldown（`pendingKeyboardUpdate`），下游 ResizeObserver/scroll handler 检测标志后跳过 `.no-transition` 保留跳移动画。`markBlockInsertPending` 已在 c5bfdc9 删除，由 `animateBlockShift` 直接取代。 |
-| **Q1 决策：高亮条** | **永久下线** | `config.ts:48-66` 注释 | 用户偏好"纯滚动"，删除 DOM/CSS 减小维护面。入口保留以备未来恢复 |
+| **舒适区间** | `[0.38, 0.50]` | `config.ts` `TYPEWRITER_CONFIG.COMFORT_ZONE` | 38%-50% 都接受，不强制固定目标；区间内不滚 |
+| **阈值** | 1px | `typewriter.ts` `Math.abs(deltaY) >= 1` | 避免无意义的小幅滚动 |
+| **时长分档** | 180/260/360/480/600 ms | `config.ts` `TYPEWRITER_CONFIG.SCROLL_DURATION_TIERS` | `durationForDistance()` 按距离选择时长 |
+| **FLIP 动画曲线** | `cubic-bezier(0.25, 0.1, 0.25, 1)` | `config.ts` `TYPEWRITER_CONFIG.SCROLL_CURVE` | 用于块位移 FLIP 的 CSS transition |
+| **滚动中请求处理** | 新请求标记重同步，不合并到当前动画 | `typewriter.ts` `isScrolling()` / `scrollResyncPending` | 避免连续输入导致滚动动画和边界 clamp 竞态 |
+| **rAF debounce** | `scheduleCheck()` 包裹 | `typewriter.ts` `scheduleCheck()` | 合并同一帧内的 selection/input/resize 等触发 |
+| **container 缓存** | `cachedContainer` 按 cursorElement 缓存 | `typewriter.ts` `checkAndScroll()` | 避免每次 DOM 遍历寻找滚动祖先 |
+| **滚动锚点** | `editorRect`（protyle-content rect） | `typewriter.ts` `checkAndScroll()` | 用裸 container rect 会算错位置（祖先元素可能更大） |
+| **选择器** | 复用 `isInAllowElements` | `typewriter.ts` `checkAndScroll()` | 与 cursor 共用活跃编辑器和边界判断 |
+| **smoothScroll API** | `smoothScroll(el, { deltaY, duration?, easing? })` | `typewriter.ts` `smoothScroll()` | 调用方计算方向和距离；默认使用 `easeOutCubic` |
+| **块级插入动画** | FLIP | `typewriter.ts` `animateBlockShift()` | capture 阶段采样，延迟两帧等布局稳定；键盘标志窗口为 300ms |
+| **Q1 决策：高亮条** | **永久下线** | `config.ts` 高亮条注释块 | 用户偏好"纯滚动"，删除 DOM/CSS 减小维护面。入口保留以备未来恢复 |
 
 ### 3.3 代码实现逻辑
 
-#### 3.3.1 初始化（`typewriter.ts:119-139`）
+#### 3.3.1 初始化（`typewriter.ts` `initTypewriter()`）
 
 ```typescript
 initTypewriter():
-  监听 2 个 document 事件: selectionchange/resize（v2.3.1 移除 4 个冗余事件：keyup/keydown/click/mouseup）
-  所有事件都包裹在 scheduleCheck() (rAF debounce)
-  inputMode.setBothOn()  // 初始化时立即激活（idempotent）
+  监听 selectionchange / resize / input / compositionstart / compositionend / click / keydown
+  selectionchange / resize 等检查类事件通过 scheduleCheck() 合并
+  inputModeTriggers.onTextInput()  // 初始化时立即激活共享状态（幂等）
 ```
 
-#### 3.3.2 主循环（`typewriter.ts:76-117`，v2.3.0 更新）
+#### 3.3.2 主循环（`typewriter.ts` `checkAndScroll()`，v2.3.0 更新）
 
 ```
 checkAndScroll():
@@ -272,13 +271,13 @@ checkAndScroll():
   6) editorHeight = editorRect.bottom - editorRect.top
      cursorPct = (rect.y - editorRect.top) / editorHeight  // 0~1
      // v2.3.0：舒适区间 [COMFORT_ZONE[0], COMFORT_ZONE[1]]
-     if cursorPct < COMFORT_ZONE[0]:
-       deltaY = (COMFORT_ZONE[0] - cursorPct) × editorHeight  // 滚到 38%
-     elif cursorPct > COMFORT_ZONE[1]:
-       deltaY = (COMFORT_ZONE[1] - cursorPct) × editorHeight  // 滚到 50%
-     else:
-       deltaY = 0  // 区间内，不滚
-  7) abs(deltaY) >= 1? smoothScroll(container, { deltaY, duration: 'auto', curve: TYPEWRITER_SCROLL_CURVE })
+      if cursorPct < COMFORT_ZONE[0]:
+        deltaY = (cursorPct - COMFORT_ZONE[0]) × editorHeight  // 向上滚，让光标下移到 38%
+      elif cursorPct > COMFORT_ZONE[1]:
+        deltaY = (cursorPct - COMFORT_ZONE[1]) × editorHeight  // 向下滚，让光标上移到 50%
+      else:
+        deltaY = 0  // 区间内，不滚
+  7) abs(deltaY) >= 1? smoothScroll(container, { deltaY })
 ```
 
 **v2.3.0 行为变化**：
@@ -291,40 +290,37 @@ checkAndScroll():
 - `cachedContainer` 缓存滚动容器（仅 cursorElement 变化时失效）
 - `smoothScroll` 内部 rAF，不阻塞主线程
 
-#### 3.3.3 续接动画（`typewriter.ts:31-66`）
+#### 3.3.3 滚动动画门禁与重同步（`typewriter.ts` `smoothScroll()`）
 
 ```typescript
-smoothScroll(target, deltaY):
-  if (pendingScroll !== null && pendingScrollTarget === target):
-    pendingScrollEnd += deltaY  // 续接：只更新终点
+checkAndScroll():
+  if (pendingScroll !== null):
+    scrollResyncPending = true
     return
-  // 否则取消旧动画，启动新动画
-  pendingScrollTarget = target
+
+smoothScroll(target, { deltaY, duration?, easing? }):
   pendingScrollEnd = target.scrollTop + deltaY
   startTime = performance.now()
-  duration = durationForDistance(abs(deltaY))
-  step() rAF 循环 → 插值到 currentEnd（每帧读最新值）
+  duration = duration ?? durationForDistance(abs(deltaY))
+  step() rAF 循环 → 插值到 pendingScrollEnd
+  动画结束后若 scrollResyncPending=true，则清理坐标缓存并重新 scheduleCheck()
 ```
 
-**效果**：连续输入 10 个字符，每个 caret 移动 5px → 每帧把 `pendingScrollEnd += 5` → 动画一直跑，caret 流畅跟随；不会每个字符"cancel + restart"造成 stutter。
+**效果**：滚动动画期间的新检查不会直接接管当前动画，而是记录一次重同步请求；当前动画结束后再按最新光标位置检查，避免连续输入造成滚动动画竞态。
 
 #### 3.3.4 距离分档时长（v2.3.0 移到 `config.ts`）
 
-**v2.2.1**：写在 `typewriter.ts:22-29` 的 `durationForDistance()` 函数中。
-**v2.3.0**：移到 `config.ts` 的 `TYPEWRITER_SCROLL_DURATION_TIERS`，用户可直接调。
+**v2.2.1**：写在 `typewriter.ts` 的 `durationForDistance()` 函数中。
+**当前实现**：时长数组位于 `config.ts` 的 `TYPEWRITER_CONFIG.SCROLL_DURATION_TIERS`，用户可直接调。
 
 ```typescript
-// config.ts 新增
-TYPEWRITER_SCROLL_DURATION_TIERS = [
-  { maxDist: 20,        duration: 120 },  // 微调：快速
-  { maxDist: 60,        duration: 180 },  // 短距：平滑
-  { maxDist: 150,       duration: 260 },  // 中距：跟手
-  { maxDist: 400,       duration: 360 },  // 长距：可观察
-  { maxDist: Infinity,  duration: 500 },  // 远跳：留时间感知
-];
+// config.ts
+SCROLL_DURATION_TIERS: [180, 260, 360, 480, 600]
+// typewriter.ts 的 durationForDistance() 使用以下距离档位：
+// <20 → 180，<60 → 260，<150 → 360，<400 → 480，≥400 → 600（ms）
 ```
 
-`typewriter.ts` 改为读 config 表，不再硬编码。
+`typewriter.ts` 改为读取 config 中的时长数组；距离阈值仍由 `durationForDistance()` 固定为 `<20 / <60 / <150 / <400 / ≥400`。
 
 ### 3.4 暂停场景（`utils/edgeCases.ts`）
 
@@ -336,7 +332,7 @@ shouldPauseTypewriter():  // 仅 typewriter
   isInPopup() || isReadMode() || isInEmbedBlock()
 ```
 
-**`isReadMode()` 修复**（`edgeCases.ts:16-31`）：检查 `cursor.isContentEditable`（不是 `.protyle-content.isContentEditable`），兼容只读文档/标题。原 bug 修复 commit `2808caa`。
+**`isReadMode()` 修复**（`edgeCases.ts`）：检查 `cursor.isContentEditable`（不是 `.protyle-content.isContentEditable`），兼容只读文档/标题。原 bug 修复 commit `2808caa`。
 
 **`isInEmbedBlock()`**：`cursor.closest("iframe, video, [data-type='NodeIFrame'], [data-type='NodeVideo'], [data-type='NodePDF']")`。
 
@@ -346,11 +342,11 @@ shouldPauseTypewriter():  // 仅 typewriter
 
 **理由**：
 - v1 时代高亮条是"伪打字机"效果（光标位置 + 一条细横线）
-- 真打字机只需要"光标始终在 38%"，高亮条视觉冗余
+- 真打字机只需要舒适区间内的稳定滚动，高亮条视觉冗余
 - Neo-Plus 等参考实现也不靠它
 - 删除后 `typewriter.ts` 从 ~220 行减到 160 行，维护面更小
 
-**未来恢复路径**（`config.ts:48-66` 注释）：
+**未来恢复路径**（`config.ts` 中的高亮条注释块）：
 1. `typewriter.ts` 重新引入 `createHighlightElement()` + `updateHighlight()`
 2. `initTypewriter()` 创建 div，`destroyTypewriter()` 清理
 3. `checkAndScroll()` 在每条 early-return 路径清 `.visible`
@@ -358,15 +354,12 @@ shouldPauseTypewriter():  // 仅 typewriter
 
 ### 3.6 配置入口（v2.3.0 更新）
 
-`config.ts:38-50` `TYPEWRITER_CONFIG`：
+`config.ts` `TYPEWRITER_CONFIG`：
 
 ```typescript
 COMFORT_ZONE: [0.38, 0.50]                        // 舒适区间（v2.3.0 新增，替换 TARGET_RATIO）
 SCROLL_DURATION_TIERS: [180, 260, 360, 480, 600]  // 距离分档 ms（v2.3.0 从 typewriter.ts 移入）
 SCROLL_CURVE: 'cubic-bezier(0.25, 0.1, 0.25, 1)' // 动画曲线（v2.3.0 新增，与光标一致）
-TARGET_RATIO: 0.38   // v2.2.1 旧字段，保留兼容（实际不再使用）
-THRESHOLD: 40        // （保留，typewriter.ts 不再使用）
-DURATION: 400        // （保留，typewriter.ts 不再使用）
 ```
 
 ### 3.7 块级插入动画（v2.3.0 新增）
@@ -374,7 +367,6 @@ DURATION: 400        // （保留，typewriter.ts 不再使用）
 **触发条件**：
 - Enter 在行尾 / 行中（新建空块，光标移入新块）
 - Backspace 在行首（当前块合并到上一块）
-- 粘贴多行内容（一次插入多块）
 
 **问题**：之前的实现里，按 Enter 后新块凭空出现，下方块瞬间跳到新位置（编辑器原生 reflow），视觉突兀。
 
@@ -387,7 +379,7 @@ DURATION: 400        // （保留，typewriter.ts 不再使用）
 注册点（`typewriter.ts` 事件 handler）：
 ```typescript
 keydown Enter / 行首 Backspace:
-  animateBlockShift(editor);  // FLIP 入口
+  animateBlockShift(editor, selectionRange);  // FLIP 入口
   // 延迟两帧等 SiYuan 布局收敛后再触发滚动对齐
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
@@ -399,10 +391,10 @@ keydown Enter / 行首 Backspace:
 
 #### 3.7.2 FLIP 平滑 reflow（`animateBlockShift`）
 
-让"下方块被自然推下去"的瞬间不突兀 —— 用 FLIP（First-Last-Invert-Play）技术。当前实现已优化为**围绕当前选区起止块采样前后 sibling 窗口 + 沿祖先层级采样**（默认半径 `FLIP_BLOCK_RADIUS = 30`），不再全编辑器扫描：
+让"下方块被自然推下去"的瞬间不突兀 —— 用 FLIP（First-Last-Invert-Play）技术。当前实现正常路径会**围绕当前选区起止块采样前后 sibling 窗口 + 沿祖先层级采样**（默认半径 `FLIP_BLOCK_RADIUS = 30`），避免长文档全量扫描；选择区容器异常时保留全量查询作为 fallback：
 
 ```typescript
-function animateBlockShift(editor: HTMLElement): void {
+function animateBlockShift(editor: HTMLElement, range: Range): void {
   // First：DOM 变更前快照采样窗口内块位置（围绕选区 sibling + 祖先层级）
   // 下一帧：DOM 变更后读新位置
   // Invert：把块"反推"到旧位置（视觉上看起来没动）
@@ -419,15 +411,15 @@ function animateBlockShift(editor: HTMLElement): void {
 |---|---|---|
 | **上方块** | smoothScroll（视窗向下滚 → 上方块向上滑出视窗） | 位移（自然让位） |
 | **下方块** | smoothScroll（向上滑）+ FLIP（向下补 reflow delta） | 位移（双源合成） |
-| **新块** | smoothScroll（被带到中心），opacity 默认 1 | 位移（无淡入） |
+| **新块** | smoothScroll（被带到舒适区），opacity 默认 1 | 位移（无淡入） |
 
-**没有 opacity 渐变**。新块默认 opacity 1，直接出现，靠 smoothScroll 把它带到中心。
+**没有 opacity 渐变**。新块默认 opacity 1，直接出现，靠 smoothScroll 把它带到舒适区。
 
-#### 3.7.4 跳过条件
+#### 3.7.4 触发范围与暂停条件
 
-- 距离上次块级变化 < 100ms → 跳过（rapid Enter / paste 多行）
-- `isReadMode()` → 全跳过
-- `isInPopup()` → 全跳过
+- 仅 Enter，以及 Backspace 位于块首或跨块选区时进入 FLIP 快照
+- `isReadMode()` / `isInPopup()` 等暂停条件会阻止后续 typewriter 滚动对齐
+- 连续 FLIP 调用会取消上一轮 cleanup，避免旧定时器清除新一轮的 transform
 
 #### 3.7.5 与 ripple 的协作
 
@@ -454,7 +446,7 @@ function animateBlockShift(editor: HTMLElement): void {
 
 ### 4.2 关键决策
 
-| 决策 | 值 | 文件:行 | 理由 |
+| 决策 | 值 | 代码引用 | 理由 |
 |---|---|---|---|
 | **默认 ON** | 初始化时启用共享的打字机/涟漪状态 | `typewriter.ts:599-601` | 与模块默认启用状态一致 |
 | **句级粒度**（v2.5.0 改 Highlight API） | 按 `.?!。？！…` 切句，小数点保护 | `ripple.ts` `splitSentences` / `applySentenceHighlight` | 用户偏好"看清整句"，不只是块；v2.5.0 废弃 `getSentences`/span 包裹 |
@@ -470,13 +462,15 @@ function animateBlockShift(editor: HTMLElement): void {
 
 ### 4.3 代码实现逻辑
 
-#### 4.3.1 模式状态机（`ripple.ts:24`）
+#### 4.3.1 模式状态（`ripple.ts`）
 
 ```typescript
-let mode: RippleMode = "text";   // "text" | "mouse" | "paused"
+let active = false;
+let initialized = false;
+let pendingFrame: number | null = null;
 ```
 
-`RippleMode` 类型（`types/index.ts:3`）保留 `"mouse"` 变体以备未来恢复时不破坏类型契约。
+当前 Ripple 通过 `active`、`initialized` 和 `inputMode.focusActive` 控制生命周期与是否应用效果；不再维护独立的 `text/mouse/paused` 模式状态。`RippleMode` 类型仍保留在 `types/index.ts`，仅作为历史/未来扩展占位，当前实现不使用它。
 
 #### 4.3.2 主循环（`applyRipple` + `applyBlockOpacity` + `applySentenceHighlight`，v2.6.1 更新）
 
@@ -568,46 +562,22 @@ const SENTENCE_FADE_OUT_HIGHLIGHT = "zt-sentence-fade-out";
 
 > **v2.6.0 移除**：`isRippleTargetBlock`/`depthOf`/`RIPPLE_TARGET_BLOCK_TYPES`/`RIPPLE_SKIP_BLOCK_TYPES`/`RIPPLE_SKIP_SELECTORS` 全部删除。块级 opacity 现在直接作用于 `container.children`（所有带 `data-node-id` 的顶层块），不再区分 block type。
 
-**性能**：`applySentenceHighlight` 只在 focus 激活 + selectionchange 时跑（被 `pendingFrame` rAF 节流），不每帧扫。`TreeWalker` 遍历文本节点 + 正则切句，开销与旧 span 方案同级，但省掉了 `extractContents`/`insertNode` 的 DOM 读写 + 选区保存/恢复。
+**性能**：`applySentenceHighlight` 只在 focus 激活后由 `selectionchange`、`input` 或当前块 mutation 触发（被 `pendingFrame` rAF 节流），不每帧扫。`TreeWalker` 遍历文本节点 + 正则切句，开销与旧 span 方案同级，但省掉了 `extractContents`/`insertNode` 的 DOM 读写 + 选区保存/恢复。
 
-#### 4.3.4 列表块动态算法（v2.3.0 新增，Q5 = C）
+#### 4.3.4 相邻块视觉权重（v2.6.0 简化）
 
 ```typescript
 // 视觉权重：块在视窗中可见高度 / 视窗高度
-function visualWeightOf(node: HTMLElement): number {
-  const rect = node.getBoundingClientRect();
-  const editor = node.closest<HTMLElement>('.protyle-wysiwyg');
-  if (!editor) return 1.0;
-  const editorRect = editor.getBoundingClientRect();
-  const visible = Math.min(rect.bottom, editorRect.bottom) - Math.max(rect.top, editorRect.top);
-  return Math.max(0, Math.min(1, visible / editorRect.height));
-}
-
-// 列表深度：数 data-subtype="o/u/t" 祖先个数
-function depthOf(node: HTMLElement): number {
-  let depth = 0;
-  let el: HTMLElement | null = node;
-  while (el && el !== document.body) {
-    if (el.dataset.subtype === 'o' || el.dataset.subtype === 't' || el.dataset.subtype === 'u') {
-      depth++;
-    }
-    el = el.parentElement;
-  }
-  return depth;
-}
-
-// 深度系数：depth=0 → 1.0, depth=1 → 0.95, depth=2 → 0.90, ... 最低 0.7
-function depthFactor(depth: number): number {
-  return Math.max(0.7, 1.0 - depth × DEPTH_FACTOR);
+function visualWeightOf(block: HTMLElement, editorRect: DOMRect): number {
+  const rect = block.getBoundingClientRect();
+  const visibleTop = Math.max(rect.top, editorRect.top);
+  const visibleBottom = Math.min(rect.bottom, editorRect.bottom);
+  const visible = Math.max(0, visibleBottom - visibleTop);
+  return Math.max(0, Math.min(1, visible / (editorRect.height || 1)));
 }
 ```
 
-**为什么不简单按 siblings 距离**：
-- v2.2.1 用 siblings 距离（如 `index = 5`），对高度差异大的列表项视觉感知不准确
-- v2.3.0 加权"视觉占比权重 w"，匹配人眼"看起来多大"
-- 列表项作为兄弟节点时，w 接近 1.0；远离视窗时 w 趋近 0（更暗）
-
-> **v2.6.0 更新**：`depthOf`/`depthFactor` 已移除。现在 opacity 仅由 `BLOCK_LEVELS` 梯度 + `visualWeightOf` 视觉权重决定，不再有列表深度系数。嵌套块遵循"只设顶层块 opacity"原则，嵌套子项继承父级 opacity。
+当前实现只对 distance=1 的相邻顶层块计算视觉权重；distance≥2 的块直接使用 1.0，避免远块的布局读取。列表深度和块类型系数已移除；嵌套块继承其顶层块的 opacity。
 
 #### 4.3.5 块距离计算（v2.6.0 简化）
 
@@ -617,20 +587,24 @@ function depthFactor(depth: number): number {
 
 v2.5.0 重写时删除了 `ripple.recompute` 导出。块级插入（Enter / Backspace）后光标移入新块 → 触发 `selectionchange` → `applyRipple` 自动重算，无需 typewriter 显式调用。typewriter 的 `animateBlockShift` 只负责 FLIP 位移 + 延迟两帧 `checkAndScroll` 对齐舒适区，不再 import ripple（见 §3.7.5）。
 
-#### 4.3.7 触发链（`ripple.ts:265-275`，v2.5.0 简化）
+#### 4.3.7 触发链（`ripple.ts` `initRipple()`）
 
 ```typescript
-onSelectionChange():  // 唯一注册的事件
+onSelectionChange():
   applyRipple()       // rAF 节流；内部按 inputMode + shouldPause 决定 apply/clearAll
+
+onInput():
+  applyRippleNow()    // 先立即刷新，再排队一次 rAF 刷新
+  applyRipple()
 ```
 
-**注册的事件**：仅 `selectionchange`（ripple.ts:274）。v2.5.0 重写时移除了旧 `click` / `keyup` 注册——`selectionchange` 已覆盖打字 / 点击 / 键盘移动 / IME / 粘贴所有场景。退出场景（wheel / blur / click 关闭 focus）由 inputMode 订阅触发 `clearAll()`（P1-1，ripple.ts:279-281）。
+**注册的事件**：`selectionchange` 和 `input`。两者都通过已有的 rAF 队列合并刷新；`input` 额外先立即刷新一次，以缩短 SiYuan inline tokenizer 重渲染后的空窗。退出场景（wheel / blur / click 关闭 focus）由 inputMode 订阅触发 `clearAll()`。
 
 ### 4.4 Q3 mouse 模式 — 已移除（入口可恢复）
 
 **设计意图**（v2.0 时代）：只读模式 / 空闲 2s / 鼠标移到其他块时 → 涟漪从"跟随光标"切到"跟随鼠标"。
 
-**决策历史**：2026-06-30 暂停（代码注释 + 配置保留）；**v2.5.0 重写时彻底移除**——`onMouseMove` / `MOUSE_THROTTLE` / `IDLE_THRESHOLD` / 滚动条缓冲 / `RippleMode` 类型随 ripple.ts 重写删除，config.ts 的 `MOUSE_THROTTLE` / `IDLE_THRESHOLD` 也一并清理。ripple.ts 现仅 `selectionchange` + inputMode 订阅。
+**决策历史**：2026-06-30 暂停（代码注释 + 配置保留）；**v2.5.0 重写时彻底移除**——`onMouseMove` / `MOUSE_THROTTLE` / `IDLE_THRESHOLD` / 滚动条缓冲随 ripple.ts 重写删除，config.ts 的 `MOUSE_THROTTLE` / `IDLE_THRESHOLD` 也一并清理。`RippleMode` 类型仍保留在共享类型文件中，但当前 Ripple 不使用它；ripple.ts 现注册 `selectionchange` + `input`，并订阅 inputMode。
 
 **未来恢复路径**（需重建，非取消注释）：
   1. `ripple.ts` 重新实现 `onMouseMove`（视觉权重 + throttle）
@@ -643,7 +617,7 @@ onSelectionChange():  // 唯一注册的事件
 
 ### 4.5 配置入口（v2.6.0 更新）
 
-`config.ts:52-61` `RIPPLE_CONFIG`：
+`config.ts` `RIPPLE_CONFIG`：
 
 ```typescript
 BLOCK_LEVELS: [1.0, 0.4, 0.2, 0.15, 0.1, 0.05]  // 块级 opacity 梯度（按距离衰减，v2.6.0 替换 SENTENCE_LEVELS）
@@ -708,16 +682,16 @@ setBothOff()    // 关闭两者
 **Keep ON 触发器**：横向导航（←/→）/ 边界导航（Home/End）/ 取消（Esc）—— 不改变用户"主动编辑"意图。
 
 **v2.3.0 修复历史**：
-- ✅ **wheel / touchmove 退出 typewriter/focus 不生效**（commit `7a368db`）：handler 加 `{ capture: true }`（与 keydown/scroll/input 一致）。这本来是早期设计意图（参见 `docs/archive/plans/cursor-optimization-plan.md:607`），但在 v2.2.0 focus-mode 重构时 capture 被无意遗漏——本次回归修复。剩余两条（嵌套 iframe 排查、暂停 debounce）暂未观察到，可作为后续优化项。
+- ✅ **wheel / touchmove 退出 typewriter/focus 不生效**（commit `7a368db`）：handler 加 `{ capture: true }`（与 keydown/scroll/input 一致）。这本来是早期设计意图（见已归档的 cursor 优化计划），但在 v2.2.0 focus-mode 重构时 capture 被无意遗漏——本次回归修复。剩余两条（嵌套 iframe 排查、暂停 debounce）暂未观察到，可作为后续优化项。
 
 ### 5.3 默认值 + 持久化
 
 | 配置 | 值 | 理由 |
 |---|---|---|
-| 默认状态 | **OFF** | 设计 §2.7 "Default state: OFF"；聚焦是"主动行为" |
-| 持久化 | **per-session**（无 localStorage） | 设计 §2.7 "Persistence: per-session (no localStorage)" |
+| 默认状态 | **cursor / typewriter / ripple 均 ON** | `index.ts` 默认配置均为 `true`；初始化 typewriter 时立即开启共享状态 |
+| 持久化 | **插件数据持久化** | `index.ts` 通过 `loadData/saveData` 保存 `zentype-enabled`；用户手动切换后的状态会跨会话保留 |
 | 空闲超时 | **无** | 设计 §2.3 "No idle timeout" —— typewriter 自然停止（光标不动就不滚） |
-| UI 反馈 | **无** | 设计 §2.7 "UI feedback: none" —— ripple + （未来）高亮条是自然反馈 |
+| UI 反馈 | **有** | 顶栏银河图标通过 `zentype-topbar-icon--on/off` 反映 typewriter + ripple 是否同时开启 |
 
 ### 5.4 订阅机制
 
@@ -729,13 +703,13 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 
 ### 5.5 重置（onunload）
 
-`index.ts:197` 调用 `inputMode.reset()` —— focusActive/typewriterActive 清零 + subscribers 清空。
+`index.ts` 的生命周期清理调用 `inputMode.reset()` —— focusActive/typewriterActive 清零 + subscribers 清空。
 
 ---
 
 ## 6. 命令面板
 
-当前提供 3 个命令（v2.6.2）：
+当前提供 3 个命令（v2.6.5）：
 
 | 命令 langKey | 回调 | 效果 |
 |---|---|---|
@@ -750,33 +724,15 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 - 顶栏图标（银河系 SVG，`index.ts`）：一键 `toggleType()` 联合切换打字机 + 涟漪（cursor 常开）
 - 思源 → 设置 → 插件 → zenType → 关闭/启用插件（触发 onunload+onload 重载）
 
-**顶栏图标设计**（v2.3.0）：
-```svg
-<svg viewBox="0 0 24 24">
-  <defs>
-    <filter id="mist"><feGaussianBlur stdDeviation="0.4" /></filter>
-  </defs>
-  <circle cx="12" cy="12" r="6.5" fill="none"
-          stroke="currentColor" stroke-width="1.6"
-          filter="url(#mist)" />
-</svg>
-```
+**顶栏图标设计**（当前实现）：
+- `index.ts` 内联一个银河系 SVG，容器通过 `zentype-topbar-icon--on/off` 表示联合状态
+- 开启态让行星组以 9s / 13s 两档旋转；关闭态只降低饱和度和透明度
+- 点击图标调用 `toggleType()`，只联合切换打字机 + 涟漪，顺滑光标始终开启
 
-```scss
-@keyframes breathe-ring {
-  0%, 100% { opacity: 0.65; }
-  50%      { opacity: 1; }
-}
-.topbar-icon { animation: breathe-ring 3s ease-in-out infinite; }
-.topbar-icon:hover { animation-play-state: paused; opacity: 1; }
-```
-
-**雾蒙蒙感**：靠 `feGaussianBlur stdDeviation=0.4` 实现 SVG 边缘模糊；hover 时停止呼吸动画 + 完整清晰。**单一圆环**，不是同心圆（用户明确反对三层同心圆）。
-
-**为什么 4 个不是 2 个 toggle**：
-- Q2 选 A（绑定）→ 2 个 toggle 不能表达"开 typewriter 但不开 focus"
-- 4 个 enable/disable 覆盖所有 4 种状态组合
-- 命令名带语义（"启用 X"vs"禁用 X"）用户更清楚
+**为什么是 3 个 toggle 命令**：
+- `toggle-typewriter` 和 `toggle-ripple` 支持单独切换
+- `toggle-type` 提供顶栏图标使用的联合切换
+- 光标不参与联合开关，始终由插件初始化
 
 ---
 
@@ -784,13 +740,13 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 
 | 场景 | 顺滑光标 | 打字机 | 涟漪 | 实现 |
 |---|---|---|---|---|
-| 打开文档，不输入 | ✅ 显示（最后位置 + 静态） | ❌ 不滚 | ❌ 不显示 | typewriter + ripple 都在 `!isFocusActive()/!isTypewriterActive()` 时早退 |
+| 打开文档，不输入 | ✅ 显示（最后位置 + 静态） | ✅ 已激活，越界时在后续检查中对齐 | ✅ 已激活（有有效光标/当前块时应用） | `initTypewriter()` 调 `onTextInput()`；`initRipple()` 启用模块 |
 | 多行选中 | ✅ 瞬跳到选区末尾 | ❌ 暂停 | ❌ 暂停 | `shouldPauseFocusAndTypewriter()` returns true |
 | 悬浮窗编辑 | ✅ 显示 | ❌ 暂停 | ❌ 暂停 | `isInPopup()` 检测 `.block__popover--open` |
-| 只读模式 | ❌ 不显示 | ❌ 暂停 | ❌ 不显示 | `isReadMode()` 检查 `cursor.isContentEditable` |
-| 嵌入块（iframe/video/PDF） | ❌ 不显示 | ❌ 跳过 | ✅ 作为 1 个渐淡单位 | `isInEmbedBlock()` + ripple `querySelector('[data-node-id], iframe, video')` |
-| 嵌套块（v1 简化） | ✅ 显示 | ✅ 滚到 38% | ⚠️ 只渐淡直接父层 | siblings 距离计算，不递归 |
-| 切 Tab | ✅ 切换光标 | ❌ 退出 | ❌ 退出 | `index.ts:121-122` `setBothOff()` |
+| 只读模式 | ❌ 不显示 | ❌ 暂停 | ⚠️ 不主动应用只读门禁 | `isReadMode()` 只在 typewriter 路径检查；Ripple 主要按 focus 状态、选区和悬浮窗清理 |
+| 嵌入块（iframe/video/PDF） | ❌ 不显示 | ❌ 跳过 | ✅ 作为 1 个渐淡单位 | `isInEmbedBlock()`；Ripple 按当前块的顶层 block 处理 |
+| 嵌套块（v1 简化） | ✅ 显示 | ✅ 滚到舒适区间 | ⚠️ 只按顶层块渐淡，嵌套块继承 | `container.children` 距离计算，不递归 |
+| 切 Tab | ✅ 切换光标 | ❌ 退出 | ❌ 退出 | `index.ts` `switch-protyle` handler → `onSwitchProtyle()` |
 | 失焦 | ✅ 停在最后位置 | ❌ 退出 | ❌ 退出 | `cursor/events.ts` `blur → inputModeTriggers.onBlur()` |
 | 滚轮 / 触屏拖动 | ✅ 跟随 + 暂停呼吸 | ❌ 退出 | ❌ 退出 | `cursor/events.ts` wheel/touchmove → `inputModeTriggers.onWheelOrTouchMove()` |
 | ↑ / ↓ / PageUp / PageDown | ✅ 移动 | ❌ 退出 | ❌ 退出 | `cursor/events.ts` keydown → `inputModeTriggers.onVerticalNavigationKey()` |
@@ -799,16 +755,16 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 | 方向键 ↑ 后再 ← | ✅ 移动 | ❌ 保持 OFF | ❌ 保持 OFF | 状态机单调退出 |
 | 鼠标拖蓝选文本 | ✅ 瞬跳 | ❌ 退出 | ❌ 退出 | `cursor/events.ts` mouseDown 记录 → mouseup 比对 → `inputModeTriggers.onDragSelection()` |
 | 右键菜单 | ✅ 停在最后位置（静态） | ✅ 不影响 | ✅ 不影响 | `cursor.ts` `onMenuOpened → pauseBreathe()` |
-| 移动端标题编辑 | ❌ 不显示 | ⏸ 推迟 | ⏸ 推迟 | **v2.3.0 推迟**：cursor 模块 OFF-LIMITS，`boundary.ts:84-87` 标题分支返回 `allowed:true` 但无 `editorRect` → typewriter 早退；ripple 通过 `closest('.protyle-wysiwyg')` 跳过标题。实现 title 支持需修改 boundary.ts（属于 cursor 模块），待 cursor 模块解除 OFF-LIMITS 后实现。 |
+| 移动端标题编辑 | ❌ 不显示 | ⚠️ 走通用边界 fallback，未单独处理 | ❌ 不参与 | `cursor.ts` 有移动端标题 guard；`boundary.ts` 标题分支提供 `editorRect`；ripple 仍要求 `.protyle-wysiwyg` 当前块 |
 | 移动端键盘弹出/收起 | ✅ 重定位 | ✅ 重定位 | ✅ 重定位 | `mobile-keyboard-show/hide` EventBus |
 | 分屏（split-screen） | ✅ 锁定活跃编辑器 | ✅ 锁定活跃编辑器 | ✅ 锁定活跃编辑器 | `isInAllowElements` 第一重 `getActiveEditor()` |
-| AV 数据库块 | ❌ 不显示 | ❌ 不滚 | ❌ 不参与 | `boundary.ts:69-76` `.av/.av__mask/.av__cursor` 排除 |
+| AV 数据库块 | ❌ 不显示 | ❌ 不滚 | ❌ 不参与 | `boundary.ts` 排除 `.av/.av__mask/.av__cursor` |
 
 ---
 
 ## 8. 配置参数（`src/config.ts`）
 
-### 8.1 完整参数表（v2.5.0 更新）
+### 8.1 完整参数表（v2.6.5 更新）
 
 | 模块 | 配置块 | 参数 | 默认 | 说明 |
 |---|---|---|---|---|
@@ -816,8 +772,8 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 | 顺滑光标 | `CURSOR_CONFIG` | `BLINK_DELAY_MS` | `1100` | 停止活动后多少毫秒恢复呼吸 |
 | 顺滑光标 | `EDGE_FADE` | `ZONE` | `20` | 距编辑器顶/底多少像素内淡出 |
 | 顺滑光标 | `EDGE_FADE` | `MIN_SCALE` | `0.6` | 完全离屏时最小缩放 |
-| 顺滑光标 | `TRANSITION` | `TIERS` | `[0.07, 0.15, 0.21, 0.30]` s | 距离分档过渡时长 |
-| 顺滑光标 | `EDGE_ARROW` | `ENABLED` | `false` | 边缘箭头总开关（TODO-2 默认关闭） |
+| 顺滑光标 | `TRANSITION` | `TIERS` | `≤30→0.07s, ≤150→0.15s, ≤500→0.21s, >500→0.30s` | 距离分档过渡时长 |
+| 顺滑光标 | `EDGE_ARROW` | `ENABLED` | `false` | 边缘箭头总开关（当前默认关闭） |
 | 顺滑光标 | `EDGE_ARROW` | `OPACITY` | `0.6` | 箭头透明度 |
 | 顺滑光标 | `EDGE_ARROW` | `SIZE` | `12` | 三角形大小（px） |
 | 顺滑光标 | `EDGE_ARROW` | `OFFSET` | `8` | 距视口边缘距离（px） |
@@ -825,6 +781,8 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 | 打字机 | `TYPEWRITER_CONFIG` | **`COMFORT_ZONE`** | **`[0.38, 0.50]`** | **v2.3.0：舒适区间 [低, 高]；区间内不触发滚动** |
 | 打字机 | `TYPEWRITER_CONFIG` | **`SCROLL_DURATION_TIERS`** | **`[180, 260, 360, 480, 600]` ms** | **v2.3.0：距离分档时长（从 typewriter.ts 移入 config）** |
 | 打字机 | `TYPEWRITER_CONFIG` | **`SCROLL_CURVE`** | **`cubic-bezier(0.25, 0.1, 0.25, 1)`** | **v2.3.0：动画曲线（与光标一致）** |
+| 打字机 | `TYPEWRITER_CONFIG` | `TYPING_GAP_MS` | `400` | 连续键入与停顿的 debounce 阈值 |
+| 打字机 | `TYPEWRITER_CONFIG` | `CLICK_CENTER_LOW` / `CLICK_CENTER_HIGH` | `0.25` / `0.75` | 点击后超出此区间才主动居中到 0.5 |
 | 涟漪 | `RIPPLE_CONFIG` | **`BLOCK_LEVELS`** | **`[1.0, 0.4, 0.2, 0.15, 0.1, 0.05]`** | **v2.6.0：块级 opacity 梯度（替换 SENTENCE_LEVELS）** |
 | 涟漪 | `RIPPLE_CONFIG` | **`SENTENCE_DIM_ALPHA`** | **`0.6`** | **v2.6.1 调整：句级 dimming alpha** |
 | 涟漪 | `RIPPLE_CONFIG` | **`TRANSITION_SEC`** | **`0.4`** | **v2.6.1 复用：块级 opacity 过渡 + 句级 fade 插值时长（秒）** |
@@ -834,10 +792,10 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 
 | 入口位置 | 状态 | 未来恢复路径 |
 |---|---|---|
-| `config.ts:48-66` `TYPEWRITER_HIGHLIGHT_RESERVED` 注释块 | 永久下线 | 4 步：typewriter.ts 重写 + index.scss 加 CSS + 测试场景重跑 |
+| `config.ts` 中的高亮条注释块 | 永久下线 | 4 步：typewriter.ts 重写 + index.scss 加 CSS + 测试场景重跑 |
 | ~~`MOUSE_THROTTLE` + `IDLE_THRESHOLD`~~ | v2.5.0 移除 | 需重建：ripple.ts 重写 `onMouseMove` + `initRipple` 注册事件 + `config.ts` 重新加配置 + 决定触发条件（§4.4） |
 | squish/bounce 触发函数（已从代码中删除） | 永久下线 | git history `0ee73ed` 之前恢复 + SCSS keyframes |
-| `config.ts:123-132` SCSS 锁死开关注释 | 暂未开放 | 待 SCSS 编译策略改造 |
+| `config.ts` 文件末尾的 SCSS 锁死开关注释 | 暂未开放 | 待 SCSS 编译策略改造 |
 
 ---
 
@@ -984,7 +942,7 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 | `__zentypeScrollBound` toggle 残留 | known limitation | reviewer F3 评估为非阻塞 |
 | `SMOOTH_ENABLED` / `BLINK_ENABLED` / `APPLY_TO_TITLE` / `USE_IN_MOBILE` 开关 | 未开放（CSS 编译期锁死） | 待 SCSS 编译策略改造 |
 | 嵌套块递归渐淡 | 推迟到 v2+ | 暂未收到用户反馈 |
-| 高亮条（永久下线） | 入口保留 `TYPEWRITER_HIGHLIGHT_RESERVED` | 见 §3.5 |
+| 高亮条（永久下线） | 仅保留 `config.ts` 注释说明 | 见 §3.5 |
 | mouse 涟漪（暂停） | 入口保留 `RippleMode` + config | 见 §4.4 |
 | squish/bounce 边缘动画（永久下线） | 入口保留注释 | 见 §2.4 |
 | 边缘箭头指示器 | 入口保留（`EDGE_ARROW.ENABLED = false`） | 见 §2.3.5 |

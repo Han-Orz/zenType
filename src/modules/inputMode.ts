@@ -1,12 +1,12 @@
 /**
  * 聚焦 / 打字机模式状态管理。
  *
- * 两个独立状态（focusActive / typewriterActive），共享同一套 ON/OFF 触发规则。
+ * 两个状态（focusActive / typewriterActive）共享同一套 ON/OFF 触发规则。
  * 设计决策：Option A（全局状态 + 订阅机制，无 EventBus）。
- * 参见 docs/FOCUS_TYPEWRITER_DESIGN.md §3。
+ * 参见 docs/DESIGN.md §5。
  *
  * 触发规则（§2.2 / §2.6）：
- *   ON  ← keyboard input、IME compositionend
+ *   ON  ← keyboard input、IME compositionend、Enter/Backspace 编辑
  *   OFF ← wheel、↑/↓、PageUp/Down、鼠标 click、鼠标 drag-select、切 tab、blur
  *   Keep ON：←/→、Home、End、Escape
  */

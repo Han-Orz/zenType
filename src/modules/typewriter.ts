@@ -22,7 +22,7 @@ const deferredFrames = new Set<number>();
 // debounce / IME 状态（修复 3a/3b/3c）
 let lastInputAt = 0;                                       // 最近一次 input 事件时间戳；0 = 空闲
 let composing = false;                                     // IME composition 进行中
-let debounceTimer: ReturnType<typeof setTimeout> | null = null;  // 停顿后触发一次居中滚动的定时器
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;  // 停顿后触发一次舒适区对齐的定时器
 let firstCharAfterIdle = false;                            // Option i：空闲后的首个输入立即滚（input 监听器设置，checkAndScroll 消费）
 let bypassEmptyBlock = false;                              // Enter 新建空块时设 true，让空块守卫放行一次
 
@@ -326,7 +326,7 @@ function checkAndScroll(): void {
   const result = isInAllowElements({ x: rect.x, y: rect.y });
 
   // allowed 为 false 时，如果 editorRect 不可用，说明光标不在有效编辑区域
-  // （标题区域在 boundary.ts 返回 allowed:true 但没有 editorRect，此处也会被过滤）
+  // （标题区域由 boundary.ts 提供 editorRect fallback；若仍不可用，此处会被过滤）
   if (!result.editorRect) return;
   if (!result.cursorElement) return;
 
@@ -346,7 +346,7 @@ function checkAndScroll(): void {
       // 空块时清除 lastCheckRect，使下次（首字符）checkAndScroll 的 prevY=undefined
       // 避免 |firstCharY - emptyBlockY| > 3 触发 defer 级联导致滚动丢失（TODO-6）
       lastCheckRect = null;
-      // Enter 新建空块时绕过守卫 —— 块虽空但用户需要看到它被居中
+      // Enter 新建空块时绕过守卫 —— 块虽空但用户需要看到它被带入舒适区
       if (bypassEmptyBlock) {
         bypassEmptyBlock = false;
         // fall through（不 return）
@@ -527,7 +527,7 @@ export function initTypewriter(): void {
       },
       { capture: true },
     ],
-    // IME composition 结束：解除暂停，重置 debounce 心跳，调度一次居中检查（走 debounce 路径）
+    // IME composition 结束：解除暂停，重置 debounce 心跳，调度一次舒适区检查（走 debounce 路径）
     [
       "compositionend",
       () => {
@@ -555,7 +555,7 @@ export function initTypewriter(): void {
         if (ke.key !== "Enter" && ke.key !== "Backspace") return;
         const shouldAnimateBlockShift = shouldAnimateBlockShiftForKey(ke.key);
         // Enter/Backspace 后 SiYuan 可能 preventDefault → 不触发 input 事件 → typewriterActive 不被重置
-        // 主动激活，确保 checkAndScroll 不在 line 183 早退（修 Enter 不滚的根因）
+        // 主动激活，确保 checkAndScroll 不因 typewriter 状态关闭而早退（修 Enter 不滚的根因）
         inputModeTriggers.onEnterOrBackspaceEdit();
         // 先触发 FLIP 快照
         const sel = window.getSelection();

@@ -4,11 +4,11 @@
  * P0 修复 4 个 BUG：
  *   1. 呼吸感 —— 反向 idle 暂停/恢复（见 ./cursor/breathing.ts）
  *   2. 光标高度 —— lineHeight × CURSOR_CONFIG.HEIGHT_RATIO（见 ../utils/getCursorRect.ts :: getCursorRect）
- *   3. 移动动画 —— no-transition / no-animation 在操作时启用，下一帧恢复
+ *   3. 移动动画 —— no-transition 下一帧恢复；no-animation 在空闲 1.1s 后恢复
  *   4. 边界检测 —— isInAllowElements() 多重检测（见 ../utils/boundary.ts）
  *
  * P2 重构：
- *   - 8 个 EventBus 生命周期回调导出（由 index.ts 订阅）
+ *   - 7 个 EventBus 回调导出（由 index.ts 接入 8 个事件订阅）
  *   - WS 监听从手动 addEventListener 迁移到 ws-main EventBus
  *   - hasScroll/findAllScrollableAncestors 去重到 ../utils/scroll
  *
@@ -72,8 +72,8 @@ const CURSOR_ID = "zentype-cursor";
 let cursorEl: HTMLDivElement | null = null;
 let pendingFrame: number | null = null;
 let removeTransitionFrame: number | null = null;
-let pendingKeyboardUpdate = false; // round 4 fix：Enter 触发滚动时跳过 .no-transition，保留 0.15s 跳移动画
-let keyboardCooldownTimer: ReturnType<typeof setTimeout> | null = null; // round 4 fix（capture + cooldown）：键盘事件后 150ms 内 scroll/ResizeObserver 知道本次更新是键盘驱动
+let pendingKeyboardUpdate = false; // round 4 fix：Enter 触发滚动时跳过 .no-transition，保留按距离分档的过渡动画
+let keyboardCooldownTimer: ReturnType<typeof setTimeout> | null = null; // round 4 fix（capture + cooldown）：键盘事件后 300ms 内 scroll/ResizeObserver 知道本次更新是键盘驱动
 let lastGoodCursorPos: { x: number; y: number; height: number } | null = null; // commit 1：上一次在视口内的光标位置，用于离屏时保持可见位置
 let prevCursorX: number | null = null; // Q7：上一次写入 transform 时的 x，用于计算本帧移动距离 → 时长
 let prevCursorY: number | null = null; // Q7：上一次写入 transform 时的 y，同上
@@ -115,9 +115,9 @@ function createCursorElement(): HTMLDivElement {
   // commit D：DOM 刚创建时 transform 还未设置，默认在 (0,0)。
   // 直接把 transform 设到屏幕外，避免 initCursor 末端的 queueUpdate → 首次
   // doUpdateCursor 之间约 16ms 窗口内光标在视口左上角闪现。
-  // TODO-1：再加 .no-transition 类，从元素进 DOM 那一刻起关闭 transition，
-  // 防止 SCSS 默认 transition: transform 0.15s 把 (0,0)→(-9999,-9999) 滑出来。
-  // 首次 doUpdateCursor 写完真实位置后，rAF 会移除这个类。
+  // 从元素进 DOM 那一刻起关闭 transition，防止 SCSS 默认 transition:
+  // transform 0.15s 把 (0,0)→(-9999,-9999) 滑出来；首次 doUpdateCursor
+  // 写完真实位置后，rAF 会移除这个类。
   el.classList.add("no-transition");
   el.style.transform = "translate3d(-9999px, -9999px, 0)";
   document.body.appendChild(el);
@@ -215,7 +215,7 @@ const popoverDragContext: PopoverDragContext = {
  *   2. 读取选区 → getCursorRect（lineHeight × 1.05）
  *   3. 边缘距离计算（commit 1）→ 供边缘淡出与可选箭头复用
  *   4. 边界检测 → 不通过则 pauseBreathe + return（光标保留在最后位置，停在 Phase 1）
- *   5. 计算 zIndex（基于 window.siyuan.zIndex + 1）
+ *   5. 计算 zIndex（沿光标元素祖先链查找有效层叠层级 + 1）
  *   6. 写 transform / height / zIndex（commit 1：边缘淡出态走 applyFadeAndScale）
  *   7. no-transition 生效时同步布局 → rAF 移除 no-transition
  *   8. scheduleBreathe() 延迟恢复呼吸（边缘附近不恢复，保持暂停）
@@ -341,8 +341,7 @@ function doUpdateCursor(): void {
     prevCursorY = rect.y;
   }
 
-  // TODO-1：首次移动的 .no-transition 已在 createCursorElement 加上，
-  // 下一帧的 rAF 会移除（line 376 下方）。此处的 isFirstMove 块已删除。
+  // 首次移动的 .no-transition 已在 createCursorElement 加上，下一帧的 rAF 会移除。
   // 文本选中时跳过顺滑过渡（光标应瞬间跳到选区末尾）
   const sel = window.getSelection();
   if (sel && sel.rangeCount > 0 && sel.toString()) {
@@ -374,9 +373,9 @@ function doUpdateCursor(): void {
   bindPopoverDrag(allowed.cursorElement, popoverDragContext);
   bindScrollContainerEvents(allowed.cursorElement, scrollBindingContext);
 
-  // round 4 fix（capture + cooldown）：键盘标志由 markKeyboardPending 启动的 150ms 倒计时负责清零，
+  // round 4 fix（capture + cooldown）：键盘标志由 markKeyboardPending 启动的 300ms 倒计时负责清零，
   // 不再在 doUpdateCursor 末尾同步清掉——倒计时窗口内 SiYuan 同步触发的 scroll/ResizeObserver
-  // 仍能读到 pendingKeyboardUpdate=true，从而跳过 .no-transition 保留 0.15s 跳移动画
+  // 仍能读到 pendingKeyboardUpdate=true，从而跳过 .no-transition 保留按距离分档的过渡动画
 }
 
 function scheduleResumeBreathe(): void {
@@ -388,7 +387,7 @@ function onScrollOrWheel(): void {
   if (!cursorEl) return;
   pauseBreathe();
   // round 4 fix：Enter 触发的 SiYuan 自动滚动会同步到这里；
-  // 此时 pendingKeyboardUpdate=true，跳过加 .no-transition 保留 0.15s 跳移动画
+  // 此时 pendingKeyboardUpdate=true，跳过加 .no-transition 保留按距离分档的过渡动画
   if (!pendingKeyboardUpdate) {
     cursorEl.classList.add("no-transition");
     cursorEl.classList.add("no-animation");

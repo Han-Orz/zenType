@@ -7,7 +7,7 @@
  *   3) AABB 碰撞 —— 光标坐标是否在 .protyle-content 可视范围内
  *      + 嵌套滚动容器回退
  *
- * 从 src/modules/cursor/boundary.ts 迁移至 utils，
+ * 从早期 cursor boundary 模块迁移至 utils，
  * 供 cursor / typewriter 等模块共享，解除 typewriter → cursor 硬依赖。
  *
  * 参考：legacy 顺滑光标.js isInAllowElements()、Neo-Plus getselection.ts。

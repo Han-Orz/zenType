@@ -8,7 +8,7 @@
  * │  编辑 `src/styles/index.scss` 中 `#zentype-cursor` 块             │
  * │  - 宽度：width                                                     │
  * │  - 颜色：background + --zt-cursor-color                            │
- * │  - 移动曲线：transition                                            │
+ * │  - 兜底移动曲线：transition（正常态由 cursor.ts 写入）              │
  * │  - 关键帧：@keyframes zentype-breathe                              │
  * │  - 动画时长：animation (3s 1.5s ...)                              │
  * └─────────────────────────────────────────────────────────────────┘
@@ -22,14 +22,14 @@
  */
 
 export const CURSOR_CONFIG = {
-  /** 光标高度 = 所在行 lineHeight × 此倍数。参考版用 0.88；用户要求 1.05（稍短，减少对行的视觉覆盖）。 */
+  /** 光标高度 = 所在行 lineHeight × 此倍数。参考版用 0.88；当前值 1.05 略高，增强对行高的覆盖。 */
   HEIGHT_RATIO: 1.05,
 
   /** 光标停止活动后多少毫秒恢复呼吸闪烁（Phase 1 → Phase 2 的间隔）。 */
   BLINK_DELAY_MS: 1100,
 } as const;
 
-/** 打字机参数（光标保持在 38% 位置时滚动到屏幕中心）。 */
+/** 打字机参数（光标保持在 38%～50% 的舒适区间内）。 */
 export const TYPEWRITER_CONFIG = {
   /** v2.3.0：舒适区间 [低, 高]。光标在此区间内时不触发滚动。 */
   COMFORT_ZONE: [0.38, 0.50],
@@ -37,7 +37,7 @@ export const TYPEWRITER_CONFIG = {
   SCROLL_DURATION_TIERS: [180, 260, 360, 480, 600],
   /** 块级 FLIP 过渡动画曲线。 */
   SCROLL_CURVE: 'cubic-bezier(0.25, 0.1, 0.25, 1)',
-  /** 连续键入停顿阈值（ms）：超过视为"停顿"触发一次居中滚动，小于则视为"连续键入"延后。
+  /** 连续键入停顿阈值（ms）：超过视为"停顿"触发一次舒适区对齐，小于则视为"连续键入"延后。
    *  实现"连续键入不滚动，空隙时滚动"的 debounce 行为。空闲超过 2× 此值的首次输入立即滚。 */
   TYPING_GAP_MS: 400,
   /** 点击居中阈值下界：仅当 caret 垂直位置 < 此值才主动居中，避免破坏附近点击的滚动定位。 */
@@ -66,7 +66,7 @@ export const RIPPLE_CONFIG = {
 
 /** 边缘交互：光标接近视口边缘时的淡出 + 缩放。 */
 export const EDGE_FADE = {
-  /** 距视口边缘的距离（px），淡出 + 缩放在此范围内完成。TODO-3：从 60 收紧到 30，避免最后一行的 caret 就触发淡出。 */
+  /** 距编辑器内容区边缘的距离（px），淡出 + 缩放在此范围内完成。 */
   ZONE: 20,
   /** 光标完全离开视口时的最小缩放系数。 */
   MIN_SCALE: 0.6,
@@ -78,7 +78,7 @@ export const EDGE_FADE = {
  * 当前光标离屏时不播放边缘动画（squish/bounce 已回滚），所以此处只影响
  * 在视口内移动的情况：typing / click 选行 / Enter 跳块 等。
  *
- * 用法：在数组中调整 `{ maxDist, duration }`。距离 < maxDist 时使用对应 duration。
+ * 用法：在数组中调整 `{ maxDist, duration }`。距离 ≤ maxDist 时使用对应 duration。
  * 最后一个的 maxDist 用 Infinity 表示"超过所有前面阈值的距离"。
  *
  * 调整建议：
@@ -97,7 +97,7 @@ export const TRANSITION = {
 
 /** 边缘交互：视口边缘方向箭头指示器。 */
 export const EDGE_ARROW = {
-  /** 总开关：关闭后箭头永不显示。TODO-2：用户测试后默认关闭。 */
+  /** 总开关：关闭后箭头永不显示；当前默认关闭。 */
   ENABLED: false,
   /** 箭头显示时的透明度（0–1）。 */
   OPACITY: 0.6,

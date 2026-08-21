@@ -18,10 +18,9 @@
 ### 🟢 文档清洁 + 发布前同步（v2.6.1 收尾）
 - [x] 统一本次触及文件为 UTF-8 + LF 行尾，并新增 `.gitattributes` 固定 LF
 - README / README_zh-CN 同步 v2.6.1 行为：
-  - 首次输入自动 ON（cursor 始终 ON，typewriter + ripple 默认 OFF）
+  - 默认配置下，加载时初始化共享状态为 ON（cursor、typewriter、ripple 默认配置均开启）
   - 新增 `CLICK_CENTER_LOW` / `CLICK_CENTER_HIGH` / `TYPING_GAP_MS` / `COMFORT_ZONE` / `SCROLL_DURATION_TIERS` / `SCROLL_CURVE` / `SENTENCE_DIM_ALPHA` / `TRANSITION_SEC` / `WEIGHT_MIN` / `MIN_SCALE` / `EDGE_ARROW.ENABLED` 等配置项
   - "Edge Cases" 补 IME 防护 + Enter/Backspace 居中区分
-- [x] `.gitignore` 加 `.claude/`（本地 Claude Code 配置不入库）
 
 ### 🟢 BUG 修复（v2.6.1 收尾）
 
@@ -55,7 +54,7 @@
 ## 已完成
 
 ### ✅ 性能热点收敛（v2.6.2）
-- **Typewriter FLIP**：Enter / Backspace 块位移动画不再扫描整个编辑器；改为围绕当前选区起止块采样前后 sibling 窗口，并沿祖先层级采样，降低长文档下的 `getBoundingClientRect()` 数量。
+- **Typewriter FLIP**：Enter / Backspace 块位移动画正常路径不再扫描整个编辑器；改为围绕当前选区起止块采样前后 sibling 窗口，并沿祖先层级采样，异常选择区容器仍保留全量 fallback，降低长文档下的 `getBoundingClientRect()` 数量。
 - **Ripple MutationObserver**：不再监听整个 `document.body`；focus active 时监听当前顶层块 subtree，并监听父容器一层 `childList` 捕获整块替换，刷新复用 rAF 队列。
 
 ### ✅ 顶栏银河图标位置微调
@@ -66,10 +65,9 @@
 ### ✅ 文档清洁 + 发布前同步（v2.6.1）
 - 统一本次触及文件为 UTF-8 + LF 行尾，并新增 `.gitattributes` 固定 LF
 - README / README_zh-CN 同步 v2.6.1 行为：
-  - 首次输入自动 ON（cursor 始终 ON，typewriter + ripple 默认 OFF）
+  - 默认配置下，加载时初始化共享状态为 ON（cursor、typewriter、ripple 默认配置均开启）
   - 新增 `CLICK_CENTER_LOW` / `CLICK_CENTER_HIGH` / `TYPING_GAP_MS` / `COMFORT_ZONE` / `SCROLL_DURATION_TIERS` / `SCROLL_CURVE` / `SENTENCE_DIM_ALPHA` / `TRANSITION_SEC` / `WEIGHT_MIN` / `MIN_SCALE` / `EDGE_ARROW.ENABLED` 等配置项
   - "Edge Cases" 补 IME 防护 + Enter/Backspace 居中区分
-- `.gitignore` 加 `.claude/`（本地 Claude Code 配置不入库）
 
 ### ✅ ripple 句级高亮在 SiYuan block 重渲染后失效（v2.6.1）
 - **状态**：已修复；基础 Markdown 解析路径已观察正常，`#标签` 路径已追加当前块 DOM mutation 兜底。
@@ -113,7 +111,7 @@
   - 不再依赖主题的 `animationend` 或 CSS 动画状态判断，兼容面更稳定。
 
 ### ✅ 撰写详尽的项目设计文档
-- `docs/DESIGN.md`（1006 行）覆盖：模块依赖图、状态机、关键算法（FLIP / Highlight / 边界检测）、配置项、决策记录、已知限制
+- `docs/DESIGN.md` 覆盖：模块依赖图、状态机、关键算法（FLIP / Highlight / 边界检测）、配置项、决策记录、已知限制
 - 面向"编辑小白也能定位问题"的目标，按模块 + 决策时间线组织
 
 ### ✅ 聚焦模式句级 dim 切换动画（v2.6.1）
@@ -125,10 +123,10 @@
 - 嵌套列表出现透明度×透明度叠加（父块 opacity × 子块 opacity → 几乎不可见）
 - 退出聚焦模式（wheel/arrow/click）和关闭插件（destroyRipple）均无法恢复透明度
 - 根因：v2.6.0 的 `isConnected` 检查 + P0-3 缓存导致清理不可靠，断开/脱离追踪的块残留 opacity
-- 修复：移除三处 `isConnected` 检查；`clearAll` / `destroyRipple` 加 `querySelectorAll` 兜底清理；清 `--zt-sentence-dim-color` CSS 变量
+- 修复：移除三处 `isConnected` 检查；普通退出清理已追踪块，`destroyRipple` 用 `querySelectorAll` 做全局兜底；清 `--zt-sentence-dim-color` CSS 变量
 
 ### ✅ 打字机模式的滚动问题（v2.6.1, commit f121839）
 - 首字不滚动：vertical-jump defer 内部清 `lastCheckRect=null` + keydown 加 `setBothOn` 修复
 - 连续键入不滚动 / 空隙滚动：input 监听维护 `lastInputAt`，debounce gate（`TYPING_GAP_MS=400`），首字 `firstCharAfterIdle` 立即滚
 - 滚动拖 IME 候选窗一卡一卡：`compositionstart` / `compositionend` 监听 + `composing` 门禁，compositionstart 取消 in-flight smoothScroll
-- Enter / Backspace 立即滚至中心；click 居中（Option B `[0.25, 0.75]`，缓起缓收 + 加长 40%）
+- Enter / Backspace 立即重新对齐舒适区；click 居中（Option B `[0.25, 0.75]`，缓起缓收 + 加长 40%）

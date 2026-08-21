@@ -40,11 +40,11 @@ export function bindCursorDocumentEvents(context: CursorEventContext): void {
   const handlers: Array<[string, EventListener, AddEventListenerOptions?]> = [
     ["selectionchange", context.queueUpdate],
     // keydown + input 用 rAF 包裹（参考版做法），替代三阶段 throttle
-    // round 4 fix：先 set flag，下一次 doUpdateCursor 末尾 reset；
+    // round 4 fix：先 set flag，由 300ms 冷却计时器清零；
     // 让 Enter 触发的 scroll/ResizeObserver 知道本次更新是键盘驱动，不加 .no-transition
     // 聚焦/打字机模式：↑↓/PageUp/PageDown 退出；←→/Home/End/Escape 保持
     // round 4 fix（capture + cooldown）：capture 阶段先于 SiYuan handler 跑，
-    // markKeyboardPending 启动 150ms 倒计时，期间 scroll/ResizeObserver 不加 .no-transition
+    // markKeyboardPending 启动 300ms 倒计时，期间 scroll/ResizeObserver 不加 .no-transition
     ["keydown", (e) => {
       const ke = e as KeyboardEvent;
       if (ke.key === "Enter" || ke.key === "Backspace") {

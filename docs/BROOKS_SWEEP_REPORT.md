@@ -14,7 +14,7 @@
 |---|---|---|
 | `src/utils/getCursorRect.ts` | 死代码清理 | 移除未使用的 `getCursorElement` import；同步过时的 `lineHeight × 1.1` 注释 |
 | `src/modules/ripple.ts` | 死代码清理 | 移除未调用的 `rangesEqual()` 和未使用的 `text` 局部变量；同步 ripple 默认状态注释 |
-| `src/modules/cursor.ts` | 冗余清理 / 配置接线 | 移除未使用的 `mousedown` 事件参数；将 `EDGE_ARROW.OPACITY/SIZE/OFFSET/TRANSITION_MS` 接入 CSS 变量；修正旧 `cursor/boundary.ts` 注释 |
+| `src/modules/cursor.ts` | 冗余清理 / 配置接线 | 移除未使用的 `mousedown` 事件参数；将 `EDGE_ARROW.OPACITY/SIZE/OFFSET/TRANSITION_MS` 接入 CSS 变量；修正旧 boundary 注释 |
 | `src/config.ts` | 注释清理 | 移除已下线高亮条的 CSS 配置提示，去掉“早期迭代期”过时说明 |
 | `README.md` / `README_zh-CN.md` | 文档同步 | 同步顶栏按钮语义：只切换打字机 + 涟漪，顺滑光标常开；同步 `BLINK_DELAY_MS = 1100` |
 
@@ -33,7 +33,7 @@
 9. `src/index.ts`：switch-protyle 回调改用 `inputModeTriggers.onSwitchProtyle()`。
 10. `src/modules/typewriter.ts`：Enter/Backspace handler 改用 `inputModeTriggers.onEnterOrBackspaceEdit()`。
 
-行为保持点：所有 scroll/wheel/passive 行为、capture 选项、键盘触发 round 4 fix（`pendingKeyboardUpdate` + 150ms cooldown）、FLIP 采样窗口、MutationObserver 范围均保持不变。
+行为保持点：所有 scroll/wheel/passive 行为、capture 选项、键盘触发 round 4 fix（报告当时为 `pendingKeyboardUpdate` + 150ms cooldown；当前实现为 300ms）、FLIP 采样窗口、MutationObserver 范围均保持不变。
 
 ## 已验证
 
@@ -50,7 +50,7 @@ git diff --check
 
 ### Typewriter FLIP
 
-~~当前实现已经从全编辑器扫描改为围绕当前选区起止块采样前后 sibling 窗口~~ — 此项已在后续迭代中落地。当前 `typewriter.ts` 的 `animateBlockShift` 使用采样窗口（`FLIP_BLOCK_RADIUS = 30`），不再全量扫描。
+~~当前实现已经从全编辑器扫描改为围绕当前选区起止块采样前后 sibling 窗口~~ — 此项已在后续迭代中落地。当前 `typewriter.ts` 的 `animateBlockShift` 正常路径使用采样窗口（`FLIP_BLOCK_RADIUS = 30`），选择区容器异常时仍 fallback 到全量扫描。
 
 判断：方向正确且已实现。后续如果仍出现长文档掉帧，可以把半径配置化，或在超大文档中跳过不可见块的 FLIP。
 

@@ -130,7 +130,7 @@ export default class ZenType extends Plugin {
       eventBus.off("switch-protyle", onSwitched),
     );
 
-    // 5) click-editorcontent：用户在编辑器内点击 → 替代 firstProtyleIds 白名单
+    // 4) click-editorcontent：用户在编辑器内点击 → 替代 firstProtyleIds 白名单
     const onClickEditorContent = (e: CustomEvent<{ protyle: IProtyle; event: MouseEvent }>) => {
       if (!this.enabled.cursor) return;
       onEditorContentClicked(e.detail.protyle);
@@ -140,7 +140,7 @@ export default class ZenType extends Plugin {
       eventBus.off("click-editorcontent", onClickEditorContent),
     );
 
-    // 6) open-menu-content：右键菜单弹出 → 立即隐藏光标
+    // 5) open-menu-content：右键菜单弹出 → 立即隐藏光标
     const onMenuOpenedHandler = () => {
       if (!this.enabled.cursor) return;
       onMenuOpened();
@@ -150,7 +150,7 @@ export default class ZenType extends Plugin {
       eventBus.off("open-menu-content", onMenuOpenedHandler),
     );
 
-    // 7) ws-main：替代手动 WS 监听（思源内核已自动 JSON.parse）
+    // 6) ws-main：替代手动 WS 监听（思源内核已自动 JSON.parse）
     const onWsMainHandler = (e: CustomEvent<IWebSocketData>) => {
       if (!this.enabled.cursor) return;
       onWsMain(e.detail);
@@ -160,7 +160,7 @@ export default class ZenType extends Plugin {
       eventBus.off("ws-main", onWsMainHandler),
     );
 
-    // 8) mobile-keyboard-show
+    // 7) mobile-keyboard-show
     const onKeyboardShow = () => {
       if (!this.enabled.cursor) return;
       onMobileKeyboardShow();
@@ -170,7 +170,7 @@ export default class ZenType extends Plugin {
       eventBus.off("mobile-keyboard-show", onKeyboardShow),
     );
 
-    // 9) mobile-keyboard-hide
+    // 8) mobile-keyboard-hide
     const onKeyboardHide = () => {
       if (!this.enabled.cursor) return;
       onMobileKeyboardHide();

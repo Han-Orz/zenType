@@ -5,7 +5,7 @@
 #zentype-cursor {
   position: fixed;
   pointer-events: none;
-  z-index: 9999; // fallback；cursor.ts 会按 window.siyuan.zIndex 动态覆盖
+  z-index: 9999; // fallback；cursor.ts 会按祖先层叠上下文动态覆盖
   width: 3px;
   background: var(--zt-cursor-color, #5d8cd7);
   transform: translate3d(0, 0, 0);
@@ -51,7 +51,7 @@
 
 // commit 3：视口边缘箭头指示器
 //   三角形用 CSS border-trick 实现；data-direction 切换方向
-//   z-index 9998 < cursor 9999，避免遮挡光标本身
+//   箭头固定在 z-index 9998；光标 z-index 由祖先层叠上下文动态计算
 #zentype-edge-arrow {
   position: fixed;
   width: 0;
@@ -96,7 +96,7 @@ body.zentype-cursor-active .protyle-title__input { caret-color: transparent; }
 .layout__resize { user-select: none; }
 
 // ===== 顶栏图标两态 =====
-// 银河 SVG 固定 22px；开启态让几个彩色星球轻微转动。
+// 银河 SVG 固定 24px；开启态让几个彩色星球轻微转动。
 
 @keyframes zentype-galaxy-drift-fast {
   0%   { transform: rotate(0deg); }

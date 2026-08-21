@@ -2,9 +2,9 @@
  * 涟漪聚焦模块 (Ripple Focus) — v2.5.0 重写 (CSS Custom Highlight API)
  *
  * 效果（DESIGN.md §4.1）：
- *   当前输入句 opacity = 1.0，当前块其他句 = 0.88（用 CSS Highlight color 模拟）
- *   相邻块按距离 5 档衰减 [0.72, 0.55, 0.42]
- *   列表块按视觉权重 x 深度系数修正
+ *   当前输入句保持原文字色；当前块其他句用 CSS Highlight color 按 0.6 alpha dim
+ *   相邻顶层块按距离使用 BLOCK_LEVELS 衰减 [0.4, 0.2, 0.15, 0.1, 0.05]
+ *   仅 distance=1 的相邻块额外应用视觉权重；嵌套块继承顶层块 opacity
  *
  * 设计要点：
  *   - 句级粒度：按 .?!。？！ 切句，用 CSS Custom Highlight API 标记（零 DOM 突变）
