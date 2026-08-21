@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.6.5 (2026-08-21) — Non-empty Block Caret Fallback
+
+修复输入过程中按方向键下时光标视觉位置与实际输入位置不一致的问题。
+
+### Fixed
+- **非空块尾部光标定位**：当 Selection 落在没有可渲染矩形的空 Text 节点中时，为非空块回退到相邻真实文本节点的边界 Range；真正的空块继续使用块顶部定位，避免按 ArrowDown 后光标看似跳到块首、继续输入却跳回块尾。
+
+---
+
 ## v2.6.4 (2026-07-27) — Bazaar Package Documentation
 
 修复集市包构建流程：将中英文 README 一并打入 `package.zip`，与 `plugin.json` 的 `readme` 声明保持一致。

@@ -1,4 +1,4 @@
-# zenType 设计文档（v2.6.4）
+# zenType 设计文档（v2.6.5）
 
 > **本文件合并自 `docs/FOCUS_TYPEWRITER_DESIGN.md`（已删除）+ 早期 `TODO.md`（已删除）的设计段。**
 > **代码即真相，本文档跟随代码，不是反过来。**
@@ -18,7 +18,7 @@
 
 **核心价值**：让用户进入"心流"状态 —— 不用低头找光标、不被周围段落干扰。
 **设计哲学**：聚焦服务于主动写作；默认启用以减少进入心流状态的额外操作，仍可通过命令切换。
-**当前版本**：v2.6.4（`package.json` / `plugin.json`）。
+**当前版本**：v2.6.5（`package.json` / `plugin.json`）。
 
 ---
 
@@ -856,6 +856,7 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 | **v2.5.0 (Ripple Highlight API + CR 收尾)** | 2026-07-03 | ripple 句级从 span 包裹重写为 CSS Custom Highlight API（零 DOM 突变，修复数据丢失 bug）；P1-1/P2-3/P2-5/P3-7/P3-8 代码审查修复；TODO-6 首字滚动修复 |
 | **v2.6.0 (Ripple 性能优化 + 配置重构)** | 2026-07-03 | buildTextNodeMap 单次 TreeWalker + 二分查找；块级缓存 + 远块跳过；BLOCK_LEVELS/SENTENCE_DIM_ALPHA/TRANSITION_SEC 替换旧配置；嵌套块 opacity 继承；删除 isRippleTargetBlock 等死代码 |
 | **v2.6.1 (Typewriter 修复 + Ripple 句级 fade)** | 2026-07-03 | typewriter 连续输入/点击居中修复；ripple 句级 fade-in/fade-out；当前块 opacity 强制 1.0，避免当前句稳定态偏淡 |
+| **v2.6.5 (非空块尾部光标定位修复)** | 2026-08-21 | 非空块中的空 Text 节点使用相邻真实文本节点边界 Range 回退，修复 ArrowDown 后视觉光标与实际输入位置不一致 |
 
 ### 9.2 cursor 模块决策（Round 5 → Round 11）
 
@@ -1007,12 +1008,12 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 
 | 文件 | 当前 | 备注 |
 |---|---|---|
-| `package.json` `version` | `2.6.4` | v2.6.4 当前版本 |
-| `plugin.json` `version` | `2.6.4` | 同上 |
-| `docs/CHANGELOG.md` | ✅ 已维护 | 位于 docs/CHANGELOG.md，覆盖 v2.0~v2.6.4 |
+| `package.json` `version` | `2.6.5` | v2.6.5 当前版本 |
+| `plugin.json` `version` | `2.6.5` | 同上 |
+| `docs/CHANGELOG.md` | ✅ 已维护 | 位于 docs/CHANGELOG.md，覆盖 v2.0~v2.6.5 |
 
-> 当前发布版本为 v2.6.4；v2.6.2 为保行为架构重构里程碑，v2.6.4 仅修复集市包文档打包。`version` 字段从 v2.3.0 → v2.5.0（跳过 2.4，Highlight API 重写）→ v2.6.0 → v2.6.1 → v2.6.2 → v2.6.3 → v2.6.4。
+> 当前发布版本为 v2.6.5；v2.6.2 为保行为架构重构里程碑，v2.6.4 修复集市包文档打包，v2.6.5 修复非空块尾部光标回退定位。`version` 字段从 v2.3.0 → v2.5.0（跳过 2.4，Highlight API 重写）→ v2.6.0 → v2.6.1 → v2.6.2 → v2.6.3 → v2.6.4 → v2.6.5。
 
 ---
 
-**最后更新**：2026-07-27（v2.6.4 集市包 README 打包修复）
+**最后更新**：2026-08-21（v2.6.5 非空块尾部光标定位修复）

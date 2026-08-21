@@ -12,14 +12,6 @@ index.js.map
 index.css
 index.css.map
 
-# Local editor/agent config (not project code)
-.opencode/
-.claude/
-
-
-# SDD process artifacts (session-local)
-.superpowers/
-
 # Release zip (build artifact)
 zentype.zip
 package.zip

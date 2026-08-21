@@ -1,6 +1,6 @@
 {
   "name": "zentype",
-  "version": "2.6.4",
+  "version": "2.6.5",
   "description": "顺滑光标 + 打字机模式 + 涟漪聚焦 - 让写作更专注",
   "main": "index.js",
   "scripts": {

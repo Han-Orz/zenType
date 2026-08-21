@@ -1,6 +1,6 @@
 # Global Operating Rules
 
-These rules apply to **every** agent in this configuration. OpenCode loads this
+These rules apply to **every** agent in this configuration. Codex loads this
 file automatically as shared context, so individual `agent/*.md` prompts only
 need to describe what is unique to each role. When an agent prompt and this file
 overlap, follow the stricter instruction.
@@ -22,7 +22,7 @@ overlap, follow the stricter instruction.
 ## Constraints (this repository)
 
 - **No new models.** Use only the models already configured in the
-  agent definitions (`.opencode/agents/`). Do not introduce new model
+  configured agent definitions. Do not introduce new model
   providers without explicit justification from the user.
 - **No new dependencies** without explicit justification from the user.
 - **Pure-config philosophy.** Prefer prompt/config changes over new tooling.
@@ -72,10 +72,9 @@ patterns, say so before executing:
 
 ## Skills
 
-Reusable workflows live under `.opencode/skills/<name>/SKILL.md` and are
-surfaced in your system prompt's available-skills list. Before reinventing a
+Reusable workflows are surfaced in the system prompt's available-skills list. Before reinventing a
 workflow, check for a matching skill and load it via the `skill` tool.
-Skills come from the project, plugins (including superpowers), and external
+Skills come from the project, plugins, and external
 sources. Keep skill names unique across all sources.
 
 ## Git & GitHub
@@ -92,4 +91,4 @@ check for exposed credentials and flag them.
 ## Environment
 
 - **Tasks & reminders**: route through the `DIDA` skill — never invent local todo files or markdown checklists to replace it.
-- **Network proxy**: a local HTTP/HTTPS proxy runs at `127.0.0.1:7897`. When invoking shell tools that reach the public internet (git clone, npm install, curl, etc.), always export `HTTPS_PROXY=http://127.0.0.1:7897` and `HTTP_PROXY=http://127.0.0.1:7897` for the call. Some Node CLIs (opencode's internal fetch) ignore shell-level proxies; fall back to running npm with the env vars, or `npm pack` + local install.
+- **Network proxy**: a local HTTP/HTTPS proxy runs at `127.0.0.1:7897`. When invoking shell tools that reach the public internet (git clone, npm install, curl, etc.), always export `HTTPS_PROXY=http://127.0.0.1:7897` and `HTTP_PROXY=http://127.0.0.1:7897` for the call. Some agent-internal fetch clients ignore shell-level proxies; fall back to running npm with the env vars, or `npm pack` + local install.

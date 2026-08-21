@@ -19,6 +19,11 @@ import { getLineHeight } from "./getLineHeight";
 /** 用户可配置：见 src/config.ts :: CURSOR_CONFIG.HEIGHT_RATIO */
 export const LINE_HEIGHT_RATIO = CURSOR_CONFIG.HEIGHT_RATIO;
 
+type FallbackCursorRect = {
+  rect: DOMRect;
+  edge: "start" | "end";
+};
+
 /**
  * 获取光标的显示矩形。
  * 已应用 lineHeight × LINE_HEIGHT_RATIO，x/y 是 viewport 坐标。
@@ -32,12 +37,15 @@ export function getCursorRect(): CursorRect | null {
 
   const rects = Array.from(range.getClientRects());
   let baseRect: DOMRect | null = null;
-  if (rects.length > 0 && rects[0].height > 0) {
-    // 取最后一个 rect（最接近光标位置，兼容多行选择）
-    baseRect = rects[rects.length - 1];
+  let caretEdge: "start" | "end" = "end";
+  const validRects = rects.filter((rect) => rect.height > 0);
+  if (validRects.length > 0) {
+    baseRect = validRects[validRects.length - 1];
   } else {
-    baseRect = getEmptyBlockRect(range);
-    if (!baseRect) return null;
+    const fallback = getFallbackCursorRect(range);
+    if (!fallback) return null;
+    baseRect = fallback.rect;
+    caretEdge = fallback.edge;
   }
 
   const lineHeight = getLineHeight(range.startContainer);
@@ -47,7 +55,7 @@ export function getCursorRect(): CursorRect | null {
   const gap = (baseRect.height - height) / 2;
   const y = baseRect.top + gap;
   // 光标在字符末尾：right 边缘就是下一个字符的起点
-  const x = baseRect.right;
+  const x = caretEdge === "start" ? baseRect.left : baseRect.right;
 
   return { x, y, width: baseRect.width, height };
 }
@@ -63,6 +71,85 @@ export function getCursorRect(): CursorRect | null {
  * @param range 已 collapse(true) 的 Range
  * @returns DOMRect 或 null（找不到块时）
  */
+function getFallbackCursorRect(range: Range): FallbackCursorRect | null {
+  const block = getBlock(range.startContainer);
+  if (!block) return null;
+
+  // Only a genuinely empty block should use the block-top fallback. A non-empty
+  // block may represent its end caret with an empty Text node whose Range has no
+  // client rect; recover that caret from nearby real text instead.
+  if (isEmptyBlock(block)) {
+    const rect = getEmptyBlockRect(range);
+    return rect ? { rect, edge: "start" } : null;
+  }
+
+  return getAdjacentTextRect(range, block);
+}
+
+function getBlock(node: Node): HTMLElement | null {
+  const element = node.nodeType === Node.ELEMENT_NODE
+    ? node as Element
+    : node.parentElement;
+  return element?.closest('[data-node-id]') as HTMLElement | null;
+}
+
+function isEmptyBlock(block: HTMLElement): boolean {
+  const text = (block.textContent ?? "")
+    .replace(/[\u200B\uFEFF\u00A0]/g, "")
+    .trim();
+  return text === "" && !block.querySelector(
+    'img, iframe, [data-type^="NodeMathBlock"], [data-type^="NodeCodeBlock"]',
+  );
+}
+
+function getAdjacentTextRect(range: Range, block: HTMLElement): FallbackCursorRect | null {
+  const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+  const textNodes: Text[] = [];
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    textNodes.push(node as Text);
+  }
+
+  const currentNode = range.startContainer.nodeType === Node.TEXT_NODE
+    ? range.startContainer as Text
+    : null;
+  const currentIndex = currentNode ? textNodes.indexOf(currentNode) : -1;
+
+  if (currentIndex >= 0 && currentNode && currentNode.data.length > 0) {
+    const currentRect = getTextBoundaryRect(currentNode, range.startOffset);
+    if (currentRect) return { rect: currentRect, edge: "end" };
+  }
+
+  const previousStart = currentIndex >= 0 ? currentIndex - 1 : textNodes.length - 1;
+  for (let index = previousStart; index >= 0; index -= 1) {
+    const textNode = textNodes[index];
+    if (textNode.data.length === 0) continue;
+    const rect = getTextBoundaryRect(textNode, textNode.data.length);
+    if (rect) return { rect, edge: "end" };
+  }
+
+  const nextStart = currentIndex >= 0 ? currentIndex + 1 : 0;
+  for (let index = nextStart; index < textNodes.length; index += 1) {
+    const textNode = textNodes[index];
+    if (textNode.data.length === 0) continue;
+    const rect = getTextBoundaryRect(textNode, 0);
+    if (rect) return { rect, edge: "start" };
+  }
+
+  return null;
+}
+
+function getTextBoundaryRect(textNode: Text, offset: number): DOMRect | null {
+  try {
+    const range = document.createRange();
+    range.setStart(textNode, offset);
+    range.collapse(true);
+    return Array.from(range.getClientRects()).find((rect) => rect.height > 0) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function getEmptyBlockRect(range: Range): DOMRect | null {
   let node: Node | null = range.startContainer;
   if (node.nodeType !== Node.ELEMENT_NODE) {
