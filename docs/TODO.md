@@ -1,6 +1,6 @@
 ﻿## 当前
 
-### 🟡 v2.6.5 已发布；仅剩集市 PR / stage 工作（v2.6.2 已并入 v2.6.3）
+### 🟡 v2.6.6 发布准备（v2.6.2 已并入 v2.6.3）
 - **背景**：bazaar stage/plugins.json 冻结 `siyuan-zen` 在 v1.0.6（name="ZenType"），v2.0.0 起 plugin.json name 改为 `siyuan-zen` 触发 stage 校验冲突，stage 静默保留旧数据，集市从未更新。
 - **方案**：统一改名 `zenType`（repo + plugin.json name + plugins.txt path），两步 PR 重新上架。
 - **进度**：
@@ -11,9 +11,12 @@
   - [x] 发 v2.6.3 release（v2.6.2 → v2.6.3 间累积重构：cursor 模块拆分、lifecycle 工具、popover 观察者自清理；用户行为不变），见 `1b9a832` + tag `v2.6.3`
   - [x] 发 v2.6.4 release（修复集市包缺少 README；用户行为不变）
   - [x] 发 v2.6.5 release（修复非空块尾部光标回退定位）
-  - [ ] PR #2 加新 path：plugins.txt 加 `Han-Orz/zenType`，等 stage 收录
-  - [ ] 集市真正上线后，README 顶部"Upgrading"段可改为"已稳定，可直接装"
-- **本仓库侧**所有代码 / 文档改动已就绪，后续只等外部 PR 合并。
+  - [x] PR #2 加新 path：plugins.txt 已包含 `Han-Orz/zenType`
+  - [x] 定位 v2.6.5 Stage 失败：`preview.png` 205.3KB 超过当前 200KB 上限
+  - [x] v2.6.6 本地发布准备：版本同步、预览图压缩、`pnpm run build` 默认生成 `package.zip`
+  - [ ] 提交并发布 v2.6.6 Release，上传新 `package.zip`
+  - [ ] 等待 Bazaar Stage 自动收录并关闭 `siyuan-note/bazaar#2152`
+- **本仓库侧**v2.6.6 代码、文档和构建流程已进入发布校验阶段。
 
 ### 🟢 文档清洁 + 发布前同步（v2.6.1 收尾）
 - [x] 统一本次触及文件为 UTF-8 + LF 行尾，并新增 `.gitattributes` 固定 LF

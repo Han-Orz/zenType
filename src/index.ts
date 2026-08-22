@@ -183,7 +183,6 @@ export default class ZenType extends Plugin {
     // === 模块初始化（与 P0 / round-3 相同） ===
     // v2.3.0：cursor 始终初始化（光标常开），不再受 STORAGE_KEY 中 cursor 字段影响
     initCursor();
-    document.body.classList.add("zentype-cursor-active");
     if (this.enabled.typewriter) initTypewriter();
     if (this.enabled.ripple) initRipple();
 
@@ -209,10 +208,6 @@ export default class ZenType extends Plugin {
       { name: "destroyRipple", run: destroyRipple },
       { name: "inputMode.reset", run: () => inputMode.reset() },
       { name: "removeStyle", run: () => removeStyle(STYLE_ID) },
-      {
-        name: "removeCursorBodyClass",
-        run: () => document.body.classList.remove("zentype-cursor-active"),
-      },
     ], (name, error) => {
       console.error(`[zenType] lifecycle cleanup failed in ${name}:`, error);
     });

@@ -15,6 +15,7 @@
  */
 
 import { CURSOR_CONFIG } from "../../config";
+import { prefersReducedMotion } from "../../utils/reducedMotion";
 
 let cursorEl: HTMLElement | null = null;
 let breatheTimer: number | null = null;
@@ -47,6 +48,11 @@ export function scheduleBreathe(delayMs: number = CURSOR_CONFIG.BLINK_DELAY_MS):
   clearBreatheTimer();
   if (breatheState !== "paused" || !cursorEl.classList.contains("no-animation")) {
     cursorEl.classList.add("no-animation");
+  }
+  if (prefersReducedMotion()) {
+    cursorEl.classList.add("no-animation");
+    breatheState = "paused";
+    return;
   }
   breatheState = "pending";
   breatheTimer = window.setTimeout(() => {

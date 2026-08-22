@@ -1,4 +1,4 @@
-# zenType 设计文档（v2.6.5）
+# zenType 设计文档（v2.6.6）
 
 > **本文件合并自 `docs/FOCUS_TYPEWRITER_DESIGN.md`（已删除）+ 早期 `TODO.md`（已删除）的设计段。**
 > **代码即真相，本文档跟随代码，不是反过来。**
@@ -18,7 +18,7 @@
 
 **核心价值**：让用户进入"心流"状态 —— 不用低头找光标、不被周围段落干扰。
 **设计哲学**：聚焦服务于主动写作；默认启用以减少进入心流状态的额外操作，仍可通过命令切换。
-**当前版本**：v2.6.5（`package.json` / `plugin.json`）。
+**当前版本**：v2.6.6（`package.json` / `plugin.json`）。
 
 ---
 
@@ -709,7 +709,7 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 
 ## 6. 命令面板
 
-当前提供 3 个命令（v2.6.5）：
+当前提供 3 个命令（v2.6.6）：
 
 | 命令 langKey | 回调 | 效果 |
 |---|---|---|
@@ -764,7 +764,7 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 
 ## 8. 配置参数（`src/config.ts`）
 
-### 8.1 完整参数表（v2.6.5 更新）
+### 8.1 完整参数表（v2.6.6 更新）
 
 | 模块 | 配置块 | 参数 | 默认 | 说明 |
 |---|---|---|---|---|
@@ -815,6 +815,7 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 | **v2.6.0 (Ripple 性能优化 + 配置重构)** | 2026-07-03 | buildTextNodeMap 单次 TreeWalker + 二分查找；块级缓存 + 远块跳过；BLOCK_LEVELS/SENTENCE_DIM_ALPHA/TRANSITION_SEC 替换旧配置；嵌套块 opacity 继承；删除 isRippleTargetBlock 等死代码 |
 | **v2.6.1 (Typewriter 修复 + Ripple 句级 fade)** | 2026-07-03 | typewriter 连续输入/点击居中修复；ripple 句级 fade-in/fade-out；当前块 opacity 强制 1.0，避免当前句稳定态偏淡 |
 | **v2.6.5 (非空块尾部光标定位修复)** | 2026-08-21 | 非空块中的空 Text 节点使用相邻真实文本节点边界 Range 回退，修复 ArrowDown 后视觉光标与实际输入位置不一致 |
+| **v2.6.6 (生命周期安全 + 集市合规)** | 2026-08-22 | 编辑器事件缩域、原生 caret fail-open、Range 元素端点、视觉样式所有权、异步清理和 reduced-motion；构建默认生成白名单 package.zip，预览图符合 200KB 上限 |
 
 ### 9.2 cursor 模块决策（Round 5 → Round 11）
 
@@ -966,12 +967,12 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 
 | 文件 | 当前 | 备注 |
 |---|---|---|
-| `package.json` `version` | `2.6.5` | v2.6.5 当前版本 |
-| `plugin.json` `version` | `2.6.5` | 同上 |
-| `docs/CHANGELOG.md` | ✅ 已维护 | 位于 docs/CHANGELOG.md，覆盖 v2.0~v2.6.5 |
+| `package.json` `version` | `2.6.6` | v2.6.6 当前版本 |
+| `plugin.json` `version` | `2.6.6` | 同上 |
+| `docs/CHANGELOG.md` | ✅ 已维护 | 位于 docs/CHANGELOG.md，覆盖 v2.0~v2.6.6 |
 
-> 当前发布版本为 v2.6.5；v2.6.2 为保行为架构重构里程碑，v2.6.4 修复集市包文档打包，v2.6.5 修复非空块尾部光标回退定位。`version` 字段从 v2.3.0 → v2.5.0（跳过 2.4，Highlight API 重写）→ v2.6.0 → v2.6.1 → v2.6.2 → v2.6.3 → v2.6.4 → v2.6.5。
+> 当前待发布版本为 v2.6.6；v2.6.2 为保行为架构重构里程碑，v2.6.4 修复集市包文档打包，v2.6.5 修复非空块尾部光标回退定位，v2.6.6 完成审查修复与集市规则同步。`version` 字段从 v2.3.0 → v2.5.0（跳过 2.4，Highlight API 重写）→ v2.6.0 → v2.6.1 → v2.6.2 → v2.6.3 → v2.6.4 → v2.6.5 → v2.6.6。
 
 ---
 
-**最后更新**：2026-08-21（v2.6.5 非空块尾部光标定位修复）
+**最后更新**：2026-08-22（v2.6.6 生命周期安全与集市合规）

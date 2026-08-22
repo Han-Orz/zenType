@@ -1,4 +1,15 @@
+import * as inputModeTriggers from "../inputModeTriggers";
+import {
+  isCurrentSelectionEditable,
+  isCurrentSelectionInActiveEditor,
+  isEditableEvent,
+  isFocusInsideActiveEditor,
+  isInActiveEditor,
+  isReadonlyEditorTarget,
+} from "../../utils/editorScope";
+
 export interface CursorEventContext {
+  clearKeyboardPending: () => void;
   markKeyboardPending: () => void;
   onScrollOrWheel: () => void;
   queueUpdate: () => void;
@@ -8,22 +19,31 @@ interface MouseDownInfo {
   selectionText: string;
 }
 
-let isPasting = false;
 let mouseDownInfo: MouseDownInfo | null = null;
 let eventListeners: Array<[string, EventListener, AddEventListenerOptions?]> = [];
+let windowEventListeners: Array<[string, EventListener, AddEventListenerOptions?]> = [];
 
-import * as inputModeTriggers from "../inputModeTriggers";
+function isPasteLikeInput(event: InputEvent): boolean {
+  return event.inputType === "insertFromPaste" || event.inputType === "insertFromDrop";
+}
+
+function isUsableEditorEvent(event: Event): boolean {
+  if (isEditableEvent(event)) return true;
+  if (isReadonlyEditorTarget(event.target)) inputModeTriggers.onReadonly();
+  return false;
+}
 
 /** 绑定 document 上的光标相关事件（passive 提升滚动性能） */
 export function bindCursorDocumentEvents(context: CursorEventContext): void {
   // 聚焦/打字机模式：wheel/touchmove 退出处理（不涉及 scroll，避免程序滚动误退出）
-  const onWheelExit: EventListener = () => {
+  const onWheelExit: EventListener = (event) => {
     inputModeTriggers.onWheelOrTouchMove();
-    context.onScrollOrWheel();
+    context.clearKeyboardPending();
+    if (isInActiveEditor(event.target)) context.onScrollOrWheel();
   };
 
-  // 聚焦/打字机模式：鼠标拖蓝检测（mouseup 时比对比 selection 变化）
-  const onMouseUpWithDragCheck: EventListener = () => {
+  // 聚焦/打字机模式：鼠标拖蓝检测（mouseup 时比对 selection 变化）
+  const onMouseUpWithDragCheck: EventListener = (event) => {
     if (mouseDownInfo) {
       const currentSel = window.getSelection()?.toString() ?? "";
       if (currentSel !== mouseDownInfo.selectionText && currentSel.length > 0) {
@@ -31,74 +51,139 @@ export function bindCursorDocumentEvents(context: CursorEventContext): void {
       }
       mouseDownInfo = null;
     }
+    if (isEditableEvent(event)) context.queueUpdate();
+  };
+
+  const onSelectionChange: EventListener = () => {
+    if (isCurrentSelectionEditable()) {
+      context.queueUpdate();
+    } else if (isCurrentSelectionInActiveEditor()) {
+      inputModeTriggers.onReadonly();
+      context.clearKeyboardPending();
+      context.queueUpdate();
+    }
+  };
+
+  const onKeyDown: EventListener = (event) => {
+    const ke = event as KeyboardEvent;
+    if (ke.isComposing || ke.defaultPrevented || !isUsableEditorEvent(event)) {
+      if (isReadonlyEditorTarget(event.target)) {
+        context.clearKeyboardPending();
+        context.queueUpdate();
+      }
+      return;
+    }
+    if (ke.key === "Enter" || ke.key === "Backspace") {
+      inputModeTriggers.onEnterOrBackspaceEdit();
+    }
+    if (ke.key === "ArrowUp" || ke.key === "ArrowDown" ||
+        ke.key === "PageUp" || ke.key === "PageDown") {
+      inputModeTriggers.onVerticalNavigationKey();
+    }
+    context.markKeyboardPending();
+    requestAnimationFrame(context.queueUpdate);
+  };
+
+  const onInput: EventListener = (event) => {
+    if (!isUsableEditorEvent(event)) {
+      if (isReadonlyEditorTarget(event.target)) {
+        context.clearKeyboardPending();
+        context.queueUpdate();
+      }
+      return;
+    }
+    const inputEvent = event as InputEvent;
+    const pasteLike = isPasteLikeInput(inputEvent);
+    // Paste/drop is already a committed edit. It must not turn on inputMode or
+    // extend the keyboard cooldown; its explicit inputType replaces the old
+    // document-global paste flag.
+    if (!pasteLike && !inputEvent.isComposing) {
+      inputModeTriggers.onTextInput();
+      context.markKeyboardPending();
+    }
+    requestAnimationFrame(context.queueUpdate);
+  };
+
+  const onClick: EventListener = (event) => {
+    // Clicking anywhere still exits the current product mode. Only an editor
+    // click queues a caret refresh; external inputs never activate work.
+    inputModeTriggers.onMouseClick();
+    context.clearKeyboardPending();
+    if (isInActiveEditor(event.target)) context.queueUpdate();
+  };
+
+  const onScroll: EventListener = (event) => {
+    if (isInActiveEditor(event.target)) context.onScrollOrWheel();
+  };
+
+  const onCompositionEnd: EventListener = (event) => {
+    if (!isUsableEditorEvent(event)) {
+      if (isReadonlyEditorTarget(event.target)) {
+        context.clearKeyboardPending();
+        context.queueUpdate();
+      }
+      return;
+    }
+    inputModeTriggers.onCompositionEnd();
     context.queueUpdate();
   };
 
-  // DOM 事件绑定（passive 提升滚动性能）
-  // round 3：移除三阶段 throttle（200/400/600ms），改用 keydown/input 配 rAF 包裹。
-  // compositionend + input 已覆盖 IME / 自动换行延迟场景。
+  const onMouseDown: EventListener = (event) => {
+    if (!isEditableEvent(event)) {
+      mouseDownInfo = null;
+      return;
+    }
+    mouseDownInfo = { selectionText: window.getSelection()?.toString() ?? "" };
+  };
+
+  const onFocusOut: EventListener = (event) => {
+    const focusEvent = event as FocusEvent;
+    if (focusEvent.relatedTarget && isFocusInsideActiveEditor(focusEvent.relatedTarget)) {
+      return;
+    }
+    inputModeTriggers.onBlur();
+    context.clearKeyboardPending();
+    context.queueUpdate();
+  };
+
   const handlers: Array<[string, EventListener, AddEventListenerOptions?]> = [
-    ["selectionchange", context.queueUpdate],
-    // keydown + input 用 rAF 包裹（参考版做法），替代三阶段 throttle
-    // round 4 fix：先 set flag，由 300ms 冷却计时器清零；
-    // 让 Enter 触发的 scroll/ResizeObserver 知道本次更新是键盘驱动，不加 .no-transition
-    // 聚焦/打字机模式：↑↓/PageUp/PageDown 退出；←→/Home/End/Escape 保持
-    // round 4 fix（capture + cooldown）：capture 阶段先于 SiYuan handler 跑，
-    // markKeyboardPending 启动 300ms 倒计时，期间 scroll/ResizeObserver 不加 .no-transition
-    ["keydown", (e) => {
-      const ke = e as KeyboardEvent;
-      if (ke.key === "Enter" || ke.key === "Backspace") {
-        inputModeTriggers.onEnterOrBackspaceEdit();
-      }
-      if (ke.key === "ArrowUp" || ke.key === "ArrowDown" ||
-          ke.key === "PageUp" || ke.key === "PageDown") {
-        inputModeTriggers.onVerticalNavigationKey();
-      }
-      context.markKeyboardPending(); requestAnimationFrame(context.queueUpdate);
-    }, { capture: true }],
-    // 聚焦/打字机模式：输入事件开启（粘贴时跳过）
-    ["input", () => {
-      if (!isPasting) inputModeTriggers.onTextInput();
-      isPasting = false;
-      context.markKeyboardPending(); requestAnimationFrame(context.queueUpdate);
-    }, { capture: true }],
-    // mouseup：已有 cursor 更新 + 拖蓝检测
+    ["selectionchange", onSelectionChange],
+    ["keydown", onKeyDown, { capture: true }],
+    ["input", onInput, { capture: true }],
     ["mouseup", onMouseUpWithDragCheck],
-    // 聚焦/打字机模式：鼠标点击退出
-    ["click", () => {
-      inputModeTriggers.onMouseClick();
-      context.queueUpdate();
-    }],
-    [
-      "scroll",
-      context.onScrollOrWheel as EventListener,
-      { capture: true, passive: true },
-    ],
-    // 聚焦/打字机模式：wheel/touchmove 退出（capture 阶段，与 scroll/keydown/input 一致；
-    //  避免思源 scroll 容器内部 stopPropagation 拦截 bubble 末端 handler）
+    ["click", onClick],
+    ["scroll", onScroll, { capture: true, passive: true }],
     ["wheel", onWheelExit, { capture: true, passive: true }],
     ["touchmove", onWheelExit, { capture: true, passive: true }],
-    // 聚焦/打字机模式：IME 完成开启
-    ["compositionend", () => {
-      inputModeTriggers.onCompositionEnd();
-      context.queueUpdate();
-    }],
-    // resize 时刷新（思源侧边栏拖动会触发）
-    ["resize", context.queueUpdate, { passive: true }],
-    // 聚焦/打字机模式：粘贴标记（跳过 input 开启）
-    ["paste", () => { isPasting = true; }],
-    // 聚焦/打字机模式：拖蓝起点记录
-    ["mousedown", () => {
-      mouseDownInfo = { selectionText: window.getSelection()?.toString() ?? "" };
-    }],
-    // 聚焦/打字机模式：失焦退出
-    ["blur", () => { inputModeTriggers.onBlur(); }],
+    ["compositionend", onCompositionEnd],
+    ["mousedown", onMouseDown],
+    ["focusout", onFocusOut, { capture: true }],
   ];
 
   handlers.forEach(([event, handler, options]) => {
     document.addEventListener(event, handler, options);
   });
   eventListeners = handlers;
+
+  const windowHandlers: Array<[string, EventListener, AddEventListenerOptions?]> = [
+    ["blur", () => {
+      inputModeTriggers.onBlur();
+      context.clearKeyboardPending();
+      context.queueUpdate();
+    }],
+    ["resize", () => {
+      if (isCurrentSelectionEditable()) {
+        context.queueUpdate();
+      } else if (isCurrentSelectionInActiveEditor()) {
+        inputModeTriggers.onReadonly();
+        context.queueUpdate();
+      }
+    }, { passive: true }],
+  ];
+  windowHandlers.forEach(([event, handler, options]) => {
+    window.addEventListener(event, handler, options);
+  });
+  windowEventListeners = windowHandlers;
 }
 
 export function destroyCursorDocumentEvents(): void {
@@ -106,6 +191,9 @@ export function destroyCursorDocumentEvents(): void {
     document.removeEventListener(event, handler, options);
   });
   eventListeners = [];
-  isPasting = false;
+  windowEventListeners.forEach(([event, handler, options]) => {
+    window.removeEventListener(event, handler, options);
+  });
+  windowEventListeners = [];
   mouseDownInfo = null;
 }

@@ -35,6 +35,15 @@
   transition: none !important;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  #zentype-cursor,
+  #zentype-edge-arrow,
+  .zentype-ripple-block {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
 // 呼吸动画关键帧：缓慢变暗后短暂消失，再回到低亮度并进入下一轮。
 @keyframes zentype-breathe {
   0%   { opacity: 1; }
@@ -86,11 +95,9 @@
   --zt-cursor-color: #8ab4f8;
 }
 
-// 隐藏原生光标（仅在编辑器内，排除 AV 数据库）
-// v2.3.0：仅当 body 有 .zentype-cursor-active 时才隐藏原生 caret；
-// cursor off 时原生 caret 自动恢复（fallback）
-body.zentype-cursor-active .protyle-wysiwyg [data-node-id]:not(.av):not(.av__cursor) { caret-color: transparent; }
-body.zentype-cursor-active .protyle-title__input { caret-color: transparent; }
+// 隐藏原生光标仅限当前 custom caret 已成功定位的 editable owner。
+// cursor.ts 在 Range / boundary / 移动端标题等失败路径移除该 class，始终 fail-open。
+.zentype-custom-caret-active { caret-color: transparent !important; }
 
 // 侧边栏拖动手柄禁止选择（防止拖动时被误插入 marker）
 .layout__resize { user-select: none; }
@@ -192,4 +199,13 @@ body.zentype-cursor-active .protyle-title__input { caret-color: transparent; }
 
 ::highlight(zt-sentence-fade-out) {
   color: var(--zt-sentence-fade-out-color);
+}
+
+// Ripple block dimming is intentionally class/custom-property based. This
+// keeps its visual ownership separate from typewriter FLIP's inline
+// transform/transition and leaves original inline opacity untouched.
+// The duration custom property is written from RIPPLE_CONFIG.TRANSITION_SEC.
+.zentype-ripple-block {
+  opacity: var(--zt-ripple-opacity, 1) !important;
+  transition: opacity var(--zt-ripple-transition-duration) ease;
 }

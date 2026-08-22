@@ -8,7 +8,7 @@
  *
  * 设计要点：
  *   - 句级粒度：按 .?!。？！ 切句，用 CSS Custom Highlight API 标记（零 DOM 突变）
- *   - 块级粒度：JS 直接 style.opacity
+ *   - 块级粒度：JS 写入私有 custom property，由专属 class 映射到 opacity
  *   - 是否显示由 inputMode.focusActive 控制；默认加载状态由插件入口决定
  *   - 暂停：选中 / 悬浮窗 -> 清除所有 opacity 覆盖 + Highlight
  *   - 事件驱动：selectionchange/input + 当前块 DOM mutation + inputMode 订阅
@@ -22,6 +22,20 @@
 import { getCursorElement } from "../utils/getCursorElement";
 import { shouldPauseFocusAndTypewriter } from "../utils/edgeCases";
 import { RIPPLE_CONFIG } from "../config";
+import {
+  claimInlineStyle,
+  restoreOwnedInlineStyle,
+  setOwnedInlineStyle,
+  type OwnedInlineStyle,
+} from "../utils/inlineStyleOwnership";
+import { resolveRangeTextPoint } from "../utils/rangeTextPoint";
+import {
+  isCurrentSelectionEditable,
+  isCurrentSelectionInActiveEditor,
+  isEditableEvent,
+  isReadonlyEditorTarget,
+} from "../utils/editorScope";
+import { prefersReducedMotion } from "../utils/reducedMotion";
 import * as inputMode from "./inputMode";
 
 const { BLOCK_LEVELS, SENTENCE_DIM_ALPHA, TRANSITION_SEC, WEIGHT_MIN } = RIPPLE_CONFIG;
@@ -31,6 +45,9 @@ const SENTENCE_DIM_HIGHLIGHT = "zt-sentence-dim";
 const SENTENCE_FADE_IN_HIGHLIGHT = "zt-sentence-fade-in";
 const SENTENCE_FADE_OUT_HIGHLIGHT = "zt-sentence-fade-out";
 const SENTENCE_FADE_MS = Math.round(TRANSITION_SEC * 1000);
+const RIPPLE_BLOCK_CLASS = "zentype-ripple-block";
+const RIPPLE_OPACITY_PROPERTY = "--zt-ripple-opacity";
+const RIPPLE_TRANSITION_DURATION_PROPERTY = "--zt-ripple-transition-duration";
 
 // --- State ---
 
@@ -39,9 +56,13 @@ let initialized = false;
 let pendingFrame: number | null = null;
 let eventListeners: Array<[string, EventListener]> = [];
 const modifiedBlocks = new Set<HTMLElement>();
+const ownedBlockStyles = new WeakMap<HTMLElement, OwnedInlineStyle>();
+const ownedBlocks = new Set<HTMLElement>();
+const ownedRootStyles = new Map<string, OwnedInlineStyle>();
 let unsubInputMode: (() => void) | null = null;
 let visualStateDirty = false;
 let mutationObserver: MutationObserver | null = null;
+let themeObserver: MutationObserver | null = null;
 let observedMutationBlock: HTMLElement | null = null;
 let observedMutationParent: HTMLElement | null = null;
 
@@ -109,23 +130,6 @@ export function isSameBlockOpacityCacheTarget(
 
 // --- Caret offset helpers ---
 
-/** Normalize startContainer/startOffset to a Text node + character offset. */
-function pickClosestTextNode(container: Node, offset: number): { textNode: Text; offset: number } | null {
-  if (container.nodeType === Node.TEXT_NODE) {
-    const textNode = container as Text;
-    const len = textNode.nodeValue?.length ?? 0;
-    return { textNode, offset: Math.max(0, Math.min(len, offset)) };
-  }
-  if (container.nodeType === Node.ELEMENT_NODE) {
-    const el = container as Element;
-    const child = el.childNodes[offset] ?? el.lastChild ?? null;
-    if (!child) return null;
-    if (child.nodeType === Node.TEXT_NODE) return { textNode: child as Text, offset: 0 };
-    return pickClosestTextNode(child, 0);
-  }
-  return null;
-}
-
 type TextNodeEntry = { node: Text; start: number; len: number };
 type TextNodeSnapshotEntry = { node: Text; len: number };
 type SentenceRange = { start: number; end: number };
@@ -189,7 +193,7 @@ function getCaretOffset(root: HTMLElement, textNodeMap?: TextNodeEntry[]): numbe
   const range = sel.getRangeAt(0);
   if (!root.contains(range.startContainer)) return null;
 
-  const resolved = pickClosestTextNode(range.startContainer, range.startOffset);
+  const resolved = resolveRangeTextPoint(range.startContainer, range.startOffset);
   if (!resolved) return null;
 
   const map = textNodeMap ?? buildTextNodeMap(root);
@@ -402,7 +406,7 @@ function startSentenceFade(
 ): boolean {
   cancelSentenceFade();
 
-  if (SENTENCE_FADE_MS <= 0) return false;
+  if (SENTENCE_FADE_MS <= 0 || prefersReducedMotion()) return false;
 
   const fadeOutSource = sentenceRanges.find((range) => range.start === oldCaretRange.start) ?? oldCaretRange;
   const fadeInSource = sentenceRanges.find((range) => range.start === newCaretRange.start) ?? newCaretRange;
@@ -415,8 +419,8 @@ function startSentenceFade(
   const blockId = block.dataset?.nodeId ?? null;
   const textColor = getBlockTextColor(block);
   const dimColor = getThemeDimColor();
-  document.documentElement.style.setProperty("--zt-sentence-fade-out-color", colorToCss(textColor));
-  document.documentElement.style.setProperty("--zt-sentence-fade-in-color", colorToCss(dimColor));
+  setOwnedRootStyle("--zt-sentence-fade-out-color", colorToCss(textColor));
+  setOwnedRootStyle("--zt-sentence-fade-in-color", colorToCss(dimColor));
   visualStateDirty = true;
 
   setSentenceHighlight(SENTENCE_FADE_OUT_HIGHLIGHT, [fadeOutRange]);
@@ -453,11 +457,11 @@ function startSentenceFade(
 
     const raw = Math.min(1, (now - startTime) / SENTENCE_FADE_MS);
     const t = easeInOutCubic(raw);
-    document.documentElement.style.setProperty(
+    setOwnedRootStyle(
       "--zt-sentence-fade-out-color",
       colorToCss(mixColor(textColor, dimColor, t)),
     );
-    document.documentElement.style.setProperty(
+    setOwnedRootStyle(
       "--zt-sentence-fade-in-color",
       colorToCss(mixColor(dimColor, textColor, t)),
     );
@@ -544,6 +548,7 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
     }
   }
   const canAnimate =
+    !prefersReducedMotion() &&
     SENTENCE_FADE_MS > 0 &&
     blockId !== null &&
     blockId === lastDimBlockId &&
@@ -637,16 +642,49 @@ function applyBlockOpacity(container: HTMLElement, currentBlock: HTMLElement): v
       : distance >= 2
       ? 1.0
       : WEIGHT_MIN + visualWeightOf(block, editorRect) * (1 - WEIGHT_MIN);
-    block.style.transition = `opacity ${TRANSITION_SEC}s ease`;
-    block.style.opacity = String(baseLevel * weightFactor);
+    let owned = ownedBlockStyles.get(block);
+    if (!owned) {
+      owned = claimInlineStyle(block.style, [
+        RIPPLE_OPACITY_PROPERTY,
+        RIPPLE_TRANSITION_DURATION_PROPERTY,
+      ]);
+      ownedBlockStyles.set(block, owned);
+      ownedBlocks.add(block);
+    }
+    const opacityApplied = setOwnedInlineStyle(
+      block.style,
+      owned,
+      RIPPLE_OPACITY_PROPERTY,
+      String(baseLevel * weightFactor),
+    );
+    const durationApplied = opacityApplied && setOwnedInlineStyle(
+      block.style,
+      owned,
+      RIPPLE_TRANSITION_DURATION_PROPERTY,
+      `${TRANSITION_SEC}s`,
+    );
+    if (!opacityApplied || !durationApplied) {
+      // Another owner changed our private property. Drop the class as well so
+      // the external value is visible and never overwrite it on a later frame.
+      restoreOwnedInlineStyle(block.style, owned);
+      block.classList.remove(RIPPLE_BLOCK_CLASS);
+      ownedBlockStyles.delete(block);
+      ownedBlocks.delete(block);
+      return;
+    }
+    block.classList.add(RIPPLE_BLOCK_CLASS);
     newBlocks.add(block);
     visualStateDirty = true;
   });
 
-  // 不在新列表里的旧块：清 opacity（transition 仍在，淡出到 1）
+  // 不在新列表里的旧块：精确恢复 claim 前的 inline style。
   modifiedBlocks.forEach((block) => {
     if (!newBlocks.has(block)) {
-      block.style.opacity = "";
+      const owned = ownedBlockStyles.get(block);
+      if (owned) restoreOwnedInlineStyle(block.style, owned);
+      block.classList.remove(RIPPLE_BLOCK_CLASS);
+      ownedBlockStyles.delete(block);
+      ownedBlocks.delete(block);
     }
   });
 
@@ -665,12 +703,14 @@ function applyRippleNow(): void {
   const currentBlock = getCurrentBlock();
   if (!currentBlock) {
     disconnectMutationObserver();
+    clearAll();
     return;
   }
 
   const container = currentBlock.closest(".protyle-wysiwyg") as HTMLElement | null;
   if (!container) {
     disconnectMutationObserver();
+    clearAll();
     return;
   }
 
@@ -680,7 +720,7 @@ function applyRippleNow(): void {
   const themeMode = document.documentElement.getAttribute("data-theme-mode");
   if (!rippleColorActive || themeMode !== lastThemeMode) {
     const dimRgb = themeMode === "dark" ? "255,255,255" : "0,0,0";
-    document.documentElement.style.setProperty(
+    setOwnedRootStyle(
       "--zt-sentence-dim-color",
       `rgba(${dimRgb},${SENTENCE_DIM_ALPHA})`,
     );
@@ -714,6 +754,29 @@ function disconnectMutationObserver(): void {
   mutationObserver?.disconnect();
   observedMutationBlock = null;
   observedMutationParent = null;
+}
+
+function bindThemeObserver(): void {
+  if (themeObserver || typeof MutationObserver === "undefined") return;
+  const root = document.documentElement;
+  if (!root) return;
+  themeObserver = new MutationObserver(() => {
+    // Theme changes must refresh sentence variables even when no input or
+    // selection event follows. The next scheduled action reads the new mode.
+    lastThemeMode = null;
+    rippleColorActive = false;
+    visualStateDirty = true;
+    if (active) applyRipple();
+  });
+  themeObserver.observe(root, {
+    attributes: true,
+    attributeFilter: ["data-theme-mode"],
+  });
+}
+
+function disconnectThemeObserver(): void {
+  themeObserver?.disconnect();
+  themeObserver = null;
 }
 
 function bindMutationObserver(currentBlock: HTMLElement, container: HTMLElement): void {
@@ -780,30 +843,36 @@ function onDomMutation(records: MutationRecord[]): void {
   scheduleMutationRefresh();
 }
 
-function clearAll(options: { deepScan?: boolean; clearTransition?: boolean } = {}): void {
-  disconnectMutationObserver();
-  const deepScan = options.deepScan ?? false;
-  const clearTransition = options.clearTransition ?? false;
-  if (!deepScan && !visualStateDirty) return;
-
-  // 普通退出只清 opacity，保留 transition 让淡出有动画；destroy 时额外清 transition。
-  modifiedBlocks.forEach((block) => {
-    if (clearTransition) block.style.transition = "";
-    block.style.opacity = "";
-  });
-  if (deepScan) {
-    // 兜底：清理已脱离 modifiedBlocks 追踪的残留块（v2.6.0 的 isConnected 检查曾导致漏清）
-    document.querySelectorAll('.protyle-wysiwyg [data-node-id]').forEach((el: Element) => {
-      const htmlEl = el as HTMLElement;
-      if (clearTransition) htmlEl.style.transition = "";
-      htmlEl.style.opacity = "";
-    });
+function setOwnedRootStyle(property: string, value: string): void {
+  const rootStyle = document.documentElement.style;
+  let owned = ownedRootStyles.get(property);
+  if (!owned) {
+    owned = claimInlineStyle(rootStyle, [property]);
+    ownedRootStyles.set(property, owned);
   }
+  setOwnedInlineStyle(rootStyle, owned, property, value);
+}
+
+function clearAll(): void {
+  disconnectMutationObserver();
+  if (!visualStateDirty && ownedBlocks.size === 0 && ownedRootStyles.size === 0) return;
+
+  // Restore only blocks that this module claimed. Unrelated SiYuan blocks and
+  // other plugins' inline styles are never touched.
+  for (const block of Array.from(ownedBlocks)) {
+    const owned = ownedBlockStyles.get(block);
+    if (owned) restoreOwnedInlineStyle(block.style, owned);
+    block.classList.remove(RIPPLE_BLOCK_CLASS);
+    ownedBlockStyles.delete(block);
+  }
+  ownedBlocks.clear();
+  modifiedBlocks.clear();
   cancelSentenceFade();
   if (sentenceHighlightSupported()) CSS.highlights.delete(SENTENCE_DIM_HIGHLIGHT);
-  document.documentElement.style.removeProperty("--zt-sentence-dim-color");
-  document.documentElement.style.removeProperty("--zt-sentence-fade-in-color");
-  document.documentElement.style.removeProperty("--zt-sentence-fade-out-color");
+  for (const [property, owned] of ownedRootStyles) {
+    restoreOwnedInlineStyle(document.documentElement.style, owned);
+    ownedRootStyles.delete(property);
+  }
   resetSentenceCache();
   // 重置缓存：视觉状态已清，下次 apply 必须重建。
   lastBlockOpacityBlockId = null;
@@ -813,16 +882,23 @@ function clearAll(options: { deepScan?: boolean; clearTransition?: boolean } = {
   lastBlockOpacityChildCount = null;
   rippleColorActive = false;
   visualStateDirty = false;
-  modifiedBlocks.clear();
 }
 
 // --- Lifecycle ---
 
 function onSelectionChange(): void {
+  if (!isCurrentSelectionEditable()) {
+    if (isCurrentSelectionInActiveEditor()) inputMode.setBothOff();
+    return;
+  }
   applyRipple();
 }
 
-function onInput(): void {
+function onInput(event: Event): void {
+  if (!isEditableEvent(event)) {
+    if (isReadonlyEditorTarget(event.target)) inputMode.setBothOff();
+    return;
+  }
   if (pendingFrame !== null) {
     cancelAnimationFrame(pendingFrame);
     pendingFrame = null;
@@ -846,6 +922,8 @@ export function initRipple(): void {
     ["input", inputHandler],
   ];
 
+  bindThemeObserver();
+
   // P1-1: 订阅 inputMode。wheel/touchmove/blur/click 等退出事件不触发 selectionchange，
   // 旧版仅靠 selectionchange → clearAll 会让 ripple opacity 在滚动/失焦后残留。
   unsubInputMode = inputMode.subscribe((state) => {
@@ -868,6 +946,8 @@ export function destroyRipple(): void {
     unsubInputMode = null;
   }
 
+  disconnectThemeObserver();
+
   if (mutationObserver) {
     mutationObserver.disconnect();
     mutationObserver = null;
@@ -880,6 +960,5 @@ export function destroyRipple(): void {
     pendingFrame = null;
   }
 
-  // destroy 时彻底清 transition + opacity，并只做一次全局兜底扫描。
-  clearAll({ deepScan: true, clearTransition: true });
+  clearAll();
 }

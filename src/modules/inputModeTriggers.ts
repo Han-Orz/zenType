@@ -15,7 +15,7 @@ import * as inputMode from "./inputMode";
 
 // ── ON 触发 ───────────────────────────────────────────────────────────
 
-/** 键盘文本输入 → 开启（粘贴时由 events.ts 的 isPasting 守卫跳过，不调用此处） */
+/** 键盘文本输入 → 开启。粘贴/拖放由事件层按 inputType 明确跳过。 */
 export function onTextInput(): void {
   inputMode.setBothOn();
 }
@@ -59,5 +59,10 @@ export function onSwitchProtyle(): void {
 
 /** 失焦 → 退出 */
 export function onBlur(): void {
+  inputMode.setBothOff();
+}
+
+/** 只读编辑器或只读 UI → 清理聚焦与打字机状态。 */
+export function onReadonly(): void {
   inputMode.setBothOff();
 }

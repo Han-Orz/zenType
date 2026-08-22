@@ -16,6 +16,7 @@
 import type { CursorRect } from "../types";
 import { CURSOR_CONFIG } from "../config";
 import { getLineHeight } from "./getLineHeight";
+import { resolveRangeTextPoint } from "./rangeTextPoint";
 
 /** 用户可配置：见 src/config.ts :: CURSOR_CONFIG.HEIGHT_RATIO */
 export const LINE_HEIGHT_RATIO = CURSOR_CONFIG.HEIGHT_RATIO;
@@ -111,17 +112,26 @@ function getAdjacentTextRect(range: Range, block: HTMLElement): FallbackCursorRe
     textNodes.push(node as Text);
   }
 
-  const currentNode = range.startContainer.nodeType === Node.TEXT_NODE
-    ? range.startContainer as Text
-    : null;
+  const resolved = resolveRangeTextPoint(range.startContainer, range.startOffset);
+  const currentNode = resolved?.textNode ?? null;
   const currentIndex = currentNode ? textNodes.indexOf(currentNode) : -1;
 
-  if (currentIndex >= 0 && currentNode && currentNode.data.length > 0) {
-    const currentRect = getTextBoundaryRect(currentNode, range.startOffset);
-    if (currentRect) return { rect: currentRect, edge: "end" };
+  if (currentIndex >= 0 && currentNode && currentNode.data.length > 0 && resolved) {
+    const currentRect = getTextBoundaryRect(currentNode, resolved.offset);
+    if (currentRect) {
+      return {
+        rect: currentRect,
+        edge: resolved.offset === 0 ? "start" : "end",
+      };
+    }
   }
 
-  const previousStart = currentIndex >= 0 ? currentIndex - 1 : textNodes.length - 1;
+  // If the resolved point is at the start of a text node, its previous
+  // sibling is the closest backward candidate; otherwise the current node's
+  // end is the closest candidate. This preserves element-container offsets.
+  const previousStart = currentIndex >= 0
+    ? (resolved?.offset === 0 ? currentIndex - 1 : currentIndex)
+    : textNodes.length - 1;
   for (let index = previousStart; index >= 0; index -= 1) {
     const textNode = textNodes[index];
     if (textNode.data.length === 0) continue;
@@ -129,7 +139,9 @@ function getAdjacentTextRect(range: Range, block: HTMLElement): FallbackCursorRe
     if (rect) return { rect, edge: "end" };
   }
 
-  const nextStart = currentIndex >= 0 ? currentIndex + 1 : 0;
+  const nextStart = currentIndex >= 0
+    ? (resolved?.offset === 0 ? currentIndex : currentIndex + 1)
+    : 0;
   for (let index = nextStart; index < textNodes.length; index += 1) {
     const textNode = textNodes[index];
     if (textNode.data.length === 0) continue;

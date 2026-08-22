@@ -5,16 +5,32 @@ import { shouldPauseTypewriter } from "../utils/edgeCases";
 import * as inputMode from "./inputMode";
 import * as inputModeTriggers from "./inputModeTriggers";
 import { isInAllowElements } from "../utils/boundary";
+import {
+  claimInlineStyle,
+  restoreOwnedInlineStyle,
+  setOwnedInlineStyle,
+  type OwnedInlineStyle,
+} from "../utils/inlineStyleOwnership";
+import {
+  isCurrentSelectionEditable,
+  isCurrentSelectionInActiveEditor,
+  isEditableEvent,
+  isReadonlyEditorTarget,
+} from "../utils/editorScope";
+import { prefersReducedMotion } from "../utils/reducedMotion";
 
 const { COMFORT_ZONE, SCROLL_DURATION_TIERS, SCROLL_CURVE, TYPING_GAP_MS, CLICK_CENTER_LOW, CLICK_CENTER_HIGH } = TYPEWRITER_CONFIG;
 const FLIP_BLOCK_RADIUS = 30;
 
 let eventListeners: Array<[string, EventListener, AddEventListenerOptions?]> = [];
+let windowEventListeners: Array<[string, EventListener, AddEventListenerOptions?]> = [];
+let unsubInputMode: (() => void) | null = null;
 let pendingScroll: number | null = null;
 let pendingScrollEnd: number = 0;
 let scrollResyncPending = false;
 let activeFLIPTimer: ReturnType<typeof setTimeout> | null = null;
 let lastFLIPElements: HTMLElement[] = []; // P3-7: 上一轮 FLIP 修改的元素，供下一轮入口清理残留 inline transition
+const ownedFLIPStyles = new WeakMap<HTMLElement, OwnedInlineStyle>();
 let flipGeneration = 0;
 let initialized = false;
 const deferredFrames = new Set<number>();
@@ -29,6 +45,20 @@ let bypassEmptyBlock = false;                              // Enter 新建空块
 /** isScrolling 由 pendingScroll !== null 推断，无需独立状态管理 — 避免动画结束到定时器置 false 间的竞态窗口 */
 function isScrolling(): boolean {
   return pendingScroll !== null;
+}
+
+export function shouldHandleTypewriterEditKey(
+  event: Pick<KeyboardEvent, "key" | "isComposing" | "defaultPrevented">,
+): boolean {
+  return !event.isComposing && !event.defaultPrevented &&
+    (event.key === "Enter" || event.key === "Backspace");
+}
+
+export function shouldCancelPendingScrollForReducedMotion(
+  reducedMotion: boolean,
+  hasPendingScroll: boolean,
+): boolean {
+  return reducedMotion && hasPendingScroll;
 }
 
 let pendingCheck: number | null = null;
@@ -53,6 +83,33 @@ function cancelDeferredFrames(): void {
   deferredFrames.clear();
 }
 
+function pauseTypewriterMotion(): void {
+  flipGeneration += 1;
+  cancelDeferredFrames();
+  if (pendingScroll !== null) {
+    cancelAnimationFrame(pendingScroll);
+    pendingScroll = null;
+  }
+  if (pendingCheck !== null) {
+    cancelAnimationFrame(pendingCheck);
+    pendingCheck = null;
+  }
+  if (activeFLIPTimer !== null) {
+    clearTimeout(activeFLIPTimer);
+    activeFLIPTimer = null;
+  }
+  clearLastFLIPElements();
+  if (debounceTimer !== null) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  scrollResyncPending = false;
+  composing = false;
+  lastInputAt = 0;
+  firstCharAfterIdle = false;
+  bypassEmptyBlock = false;
+}
+
 function easeOutCubic(t: number): number {
   return 1 - Math.pow(1 - t, 3);
 }
@@ -75,12 +132,20 @@ function easeInOutCubic(t: number): number {
  */
 function clearLastFLIPElements(): void {
   for (const el of lastFLIPElements) {
-    if (el.isConnected) {
-      el.style.transform = '';
-      el.style.transition = '';
-    }
+    const owned = ownedFLIPStyles.get(el);
+    if (owned) restoreOwnedInlineStyle(el.style, owned);
+    ownedFLIPStyles.delete(el);
   }
   lastFLIPElements = [];
+}
+
+function setOwnedFLIPStyle(el: HTMLElement, property: string, value: string): void {
+  let owned = ownedFLIPStyles.get(el);
+  if (!owned) {
+    owned = claimInlineStyle(el.style, ["transform", "transition"]);
+    ownedFLIPStyles.set(el, owned);
+  }
+  setOwnedInlineStyle(el.style, owned, property, value);
 }
 
 function isBlockElement(el: Element | null): el is HTMLElement {
@@ -146,6 +211,15 @@ function collectFlipBlocks(editor: HTMLElement, range: Range): HTMLElement[] {
 }
 
 function animateBlockShift(editor: HTMLElement, range: Range): void {
+  if (prefersReducedMotion()) {
+    flipGeneration += 1;
+    if (activeFLIPTimer !== null) {
+      clearTimeout(activeFLIPTimer);
+      activeFLIPTimer = null;
+    }
+    clearLastFLIPElements();
+    return;
+  }
   const token = ++flipGeneration;
 
   // 取消前一轮 FLIP cleanup，防止连续 Enter 时前一轮 Phase 3 的 setTimeout 清空当前 transform
@@ -179,8 +253,8 @@ function animateBlockShift(editor: HTMLElement, range: Range): void {
       const delta = y0 - y1;
       if (Math.abs(delta) < 2) continue;
 
-      el.style.transform = `translateY(${delta}px)`;
-      el.style.transition = 'none';
+      setOwnedFLIPStyle(el, "transform", `translateY(${delta}px)`);
+      setOwnedFLIPStyle(el, "transition", "none");
       modifiedElements.push(el);
     }
 
@@ -196,8 +270,8 @@ function animateBlockShift(editor: HTMLElement, range: Range): void {
       if (token !== flipGeneration) return;
 
       for (const el of modifiedElements) {
-        el.style.transition = `transform 250ms ${SCROLL_CURVE}`;
-        el.style.transform = '';
+        setOwnedFLIPStyle(el, "transition", `transform 250ms ${SCROLL_CURVE}`);
+        setOwnedFLIPStyle(el, "transform", "");
       }
       if (activeFLIPTimer !== null) {
         clearTimeout(activeFLIPTimer);
@@ -207,8 +281,9 @@ function animateBlockShift(editor: HTMLElement, range: Range): void {
         if (token !== flipGeneration || activeFLIPTimer === null) return;  // 被新 FLIP 取消，跳过 cleanup
         activeFLIPTimer = null;
         modifiedElements.forEach(el => {
-          el.style.transform = '';
-          el.style.transition = '';
+          const owned = ownedFLIPStyles.get(el);
+          if (owned) restoreOwnedInlineStyle(el.style, owned);
+          ownedFLIPStyles.delete(el);
         });
       }, 300);
     });
@@ -232,6 +307,19 @@ interface SmoothScrollOptions {
 function smoothScroll(target: HTMLElement, options: SmoothScrollOptions): void {
   const { deltaY, duration, easing } = options;
   const easeFn = easing ?? easeOutCubic;
+
+  if (prefersReducedMotion()) {
+    if (pendingScroll !== null) cancelAnimationFrame(pendingScroll);
+    pendingScroll = null;
+    const maxScroll = target.scrollHeight - target.clientHeight;
+    target.scrollTop = Math.max(0, Math.min(target.scrollTop + deltaY, maxScroll));
+    if (scrollResyncPending) {
+      scrollResyncPending = false;
+      lastCheckRect = null;
+      scheduleCheck();
+    }
+    return;
+  }
 
   // 设计决策（TODO-5）：checkAndScroll 的 isScrolling() 守卫在动画进行中直接 return，
   // 新滚动请求被丢弃而非合并。下方 cancelAnimationFrame 为防御性保留（未来若有其他
@@ -268,6 +356,17 @@ function smoothScroll(target: HTMLElement, options: SmoothScrollOptions): void {
   pendingScroll = requestAnimationFrame(step);
 }
 
+function cancelPendingScrollForReducedMotion(): void {
+  if (!shouldCancelPendingScrollForReducedMotion(prefersReducedMotion(), pendingScroll !== null)) {
+    return;
+  }
+  const frame = pendingScroll;
+  if (frame === null) return;
+  cancelAnimationFrame(frame);
+  pendingScroll = null;
+  scrollResyncPending = false;
+}
+
 function scheduleCheck(): void {
   if (pendingCheck !== null) return; // already scheduled, merge
   pendingCheck = requestAnimationFrame(() => {
@@ -279,6 +378,11 @@ function scheduleCheck(): void {
 function checkAndScroll(): void {
   // 打字机模式关闭时：不自动滚动
   if (!inputMode.isTypewriterActive()) return;
+
+  // Reduced motion may be enabled while an existing smooth scroll is running.
+  // Cancel it before any pause or isScrolling guard so this action cannot leave
+  // the old animation alive.
+  cancelPendingScrollForReducedMotion();
 
   // 暂停场景（悬浮窗 / 只读 / 嵌入块）：不滚动
   if (shouldPauseTypewriter()) return;
@@ -494,13 +598,25 @@ export function initTypewriter(): void {
 
   // 事件数组使用三元组以便保留 options
   const handlers: Array<[string, EventListener, AddEventListenerOptions?]> = [
-    ["selectionchange", scheduleCheck],
-    ["resize", scheduleCheck],
+    ["selectionchange", () => {
+      if (isCurrentSelectionEditable()) scheduleCheck();
+      else if (isCurrentSelectionInActiveEditor()) {
+        inputModeTriggers.onReadonly();
+        pauseTypewriterMotion();
+      }
+    }],
     // input 事件维护 debounce 心跳（lastInputAt），区分"连续键入"与"停顿"
     // Option i：若此次 input 前已空闲（>2×gap），设置标志让 checkAndScroll 立即滚而不延后
     [
       "input",
       (e: Event) => {
+        if (!isEditableEvent(e)) {
+          if (isReadonlyEditorTarget(e.target)) {
+            inputModeTriggers.onReadonly();
+            pauseTypewriterMotion();
+          }
+          return;
+        }
         const ie = e as InputEvent;
         const wasIdle = lastInputAt === 0 || (Date.now() - lastInputAt) > 2 * TYPING_GAP_MS;
         // 仅 insert 类输入设置 firstCharAfterIdle（Backspace delete 不应绕过 debounce）
@@ -512,7 +628,14 @@ export function initTypewriter(): void {
     // IME composition 开始：硬暂停 + 取消进行中的 smoothScroll，否则 per-frame scrollTop 会拖候选框（修复 3c）
     [
       "compositionstart",
-      () => {
+      (e) => {
+        if (!isEditableEvent(e)) {
+          if (isReadonlyEditorTarget(e.target)) {
+            inputModeTriggers.onReadonly();
+            pauseTypewriterMotion();
+          }
+          return;
+        }
         composing = true;
         firstCharAfterIdle = false;  // composition 走自己的路径，不消费 firstChar 标志
         if (pendingScroll !== null) {
@@ -530,7 +653,14 @@ export function initTypewriter(): void {
     // IME composition 结束：解除暂停，重置 debounce 心跳，调度一次舒适区检查（走 debounce 路径）
     [
       "compositionend",
-      () => {
+      (e) => {
+        if (!isEditableEvent(e)) {
+          if (isReadonlyEditorTarget(e.target)) {
+            inputModeTriggers.onReadonly();
+            pauseTypewriterMotion();
+          }
+          return;
+        }
         composing = false;
         firstCharAfterIdle = false;  // post-composition 走 debounce，不立即滚
         lastInputAt = Date.now();
@@ -542,6 +672,7 @@ export function initTypewriter(): void {
     [
       "click",
       (e) => {
+        if (!isEditableEvent(e)) return;
         const target = e.target;
         if (target instanceof Element) centerIfFarOff(target);
       },
@@ -551,8 +682,15 @@ export function initTypewriter(): void {
     [
       "keydown",
       (e) => {
+        if (!isEditableEvent(e)) {
+          if (isReadonlyEditorTarget(e.target)) {
+            inputModeTriggers.onReadonly();
+            pauseTypewriterMotion();
+          }
+          return;
+        }
         const ke = e as KeyboardEvent;
-        if (ke.key !== "Enter" && ke.key !== "Backspace") return;
+        if (!shouldHandleTypewriterEditKey(ke)) return;
         const shouldAnimateBlockShift = shouldAnimateBlockShiftForKey(ke.key);
         // Enter/Backspace 后 SiYuan 可能 preventDefault → 不触发 input 事件 → typewriterActive 不被重置
         // 主动激活，确保 checkAndScroll 不因 typewriter 状态关闭而早退（修 Enter 不滚的根因）
@@ -590,15 +728,37 @@ export function initTypewriter(): void {
     ],
   ];
 
+  const windowHandlers: Array<[string, EventListener, AddEventListenerOptions?]> = [
+    ["resize", () => {
+      if (isCurrentSelectionEditable()) scheduleCheck();
+      else if (isCurrentSelectionInActiveEditor()) {
+        inputModeTriggers.onReadonly();
+        pauseTypewriterMotion();
+      }
+    }, { passive: true }],
+  ];
+
   // 解构必须包含第三个元素，否则 passive 等选项会被丢弃
   handlers.forEach(([event, handler, options]) => {
     document.addEventListener(event, handler as EventListener, options);
   });
   eventListeners = handlers;
+  windowHandlers.forEach(([event, handler, options]) => {
+    window.addEventListener(event, handler, options);
+  });
+  windowEventListeners = windowHandlers;
 
-  // 初始化时立即激活打字机模式状态
-  // setBothOn 是幂等的，多次调用安全；cursor 模块也会在 input 事件中调用
-  inputModeTriggers.onTextInput();
+  unsubInputMode = inputMode.subscribe((state) => {
+    if (!state.typewriterActive) pauseTypewriterMotion();
+  });
+
+  // 只有当前活跃可编辑 Protyle 才允许初始化时进入模式；只读/外部焦点
+  // 保持关闭，避免模块启动把全局 UI 输入误判为编辑活动。
+  if (isCurrentSelectionEditable() && !shouldPauseTypewriter()) {
+    inputModeTriggers.onTextInput();
+  } else {
+    inputModeTriggers.onReadonly();
+  }
 }
 
 export function destroyTypewriter(): void {
@@ -606,6 +766,14 @@ export function destroyTypewriter(): void {
     document.removeEventListener(event, handler, options);
   });
   eventListeners = [];
+  windowEventListeners.forEach(([event, handler, options]) => {
+    window.removeEventListener(event, handler, options);
+  });
+  windowEventListeners = [];
+  if (unsubInputMode) {
+    unsubInputMode();
+    unsubInputMode = null;
+  }
   initialized = false;
   flipGeneration += 1;
   cancelDeferredFrames();

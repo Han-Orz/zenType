@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.6.6 (2026-08-22) — Lifecycle Safety + Bazaar Compliance
+
+修复审查中发现的输入作用域、原生光标降级、样式所有权和异步生命周期问题，并同步当前思源集市发布规则。
+
+### Fixed
+- **原生光标可靠降级**：仅在自定义光标成功定位到当前可编辑宿主时隐藏原生 caret；Range、边界、只读区域、移动端标题或几何计算失败时立即恢复原生 caret，避免旧位置残影和“无光标”状态。
+- **编辑器事件作用域**：键盘、输入、粘贴、滚动、选区和焦点事件仅作用于当前活跃、可编辑的 Protyle；外部输入框、只读编辑器、IME 组合输入和已被宿主处理的按键不再错误激活模式。
+- **Range 元素端点**：正确解析以 Element 为容器的 Range child offset，覆盖嵌套文本、块尾端点和空 Text 占位符。
+- **视觉样式所有权**：typewriter 与 ripple 只恢复自己实际写入且未被外部改写的样式，避免覆盖思源或其他插件的 `transform`、`transition`、`opacity`。
+- **生命周期清理**：补齐 window/document 事件、计时器、动画帧、观察器和模块状态的暂停及销毁路径，减少重新初始化后的重复监听和悬挂任务。
+- **减少动态效果**：遵循 `prefers-reduced-motion`，关闭光标呼吸、切换过渡、滚动动画和 ripple 过渡。
+- **集市预览图**：在保持预览观感的前提下压缩 `preview.png` 至 200KB 上限以内，修复 v2.6.5 被 Bazaar Stage 拒绝的问题。
+
+### Changed
+- `pnpm run build` 现在会清理发布目录、构建并直接生成根目录 `package.zip`；压缩包使用显式文件白名单，避免旧产物混入 Release。
+- 更新构建依赖并新增 13 项回归测试，覆盖 Range、事件作用域、样式恢复、原生 caret、reduced motion、模块销毁和发布包内容。
+
+---
+
 ## v2.6.5 (2026-08-21) — Non-empty Block Caret Fallback
 
 修复输入过程中按方向键下时光标视觉位置与实际输入位置不一致的问题。

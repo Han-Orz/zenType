@@ -16,6 +16,13 @@ export function hasSelection(): boolean {
 export function isReadMode(): boolean {
   const cursor = getCursorElement();
   if (cursor) {
+    const titleInput = cursor.closest(".protyle-title__input") as HTMLInputElement | null;
+    if (titleInput) {
+      return titleInput.hasAttribute("readonly")
+        || titleInput.getAttribute("aria-readonly") === "true"
+        || titleInput.getAttribute("contenteditable") === "false"
+        || titleInput.readOnly === true;
+    }
     // 思源 .protyle-content 容器本身没有 contenteditable 属性，
     // contenteditable=true 写在内部 block（paragraph/heading/list）上。
     // 所以检查光标实际所在的元素，不是外层容器。
@@ -56,6 +63,7 @@ function shouldPauseCommon(): boolean {
 export function shouldPauseFocusAndTypewriter(): boolean {
   if (hasSelection()) return true;
   if (shouldPauseCommon()) return true;
+  if (isReadMode()) return true;
   return false;
 }
 

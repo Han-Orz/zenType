@@ -32,6 +32,11 @@ import { isInAllowElements } from "../utils/boundary";
 import { isMobile } from "../utils/isMobile";
 import { getEffectiveZIndex } from "../utils/getEffectiveZIndex";
 import { getEdgeProximity } from "../utils/edgeProximity";
+import { prefersReducedMotion } from "../utils/reducedMotion";
+import {
+  activateNativeCaretOwner,
+  restoreNativeCaretOwner,
+} from "../utils/caretVisibility";
 import {
   initBreathing,
   pauseBreathe,
@@ -74,15 +79,30 @@ let pendingFrame: number | null = null;
 let removeTransitionFrame: number | null = null;
 let pendingKeyboardUpdate = false; // round 4 fix：Enter 触发滚动时跳过 .no-transition，保留按距离分档的过渡动画
 let keyboardCooldownTimer: ReturnType<typeof setTimeout> | null = null; // round 4 fix（capture + cooldown）：键盘事件后 300ms 内 scroll/ResizeObserver 知道本次更新是键盘驱动
-let lastGoodCursorPos: { x: number; y: number; height: number } | null = null; // commit 1：上一次在视口内的光标位置，用于离屏时保持可见位置
 let prevCursorX: number | null = null; // Q7：上一次写入 transform 时的 x，用于计算本帧移动距离 → 时长
 let prevCursorY: number | null = null; // Q7：上一次写入 transform 时的 y，同上
 let lastCursorDur: number | null = null;
-let wasOffScreen = false; // Q-return：上一帧是否在 case B（编辑器内离屏），用于在 case C 入口强制恢复 transition 让淡入可见
 let initialized = false;
 let cachedZIndexElement: Element | null = null;
 let cachedEffectiveZIndex = 0;
 let cachedFullscreenElement: Element | null = null;
+let nativeCaretOwner: HTMLElement | null = null;
+
+/** Fail open whenever the custom caret cannot be positioned reliably. */
+function restoreNativeCaretAndHideCustom(): void {
+  nativeCaretOwner = restoreNativeCaretOwner(nativeCaretOwner);
+  cursorEl?.classList.add("hidden");
+}
+
+/** Hide the native caret only on the editable owner currently being rendered. */
+function activateCustomCaret(element: Element): boolean {
+  nativeCaretOwner = activateNativeCaretOwner(nativeCaretOwner, element);
+  if (!nativeCaretOwner) {
+    cursorEl?.classList.add("hidden");
+    return false;
+  }
+  return true;
+}
 
 function markKeyboardPending(): void {
   pendingKeyboardUpdate = true;
@@ -91,6 +111,14 @@ function markKeyboardPending(): void {
     pendingKeyboardUpdate = false;
     keyboardCooldownTimer = null;
   }, 300);
+}
+
+function clearKeyboardPending(): void {
+  pendingKeyboardUpdate = false;
+  if (keyboardCooldownTimer !== null) {
+    clearTimeout(keyboardCooldownTimer);
+    keyboardCooldownTimer = null;
+  }
 }
 
 /**
@@ -192,6 +220,7 @@ const switchSettleContext: SwitchSettleContext = {
 };
 
 const cursorEventContext: CursorEventContext = {
+  clearKeyboardPending,
   markKeyboardPending,
   onScrollOrWheel,
   queueUpdate,
@@ -223,62 +252,66 @@ const popoverDragContext: PopoverDragContext = {
 function doUpdateCursor(): void {
   if (!cursorEl) return;
 
+  const reducedMotion = prefersReducedMotion();
+  if (reducedMotion) {
+    cancelRemoveTransitionFrame();
+    cursorEl.classList.add("no-transition", "no-animation");
+  }
+
   // 1) 暂停呼吸（操作中不需要呼吸感）
   pauseBreathe();
 
   // 2) 读取选区 → 显示矩形
-  const rect = getCursorRect();
+  let rect: ReturnType<typeof getCursorRect>;
+  try {
+    rect = getCursorRect();
+  } catch {
+    restoreNativeCaretAndHideCustom();
+    pauseBreathe();
+    return;
+  }
   if (!rect || rect.height === 0) {
-    // commit D：光标不消失 —— 让呼吸停在 Phase 1（静态），停留在上一位置
+    // No reliable geometry means the native caret is the only trustworthy
+    // fallback; never leave the previous custom caret parked on old content.
+    restoreNativeCaretAndHideCustom();
     pauseBreathe();
     return;
   }
 
   // 3) 边界检测（3 重，round 3 移除第 3 重弹窗硬性排除）
-  const allowed = isInAllowElements({ x: rect.x, y: rect.y });
-
   // commit 1：边缘距离（供 fade/scale、commit 2/3 复用）
   // 传 editorRect 把淡出边界对齐到"编辑器内容区"而不是"裸视口"，让顶部对称底部。
   // 注意：必须先算 allowed（拿到 editorRect）再调 getEdgeProximity。
+  let allowed: ReturnType<typeof isInAllowElements>;
+  try {
+    allowed = isInAllowElements({ x: rect.x, y: rect.y });
+  } catch {
+    restoreNativeCaretAndHideCustom();
+    pauseBreathe();
+    return;
+  }
   const edge = getEdgeProximity(rect, allowed.editorRect);
 
   if (!allowed.allowed) {
-    // commit D + m0115 fix：区分两种边界失败
-    //   isOuterElement = false → 光标在编辑器 DOM 内但已滚出视口
-    //     commit 1 之前：加 .hidden；现在：inline opacity=0 + scale=MIN_SCALE，停在 lastGoodCursorPos
-    //   isOuterElement = true  → 光标确实离开了编辑器（侧栏/AV/失焦）→ 保留在最后位置，静态
-    if (allowed.isOuterElement) {
-      pauseBreathe();
-      scheduleResumeBreathe();
-      return;
-    }
-    // commit 1：离屏（编辑器内），用 lastGoodCursorPos 保持位置，淡出
-    // onScrollOrWheel 加的 .no-transition 会卡在 case B 不被移除（rAF 只在 case C 执行），
-    // 导致 opacity 瞬间 0 → 看不到淡出。这里强制移除 + reflow 让淡出生效。
-    if (lastGoodCursorPos) {
-      cursorEl.classList.remove("no-transition");
-      void cursorEl.offsetHeight;
-      applyFadeAndScale(cursorEl, 0, EDGE_FADE.MIN_SCALE, lastGoodCursorPos);
-    }
+    // A rejected boundary is not a reliable custom-caret location. Restore
+    // native caret visibility and hide the stale global caret instead of
+    // leaving it at the last successful position.
+    restoreNativeCaretAndHideCustom();
     pauseBreathe();
-    scheduleResumeBreathe();
-    wasOffScreen = true; // Q-return：标记下一帧 case C 入口需要 force-remove .no-transition 让淡入可见
     return;
-  }
-
-  // Q-return：刚从 case B 回到视口，强制恢复 transition 让 fade-in 平滑过渡
-  // （onScrollOrWheel 在滚动时加的 .no-transition 不会自然消失，第一帧 opacity 写入会瞬切）
-  if (wasOffScreen) {
-    cursorEl.classList.remove("no-transition");
-    void cursorEl.offsetHeight;
-    wasOffScreen = false;
   }
 
   // 移动端标题：可选跳过光标显示（避免移动端键盘弹出时视觉噪音）
   if (isMobile() && allowed.cursorElement?.closest(".protyle-title__input")) {
-    // commit D：标题区域也算"非主编辑区"，光标停在 Phase 1（静态）
+    // Mobile title editing keeps the host's native caret. The previous code
+    // skipped custom rendering while a global CSS rule still hid this caret.
+    restoreNativeCaretAndHideCustom();
     pauseBreathe();
-    scheduleResumeBreathe();
+    return;
+  }
+
+  if (!allowed.cursorElement || !activateCustomCaret(allowed.cursorElement)) {
+    pauseBreathe();
     return;
   }
 
@@ -304,10 +337,7 @@ function doUpdateCursor(): void {
   }
   cursorEl.style.zIndex = String(effectiveZ + 1);
 
-  // 5) commit 1：记录"上次正常位置"，用于离屏/边界失败时保持位置
-  lastGoodCursorPos = { x: rect.x, y: rect.y, height: rect.height };
-
-  // 6) commit 1：边缘淡出 + 缩放
+  // 5) commit 1：边缘淡出 + 缩放
   //   yOffset：光标上移 N 像素，让光标视觉重心偏到行中线之上（用户偏好）。
   //   HEIGHT_RATIO > 1 时光标下沿超出 lineHeight，光标看起来仍偏下；微调上移抵消。
   const yOffset = 2;
@@ -324,7 +354,7 @@ function doUpdateCursor(): void {
     // Q7：长距离 = 长时长。查表 TRANSITION.TIERS（config.ts），用户可自行调整。
     const dist = prevCursorX !== null && prevCursorY !== null ? Math.hypot(rect.x - prevCursorX, rect.y - prevCursorY) : 0;
     const dur = transitionDurationForDistance(dist);
-    if (dur !== lastCursorDur) {
+    if (!reducedMotion && dur !== lastCursorDur) {
       cursorEl.style.transition = `transform ${dur}s cubic-bezier(0.25, 0.1, 0.25, 1), opacity 0.15s ease-out`;
       lastCursorDur = dur;
     }
@@ -352,7 +382,7 @@ function doUpdateCursor(): void {
   cursorEl.classList.remove("hidden");
 
   // 7) 仅在 no-transition 生效时同步一次布局，让瞬移位置先提交，再恢复过渡。
-  if (flushCursorTransitionIfNeeded(cursorEl)) {
+  if (!reducedMotion && flushCursorTransitionIfNeeded(cursorEl)) {
     // 下一帧恢复 transition（transform / height / opacity 过渡）
     if (removeTransitionFrame !== null) cancelAnimationFrame(removeTransitionFrame);
     removeTransitionFrame = requestAnimationFrame(() => {
@@ -363,7 +393,7 @@ function doUpdateCursor(): void {
 
   // 8) commit 1：边缘附近时保持呼吸暂停（避免动画 opacity 与 inline opacity 冲突）
   //    远离边缘（distance >= ZONE）才按 BLINK_DELAY_MS 恢复呼吸
-  if (edge.distance >= EDGE_FADE.ZONE) {
+  if (!reducedMotion && edge.distance >= EDGE_FADE.ZONE) {
     scheduleResumeBreathe();
   }
 
@@ -472,14 +502,13 @@ export function destroyCursor(): void {
   destroyScrollContainerEvents();
 
   // commit 1：重置边缘交互状态
-  lastGoodCursorPos = null;
   cachedZIndexElement = null;
   cachedFullscreenElement = null;
   cachedEffectiveZIndex = 0;
   prevCursorX = null; // Q7：重置距离记录，下次启动从头计算
   prevCursorY = null;
   lastCursorDur = null;
-  wasOffScreen = false; // Q-return：重置"上一帧离屏"标记
+  nativeCaretOwner = restoreNativeCaretOwner(nativeCaretOwner);
 
   destroyEdgeArrow();
 }
@@ -493,6 +522,11 @@ export function onProtyleLoaded(_protyle: IProtyle): void {
 
 /** switch-protyle 回调：切换 tab 时隐藏旧位置，稳定后在新位置淡入 */
 export function onProtyleSwitched(_protyle: IProtyle): void {
+  if (prefersReducedMotion()) {
+    stopSwitchSettle();
+    queueUpdate();
+    return;
+  }
   startSwitchSettle(switchSettleContext);
 }
 
