@@ -10,6 +10,7 @@ const testEntries = [
   "immediate-fixes.test.ts",
   "ripple-semantic.test.ts",
   "ripple-dom-adapter.test.ts",
+  "ripple-style-applier.test.ts",
 ];
 const outfiles = testEntries.map((entry) => path.join(outdir, entry.replace(/\.ts$/, ".mjs")));
 
