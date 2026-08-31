@@ -8,6 +8,7 @@
     "test": "node tests/run.mjs",
     "build:dev": "node build.js --dev",
     "dev": "node build.js --dev --watch",
+    "debug:bridge": "node scripts/debug-bridge.mjs",
     "link": "node scripts/make_dev_link.js",
     "clean": "rimraf dist dev *.zip"
   },

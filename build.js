@@ -39,9 +39,21 @@ const buildOptions = {
   format: 'cjs',
   sourcemap: true,
   minify: false,
+  define: {
+    __ZENTYPE_DEV__: JSON.stringify(isDev),
+  },
   external: ['siyuan'],
   loader: { '.ts': 'ts' },
   plugins: [
+    {
+      name: 'debug-hook-build-mode',
+      setup(build) {
+        if (isDev) return;
+        build.onResolve({ filter: /^\.\/modules\/debugHook$/ }, () => ({
+          path: path.join(ROOT_DIR, 'src/modules/debugHook.noop.ts'),
+        }));
+      },
+    },
     sassPlugin({
       // 'css-text' makes SCSS imports return the compiled CSS as a string,
       // so modules can call addStyle(id, css) and inject a <style> tag.

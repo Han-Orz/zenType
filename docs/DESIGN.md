@@ -52,6 +52,8 @@
       └─────────────────┘
 ```
 
+开发构建还会挂载 `modules/debugHook.ts`（正式构建不初始化）：它独立观察 Protyle DOM、输入/IME、选区和 EventBus，并通过 `scripts/debug-bridge.mjs` 写入本地调试日志。调试钩子不参与光标、打字机或涟漪的业务状态。
+
 > **架构原则（v2.6.2 重构后）**：`cursor.ts` 不再单文件承担所有职责。事件注册、滚动绑定、ResizeObserver、悬浮窗拖动、switch-settle 流程、边缘箭头、呼吸动画都拆到 `cursor/` 子模块；`cursor.ts` 只保留核心循环（`doUpdateCursor`）和 EventBus 适配。`inputMode` 的 setter 调用集中在 `inputModeTriggers.ts`，业务模块（`cursor/events.ts`、`typewriter.ts`、`index.ts`）通过语义函数（`onTextInput` / `onWheelOrTouchMove` 等）触发，不再直接调 `setBothOn/Off`。
 
 ### 1.2 文件结构
@@ -72,6 +74,8 @@ src/
 │   │   └── popoverDrag.ts        # block__popover 拖动手柄绑定
 │   ├── typewriter.ts             # 打字机模式（舒适区间滚动 + 块级 FLIP）
 │   ├── ripple.ts                 # 涟漪聚焦（块级 opacity + 句级 Highlight dim/fade）
+│   ├── debugHook.ts              # 开发版 DOM / 输入 / EventBus 快照与事件采集
+│   ├── debugHook.noop.ts          # 正式构建替代模块，不含采集逻辑
 │   ├── inputMode.ts              # 聚焦/打字机 ON/OFF 状态 + 订阅
 │   └── inputModeTriggers.ts      # 触发适配层（语义事件 → setBothOn/Off）
 ├── utils/
@@ -87,8 +91,12 @@ src/
 │   ├── lifecycle.ts              # 生命周期步骤执行 + 错误隔离
 │   └── styleManager.ts           # 共享样式注入/清理
 ├── styles/index.scss             # 全局 CSS（光标 + 箭头 + 主题变量）
-└── types/index.ts                # 共享类型（RippleMode / CursorRect / ModuleEnabled）
+└── types/
+    ├── index.ts                  # 共享类型（RippleMode / CursorRect / ModuleEnabled）
+    └── debugHook.d.ts            # 开发构建开关的全局声明
 ```
+
+本地桥接脚本位于 `scripts/debug-bridge.mjs`，只监听 `127.0.0.1`，输出目录默认为 `.debug/`。
 
 ### 1.3 EventBus 订阅关系（index.ts）
 
@@ -106,6 +114,20 @@ src/
 | `mobile-keyboard-hide` | 移动端键盘收起 | `onMobileKeyboardHide` |
 
 **已知限制**：`__zentypeScrollBound` 在 `toggle()` off→on 循环中可能残留（reviewer F3 评估为非阻塞，因为 `bindScrollContainerEvents` 在每次 `doUpdateCursor` 中重新遍历绑定）。
+
+### 1.4 开发调试钩子
+
+`build.js` 通过 `__ZENTYPE_DEV__` 区分开发构建。开发版初始化调试钩子并注册三个采集命令：切换钩子、捕获快照、切换正文采集。正式构建将 `debugHook.ts` 替换为 `debugHook.noop.ts`，且不会调用真实采集器。
+
+采集范围包括：
+
+- 当前/目标 Protyle 的 id、文档路径、块上下文和 `.protyle-wysiwyg` 结构树
+- 当前焦点、选区边界、范围矩形、当前块及其祖先块的 rect 与 computed style
+- `beforeinput`、`input`、IME composition、键盘、粘贴、拖放、点击和 focus 事件
+- `MutationObserver` 的 childList、characterData，以及 class/style/data-type 等结构/样式属性变化
+- `loaded-protyle-*`、`switch-protyle`、`destroy-protyle`、`switch-protyle-mode`、`ws-main` 等 EventBus 事件
+
+默认只输出文本长度，不输出正文；开发者明确启用正文采集后，正文也会被截断。采集器使用有界内存环形缓存和批量发送；桥接端将事件追加到 `.debug/siyuan-hook.ndjson`，将最近快照写入 `.debug/siyuan-hook.latest.json`，日志超过上限后轮换旧文件。
 
 ---
 

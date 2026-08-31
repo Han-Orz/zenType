@@ -65,7 +65,6 @@
 | `CURSOR_CONFIG.BLINK_DELAY_MS` | `1100` | 停止活动后多少毫秒恢复呼吸闪烁 |
 | `EDGE_FADE.ZONE` | `20` | 距编辑器可视区顶/底边缘多少像素内开始淡出（顶/底对称） |
 | `TRANSITION.TIERS` | `≤30→0.07、≤150→0.15、≤500→0.21、>500→0.30` 秒 | 按移动距离分档的光标过渡时长 |
-
 打开 `src/styles/index.scss` 可以调节颜色 / 宽度 / 关键帧；其中光标 transition 只是 CSS 兜底，正常状态的距离分档时长和曲线由 `src/modules/cursor.ts` 写入：
 
 ```scss
@@ -78,6 +77,24 @@
 ```
 
 保存后 `pnpm run dev` 会自动重新编译（思源 1-2 秒内热重载）。
+
+## 开发调试钩子（仅开发版）
+
+开发构建会自动启用一个调试钩子，用来记录当前 Protyle、嵌套块 DOM、选区、computed style，以及输入/IME/DOM 重渲染事件。正式构建不会启用它。
+
+在仓库根目录开两个终端：
+
+```bash
+pnpm run debug:bridge
+pnpm run dev
+```
+
+然后用 `pnpm run link -- --workspace <思源工作空间>` 把 `dev/` 链接到思源插件目录。调试数据会写入被 `.gitignore` 忽略的：
+
+- `.debug/siyuan-hook.latest.json`：最近一份完整快照
+- `.debug/siyuan-hook.ndjson`：事件和快照流水
+
+命令面板中可使用“切换 zenType 调试钩子”和“捕获 zenType 调试快照”。默认不记录正文，只保留文本长度；只有明确切换“调试正文采集”后才会带上截断文本。桥接服务只监听 `127.0.0.1`。
 
 ### 边缘行为（v2.6.6）
 

@@ -17,6 +17,8 @@ import { initRipple, destroyRipple } from "./modules/ripple";
 import * as inputMode from "./modules/inputMode";
 import * as inputModeTriggers from "./modules/inputModeTriggers";
 import type { ModuleEnabled, ModuleName } from "./types";
+import { initDebugHook } from "./modules/debugHook";
+import type { DebugHookController } from "./modules/debugHook";
 import { runLifecycleSteps } from "./utils/lifecycle";
 import mainCss from "./styles/index.scss";
 
@@ -41,6 +43,7 @@ export default class ZenType extends Plugin {
   // 顶栏图标容器引用，供 updateTopBarIcon() 切换 --on / --off class
   private topBarItem: HTMLElement | null = null;
   private saveEnabledPromise: Promise<unknown> = Promise.resolve();
+  private debugHook: DebugHookController | null = null;
 
   async onload(): Promise<void> {
     try {
@@ -81,6 +84,23 @@ export default class ZenType extends Plugin {
       hotkey: "⌃⌥Z",
       callback: () => this.toggleType(),
     });
+    if (__ZENTYPE_DEV__) {
+      this.addCommand({
+        langKey: "toggle-debug-hook",
+        langText: "切换 zenType 调试钩子",
+        callback: () => this.debugHook?.toggle(),
+      });
+      this.addCommand({
+        langKey: "capture-debug-hook",
+        langText: "捕获 zenType 调试快照",
+        callback: () => this.debugHook?.captureNow("command"),
+      });
+      this.addCommand({
+        langKey: "toggle-debug-hook-text",
+        langText: "切换调试正文采集",
+        callback: () => this.debugHook?.toggleIncludeText(),
+      });
+    }
 
     const allOn = this.isAllEnabled();
     this.topBarItem = this.addTopBar({
@@ -177,8 +197,13 @@ export default class ZenType extends Plugin {
     };
     eventBus.on("mobile-keyboard-hide", onKeyboardHide);
     this.eventBusOffFns.push(() =>
-      eventBus.off("mobile-keyboard-hide", onKeyboardHide),
+    eventBus.off("mobile-keyboard-hide", onKeyboardHide),
     );
+
+    // 开发版调试钩子：采集器自己管理 DOM/EventBus 监听，统一纳入卸载清理。
+    if (__ZENTYPE_DEV__) {
+      this.debugHook = initDebugHook(eventBus);
+    }
 
     // === 模块初始化（与 P0 / round-3 相同） ===
     // v2.3.0：cursor 始终初始化（光标常开），不再受 STORAGE_KEY 中 cursor 字段影响
@@ -199,6 +224,10 @@ export default class ZenType extends Plugin {
     this.eventBusOffFns = [];
 
     runLifecycleSteps([
+      { name: "debugHook.destroy", run: () => {
+        this.debugHook?.destroy();
+        this.debugHook = null;
+      } },
       ...eventBusOffFns.map((off, index) => ({
         name: `eventBus.off#${index + 1}`,
         run: off,

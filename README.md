@@ -62,7 +62,6 @@ Open `src/config.ts` to tweak:
 | `CURSOR_CONFIG.BLINK_DELAY_MS` | `1100` | Idle delay before blink resumes |
 | `EDGE_FADE.ZONE` | `20` | Pixels from editor rect edge over which cursor fades out (top + bottom symmetric) |
 | `TRANSITION.TIERS` | `≤30→0.07s, ≤150→0.15s, ≤500→0.21s, >500→0.30s` | Distance-banded cursor transition duration |
-
 Open `src/styles/index.scss` to tweak visual style. Its cursor transition is the CSS fallback; normal cursor updates write the distance-based duration and curve from `src/modules/cursor.ts`:
 
 ```scss
@@ -75,6 +74,24 @@ Open `src/styles/index.scss` to tweak visual style. Its cursor transition is the
 ```
 
 `pnpm run dev` rebuilds on save; SiYuan hot-reloads in 1-2 seconds.
+
+## Development Debug Hook (dev build only)
+
+Development builds enable a debug hook that records the current Protyle, nested-block DOM, selection, computed styles, and input/IME/DOM-render events. Production builds do not enable it.
+
+Run these commands in two terminals from the repository root:
+
+```bash
+pnpm run debug:bridge
+pnpm run dev
+```
+
+Then link `dev/` into the SiYuan plugin directory with `pnpm run link -- --workspace <SiYuan workspace>`. Debug data is written to the git-ignored files:
+
+- `.debug/siyuan-hook.latest.json` — the most recent complete snapshot
+- `.debug/siyuan-hook.ndjson` — the event and snapshot stream
+
+The command palette includes “切换 zenType 调试钩子” and “捕获 zenType 调试快照”. Text content is omitted by default and only included, truncated, after explicitly enabling “调试正文采集”. The bridge listens on `127.0.0.1` only.
 
 ### Edge Behavior (v2.6.6)
 

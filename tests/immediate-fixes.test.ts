@@ -24,8 +24,25 @@ import {
   shouldCancelPendingScrollForReducedMotion,
   shouldHandleTypewriterEditKey,
 } from "../src/modules/typewriter";
+import {
+  redactText,
+  summarizeKeyboardKey,
+} from "../src/modules/debugHook";
 import { prefersReducedMotion } from "../src/utils/reducedMotion";
 import { setActiveEditor } from "siyuan";
+
+test("debug hook redacts text by default while preserving its length", () => {
+  assert.deepEqual(redactText("嵌套块", false), { length: 3 });
+  assert.deepEqual(redactText("嵌套块", true), { length: 3, text: "嵌套块" });
+  assert.equal(redactText(null, false), null);
+});
+
+test("debug hook keeps control keys but hides printable content", () => {
+  assert.equal(summarizeKeyboardKey("Enter"), "Enter");
+  assert.equal(summarizeKeyboardKey(" "), "Space");
+  assert.equal(summarizeKeyboardKey("a"), "<printable>");
+  assert.equal(summarizeKeyboardKey("中"), "<printable>");
+});
 
 type FakeNode = {
   nodeType: number;
