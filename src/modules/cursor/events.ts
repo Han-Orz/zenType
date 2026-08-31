@@ -155,7 +155,7 @@ export function bindCursorDocumentEvents(context: CursorEventContext): void {
     ["scroll", onScroll, { capture: true, passive: true }],
     ["wheel", onWheelExit, { capture: true, passive: true }],
     ["touchmove", onWheelExit, { capture: true, passive: true }],
-    ["compositionend", onCompositionEnd],
+    ["compositionend", onCompositionEnd, { capture: true }],
     ["mousedown", onMouseDown],
     ["focusout", onFocusOut, { capture: true }],
   ];
