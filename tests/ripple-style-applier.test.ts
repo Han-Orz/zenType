@@ -288,6 +288,15 @@ test("cancels a pending branch-root exit when the element is targeted again", ()
       binding(["content", descendant]),
     );
     assert.equal(timers.pending.size, 1);
+    applier.apply(
+      plan(target("content", 0)),
+      binding(["content", descendant]),
+    );
+    applier.apply(
+      plan(target("content", 0)),
+      binding(["content", descendant]),
+    );
+    assert.equal(timers.pending.size, 1);
 
     applier.apply(
       plan(targetWithRole("branch", "branch-root", 1)),

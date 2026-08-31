@@ -115,6 +115,8 @@ export function createRippleStyleApplier(): RippleStyleApplier {
     element: HTMLElement,
     target: ActiveTarget,
   ): void {
+    if (target.pendingExit !== null) return;
+
     const opacityApplied = applyPrivateProperty(
       element,
       target.owned,
