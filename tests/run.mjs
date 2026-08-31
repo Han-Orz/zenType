@@ -6,7 +6,11 @@ import { build } from "esbuild";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outdir = mkdtempSync(path.join(root, ".tmp-tests-"));
-const testEntries = ["immediate-fixes.test.ts", "ripple-semantic.test.ts"];
+const testEntries = [
+  "immediate-fixes.test.ts",
+  "ripple-semantic.test.ts",
+  "ripple-dom-adapter.test.ts",
+];
 const outfiles = testEntries.map((entry) => path.join(outdir, entry.replace(/\.ts$/, ".mjs")));
 
 try {
