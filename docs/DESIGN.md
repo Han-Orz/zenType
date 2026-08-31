@@ -18,7 +18,7 @@
 
 **核心价值**：让用户进入"心流"状态 —— 不用低头找光标、不被周围段落干扰。
 **设计哲学**：聚焦服务于主动写作；默认启用以减少进入心流状态的额外操作，仍可通过命令切换。
-**当前版本**：v2.6.6（`package.json` / `plugin.json`）。
+**当前版本**：v2.7.0（`package.json` / `plugin.json`）。
 
 ---
 
@@ -462,7 +462,7 @@ function animateBlockShift(editor: HTMLElement, range: Range): void {
 - 当前块 opacity = 1.0，不参与视觉权重衰减；相邻 ±1 块 opacity ≈ 0.4 × 视觉权重
 - 相邻 ±2 块 opacity ≈ 0.2；更远按 `[0.15, 0.1, 0.05]` 继续衰减
 - **块级** dimming 仍用 JS `style.opacity`；**句级** dimming / fade 用 CSS Custom Highlight API（零 DOM 突变，§4.3.3）
-- **嵌套块**继承顶层块 opacity；v2.6.0 起不再按块类型递归处理，也不再使用 `EMBED_MULTIPLIER` / 深度系数
+- **嵌套列表**按层级和同级距离渐淡：当前项最亮，祖先只淡化自身 marker/直接内容，非焦点分支在 branch root 一次性淡化；`NodeList` 结构容器保持中性，避免父子 opacity 叠乘
 - **默认 ON** —— 初始化时立即启用共享的打字机/涟漪状态
 - **暂停场景**：选中 / 悬浮窗 → `clearAll()` 清除所有块级 opacity 覆盖 + `CSS.highlights.delete`，恢复默认
 
@@ -478,7 +478,7 @@ function animateBlockShift(editor: HTMLElement, range: Range): void {
 | **当前块 opacity** | `distance === 0` 强制 `1.0` | `ripple.ts` `applyBlockOpacity` | 防止当前块因 `visualWeightOf` 小于 1 导致当前句比非聚焦模式淡 |
 | **视觉权重** | 仅 distance=1 的相邻块参与；distance≥2 跳过布局回读 | `ripple.ts` `visualWeightOf` / `applyBlockOpacity` | 相邻块过渡更自然，远块差异不可感知 |
 | **应用方式** | 块级 `style.opacity`；句级 CSS Custom Highlight API | `ripple.ts` / `styles/index.scss` | 块级简单直接；句级零 DOM 突变（v2.5.0，避免数据丢失） |
-| **渐淡单位** | `.protyle-wysiwyg` 的顶层 `container.children` | `ripple.ts` `getTopLevelBlock` / `applyBlockOpacity` | 嵌套块继承父级 opacity，避免父子叠乘 |
+| **渐淡单位** | 顶层 legacy block + nested list semantic target | `ripple.ts` / `ripple/nestedEngine.ts` | 分层处理 nested list，同时避免父子叠乘 |
 | **重新计算接口** | ~~`ripple.recompute`~~（v2.5.0 移除） | — | 块级插入后光标移入新块 → `selectionchange` → `applyRipple` 自动重算，无需显式调用（§4.3.6） |
 | **mouse 模式** | **已移除**（v2.5.0 重写时清理） | — | Q3：用户暂未决定应用场景。旧 `onMouseMove` / `MOUSE_THROTTLE` / `IDLE_THRESHOLD` / 滚动条缓冲随重写删除；未来恢复需重建（§4.4） |
 

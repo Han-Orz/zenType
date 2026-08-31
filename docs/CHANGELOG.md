@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.7.0 (2026-09-01) — Nested Ripple
+
+### Added
+- **嵌套列表涟漪聚焦**：按列表层级与同级距离计算语义焦点；当前项的 marker/直接内容最亮，祖先只淡化自己的 marker/直接内容。
+- **分支统一淡化**：非焦点分支在 branch root 一次性淡化，后代继承效果，避免父子 opacity 叠乘；`NodeList` 结构容器保持中性。
+
+### Changed
+- **顶层块兼容**：嵌套列表外的普通顶层块继续使用原有 Ripple 距离渐淡，nested 与 ordinary block 可正常切换且不残留两套 opacity。
+- **焦点切换过渡**：branch root 重新进入焦点路径时平滑恢复 opacity。
+- **结构与输入响应**：nested childList 变化会重建 semantic snapshot；普通文字首次输入和中文 IME `compositionend` 都能可靠激活 Ripple。
+- **编辑器内容安全**：不修改正文 DOM、文本节点或 Selection。
+
+### Engineering
+- 按 semantic model/planner、只读 DOM adapter、style applier 与 nested engine 分层实现。
+- 47 项测试通过。
+
 ## v2.6.6 (2026-08-22) — Lifecycle Safety + Bazaar Compliance
 
 修复审查中发现的输入作用域、原生光标降级、样式所有权和异步生命周期问题，并同步当前思源集市发布规则。

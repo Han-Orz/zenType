@@ -42,7 +42,7 @@ Videos, iframes, and PDF embeds are treated as 1 ripple unit (they fade normally
 
 ### Nested Blocks
 
-Ripple assigns opacity only to top-level blocks under the editor. Nested content inherits its parent block's opacity and is not faded recursively.
+Nested lists fade by hierarchy and sibling distance. The focused item stays brightest; focus-path ancestors fade only their own marker/direct content. An off-path branch fades once at its branch root, so descendants inherit it without parent/child opacity multiplication. Structural `NodeList` containers stay neutral, while top-level blocks outside the nested list keep the legacy distance-based fade.
 
 ### Selection (Multi-line)
 
@@ -52,7 +52,7 @@ When you drag-select text, ripple focus clears with a 0.4s fade and typewriter m
 
 Read-only mode suspends typewriter mode. Text selection and block popups clear ripple focus.
 
-## Customization (v2.6.6)
+## Customization (v2.7.0)
 
 Open `src/config.ts` to tweak:
 
