@@ -15,8 +15,11 @@ import {
   restoreNativeCaretOwner,
 } from "../src/utils/caretVisibility";
 import { resolveRangeTextPoint } from "../src/utils/rangeTextPoint";
-import { destroyRipple } from "../src/modules/ripple";
-import { initRipple } from "../src/modules/ripple";
+import {
+  destroyRipple,
+  initRipple,
+  isSameBlockOpacityCacheTarget,
+} from "../src/modules/ripple";
 import * as inputMode from "../src/modules/inputMode";
 import { RIPPLE_CONFIG } from "../src/config";
 import { bindCursorDocumentEvents, destroyCursorDocumentEvents } from "../src/modules/cursor/events";
@@ -527,6 +530,27 @@ test("ripple destroy does not run a global block scan when no owned state exists
       });
     }
   }
+});
+
+test("block opacity cache distinguishes whether the current top block is skipped", () => {
+  const container = {} as HTMLElement;
+  const cache = {
+    container,
+    blockId: "active-list",
+    containerTop: 0,
+    scrollTop: 0,
+    childCount: 2,
+    skipCurrentTopBlock: true,
+  };
+
+  assert.equal(
+    isSameBlockOpacityCacheTarget(cache, container, "active-list", 0, 0, 2, true),
+    true,
+  );
+  assert.equal(
+    isSameBlockOpacityCacheTarget(cache, container, "active-list", 0, 0, 2, false),
+    false,
+  );
 });
 
 function classList(): DOMTokenList {

@@ -76,6 +76,7 @@ let lastBlockOpacityContainer: HTMLElement | null = null;
 let lastBlockOpacityContainerTop: number | null = null;
 let lastBlockOpacityScrollTop: number | null = null;
 let lastBlockOpacityChildCount: number | null = null;
+let lastBlockOpacitySkipCurrentTopBlock = false;
 
 // P1-2: 句级 dim 色 CSS 变量仅在 OFF→ON 或主题切换时设置，避免每帧重写。
 let rippleColorActive = false;
@@ -111,6 +112,7 @@ interface BlockOpacityCacheSnapshot {
   containerTop: number | null;
   scrollTop: number | null;
   childCount: number | null;
+  skipCurrentTopBlock: boolean;
 }
 
 export function isSameBlockOpacityCacheTarget(
@@ -120,6 +122,7 @@ export function isSameBlockOpacityCacheTarget(
   containerTop: number,
   scrollTop: number,
   childCount: number,
+  skipCurrentTopBlock = false,
 ): boolean {
   return (
     blockId !== null &&
@@ -127,7 +130,8 @@ export function isSameBlockOpacityCacheTarget(
     blockId === cache.blockId &&
     containerTop === cache.containerTop &&
     scrollTop === cache.scrollTop &&
-    childCount === cache.childCount
+    childCount === cache.childCount &&
+    skipCurrentTopBlock === cache.skipCurrentTopBlock
   );
 }
 
@@ -598,7 +602,11 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
 
 // --- Block-level opacity ---
 
-function applyBlockOpacity(container: HTMLElement, currentBlock: HTMLElement): void {
+function applyBlockOpacity(
+  container: HTMLElement,
+  currentBlock: HTMLElement,
+  skipCurrentTopBlock = false,
+): void {
   // 找 currentBlock 的顶层块（container 的直接子级）。
   // 嵌套块（列表项、列表内段落等）不单独设 opacity，继承父级——
   // 避免嵌套 opacity 叠加（父 0.5 × 子 0.5 = 0.25 不可见）。
@@ -617,7 +625,8 @@ function applyBlockOpacity(container: HTMLElement, currentBlock: HTMLElement): v
     containerTop: lastBlockOpacityContainerTop,
     scrollTop: lastBlockOpacityScrollTop,
     childCount: lastBlockOpacityChildCount,
-  }, container, blockId, containerTop, scrollTop, childCount)) {
+    skipCurrentTopBlock: lastBlockOpacitySkipCurrentTopBlock,
+  }, container, blockId, containerTop, scrollTop, childCount, skipCurrentTopBlock)) {
     return;
   }
 
@@ -632,10 +641,12 @@ function applyBlockOpacity(container: HTMLElement, currentBlock: HTMLElement): v
   lastBlockOpacityContainerTop = containerTop;
   lastBlockOpacityScrollTop = scrollTop;
   lastBlockOpacityChildCount = childCount;
+  lastBlockOpacitySkipCurrentTopBlock = skipCurrentTopBlock;
 
   const newBlocks = new Set<HTMLElement>();
 
   siblings.forEach((block, i) => {
+    if (skipCurrentTopBlock && block === topBlock) return;
     if (!block.hasAttribute("data-node-id")) return; // 跳过非块元素
     const distance = Math.abs(fromIndex - i);
     const baseLevel = BLOCK_LEVELS[Math.min(distance, BLOCK_LEVELS.length - 1)];
@@ -709,6 +720,7 @@ function clearLegacyBlockOpacity(): void {
   lastBlockOpacityContainerTop = null;
   lastBlockOpacityScrollTop = null;
   lastBlockOpacityChildCount = null;
+  lastBlockOpacitySkipCurrentTopBlock = false;
 }
 
 // --- Main apply ---
@@ -748,10 +760,10 @@ function applyRippleNow(): void {
     lastThemeMode = themeMode;
   }
 
-  applyBlockOpacity(container, currentBlock);
-  if (NESTED_RIPPLE_ENABLED) {
-    nestedRippleEngine.apply(container, currentBlock);
-  }
+  const nestedApplied = NESTED_RIPPLE_ENABLED
+    ? nestedRippleEngine.apply(container, currentBlock)
+    : false;
+  applyBlockOpacity(container, currentBlock, nestedApplied);
 
   const textNodeMap = buildTextNodeMap(currentBlock);
   const caretOffset = getCaretOffset(currentBlock, textNodeMap);
