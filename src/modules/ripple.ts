@@ -49,7 +49,7 @@ const SENTENCE_FADE_MS = Math.round(TRANSITION_SEC * 1000);
 const RIPPLE_BLOCK_CLASS = "zentype-ripple-block";
 const RIPPLE_OPACITY_PROPERTY = "--zt-ripple-opacity";
 const RIPPLE_TRANSITION_DURATION_PROPERTY = "--zt-ripple-transition-duration";
-const NESTED_RIPPLE_ENABLED = false;
+const NESTED_RIPPLE_ENABLED = true;
 const nestedRippleEngine = createNestedRippleEngine();
 
 // --- State ---
@@ -748,11 +748,9 @@ function applyRippleNow(): void {
     lastThemeMode = themeMode;
   }
 
-  const nestedApplied = NESTED_RIPPLE_ENABLED && nestedRippleEngine.apply(container, currentBlock);
-  if (nestedApplied) {
-    clearLegacyBlockOpacity();
-  } else {
-    applyBlockOpacity(container, currentBlock);
+  applyBlockOpacity(container, currentBlock);
+  if (NESTED_RIPPLE_ENABLED) {
+    nestedRippleEngine.apply(container, currentBlock);
   }
 
   const textNodeMap = buildTextNodeMap(currentBlock);
