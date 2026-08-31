@@ -663,6 +663,13 @@ test("ripple destroy restores an applied block and leaves a target's generic inl
       block.style.getPropertyValue("--zt-ripple-transition-duration"),
       `${RIPPLE_CONFIG.TRANSITION_SEC}s`,
     );
+
+    inputMode.setBothOff();
+    const callbacksBeforeActivation = callbacks.length;
+    inputMode.setBothOn();
+    assert.equal(callbacks.length, callbacksBeforeActivation + 1);
+    while (callbacks.length > 0) callbacks.shift()?.(0);
+
     assert.equal(observerInstances.length, 2);
     themeMode = "dark";
     observerInstances[0].callback();

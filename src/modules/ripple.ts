@@ -945,6 +945,7 @@ export function initRipple(): void {
   // 旧版仅靠 selectionchange → clearAll 会让 ripple opacity 在滚动/失焦后残留。
   unsubInputMode = inputMode.subscribe((state) => {
     if (!state.focusActive && active) clearAll();
+    else if (state.focusActive && active) applyRipple();
   });
 
   applyRipple();
