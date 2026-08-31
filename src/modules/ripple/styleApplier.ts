@@ -6,7 +6,10 @@ import {
   type InlineStyleValue,
   type OwnedInlineStyle,
 } from "../../utils/inlineStyleOwnership";
-import type { RippleTargetPlan } from "./semanticPlanner";
+import type {
+  RippleTargetPlan,
+  RippleTargetRole,
+} from "./semanticPlanner";
 
 const RIPPLE_BLOCK_CLASS = "zentype-ripple-block";
 const RIPPLE_OPACITY_PROPERTY = "--zt-ripple-opacity";
@@ -20,6 +23,8 @@ interface ActiveTarget {
   owned: OwnedInlineStyle;
   classAdded: boolean;
   blocked: boolean;
+  role: RippleTargetRole;
+  pendingExit: ReturnType<typeof setTimeout> | null;
 }
 
 export interface RippleStyleApplier {
@@ -82,9 +87,59 @@ function opacityForDistance(distance: number): string {
 export function createRippleStyleApplier(): RippleStyleApplier {
   const activeTargets = new Map<HTMLElement, ActiveTarget>();
 
+  function cancelPendingExit(target: ActiveTarget): void {
+    if (target.pendingExit === null) return;
+    clearTimeout(target.pendingExit);
+    target.pendingExit = null;
+  }
+
   function releaseTarget(element: HTMLElement, target: ActiveTarget): void {
+    cancelPendingExit(target);
     restoreOwnedInlineStyle(element.style, target.owned);
     removeRippleClass(element, target);
+  }
+
+  function shouldAnimateExit(
+    element: HTMLElement,
+    target: ActiveTarget,
+    nextTargets: Set<HTMLElement>,
+  ): boolean {
+    if (target.role !== "branch-root") return false;
+    for (const nextElement of nextTargets) {
+      if (element.contains(nextElement)) return true;
+    }
+    return false;
+  }
+
+  function releaseBranchRootAfterTransition(
+    element: HTMLElement,
+    target: ActiveTarget,
+  ): void {
+    const opacityApplied = applyPrivateProperty(
+      element,
+      target.owned,
+      RIPPLE_OPACITY_PROPERTY,
+      "1",
+    );
+    if (!opacityApplied) {
+      target.blocked = true;
+      releaseTarget(element, target);
+      activeTargets.delete(element);
+      return;
+    }
+
+    if (RIPPLE_CONFIG.TRANSITION_SEC === 0) {
+      releaseTarget(element, target);
+      activeTargets.delete(element);
+      return;
+    }
+
+    target.pendingExit = setTimeout(() => {
+      target.pendingExit = null;
+      if (activeTargets.get(element) !== target) return;
+      releaseTarget(element, target);
+      activeTargets.delete(element);
+    }, RIPPLE_CONFIG.TRANSITION_SEC * 1000);
   }
 
   function apply(plan: RippleTargetPlan, bindings: ReadonlyMap<string, HTMLElement>): void {
@@ -101,8 +156,13 @@ export function createRippleStyleApplier(): RippleStyleApplier {
           owned: claimInlineStyle(element.style, RIPPLE_STYLE_PROPERTIES),
           classAdded: false,
           blocked: false,
+          role: target.role,
+          pendingExit: null,
         };
         activeTargets.set(element, activeTarget);
+      } else {
+        cancelPendingExit(activeTarget);
+        activeTarget.role = target.role;
       }
 
       if (activeTarget.blocked) continue;
@@ -132,8 +192,12 @@ export function createRippleStyleApplier(): RippleStyleApplier {
 
     for (const [element, activeTarget] of activeTargets) {
       if (nextTargets.has(element)) continue;
-      releaseTarget(element, activeTarget);
-      activeTargets.delete(element);
+      if (shouldAnimateExit(element, activeTarget, nextTargets)) {
+        releaseBranchRootAfterTransition(element, activeTarget);
+      } else {
+        releaseTarget(element, activeTarget);
+        activeTargets.delete(element);
+      }
     }
   }
 

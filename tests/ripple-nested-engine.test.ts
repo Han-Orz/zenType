@@ -80,6 +80,15 @@ class FakeElement {
     this.stats.attributeReads++;
     return this.attributes.get(name) ?? null;
   }
+
+  contains(node: Node): boolean {
+    let current = node as unknown as FakeElement | null;
+    while (current) {
+      if (current === this) return true;
+      current = current.parentElement;
+    }
+    return false;
+  }
 }
 
 interface NestedFixture {
