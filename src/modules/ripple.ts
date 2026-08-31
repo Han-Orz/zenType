@@ -37,6 +37,7 @@ import {
 } from "../utils/editorScope";
 import { prefersReducedMotion } from "../utils/reducedMotion";
 import * as inputMode from "./inputMode";
+import { createNestedRippleEngine } from "./ripple/nestedEngine";
 
 const { BLOCK_LEVELS, SENTENCE_DIM_ALPHA, TRANSITION_SEC, WEIGHT_MIN } = RIPPLE_CONFIG;
 
@@ -48,6 +49,8 @@ const SENTENCE_FADE_MS = Math.round(TRANSITION_SEC * 1000);
 const RIPPLE_BLOCK_CLASS = "zentype-ripple-block";
 const RIPPLE_OPACITY_PROPERTY = "--zt-ripple-opacity";
 const RIPPLE_TRANSITION_DURATION_PROPERTY = "--zt-ripple-transition-duration";
+const NESTED_RIPPLE_ENABLED = false;
+const nestedRippleEngine = createNestedRippleEngine();
 
 // --- State ---
 
@@ -692,6 +695,22 @@ function applyBlockOpacity(container: HTMLElement, currentBlock: HTMLElement): v
   newBlocks.forEach((b) => modifiedBlocks.add(b));
 }
 
+function clearLegacyBlockOpacity(): void {
+  for (const block of Array.from(ownedBlocks)) {
+    const owned = ownedBlockStyles.get(block);
+    if (owned) restoreOwnedInlineStyle(block.style, owned);
+    block.classList.remove(RIPPLE_BLOCK_CLASS);
+    ownedBlockStyles.delete(block);
+  }
+  ownedBlocks.clear();
+  modifiedBlocks.clear();
+  lastBlockOpacityBlockId = null;
+  lastBlockOpacityContainer = null;
+  lastBlockOpacityContainerTop = null;
+  lastBlockOpacityScrollTop = null;
+  lastBlockOpacityChildCount = null;
+}
+
 // --- Main apply ---
 
 function applyRippleNow(): void {
@@ -729,7 +748,12 @@ function applyRippleNow(): void {
     lastThemeMode = themeMode;
   }
 
-  applyBlockOpacity(container, currentBlock);
+  const nestedApplied = NESTED_RIPPLE_ENABLED && nestedRippleEngine.apply(container, currentBlock);
+  if (nestedApplied) {
+    clearLegacyBlockOpacity();
+  } else {
+    applyBlockOpacity(container, currentBlock);
+  }
 
   const textNodeMap = buildTextNodeMap(currentBlock);
   const caretOffset = getCaretOffset(currentBlock, textNodeMap);
@@ -838,7 +862,16 @@ function onDomMutation(records: MutationRecord[]): void {
   const container = currentBlock.closest(".protyle-wysiwyg") as HTMLElement | null;
   if (!container) return;
   const topBlock = getTopLevelBlock(currentBlock, container);
-  if (!records.some((record) => mutationTouchesCurrentBlock(record, currentBlock, topBlock))) return;
+  const relevantRecords = records.filter((record) =>
+    mutationTouchesCurrentBlock(record, currentBlock, topBlock),
+  );
+  if (relevantRecords.length === 0) return;
+  if (
+    NESTED_RIPPLE_ENABLED &&
+    relevantRecords.some((record) => record.type === "childList")
+  ) {
+    nestedRippleEngine.invalidateStructure();
+  }
 
   scheduleMutationRefresh();
 }
@@ -855,18 +888,10 @@ function setOwnedRootStyle(property: string, value: string): void {
 
 function clearAll(): void {
   disconnectMutationObserver();
+  nestedRippleEngine.clear();
+  clearLegacyBlockOpacity();
   if (!visualStateDirty && ownedBlocks.size === 0 && ownedRootStyles.size === 0) return;
 
-  // Restore only blocks that this module claimed. Unrelated SiYuan blocks and
-  // other plugins' inline styles are never touched.
-  for (const block of Array.from(ownedBlocks)) {
-    const owned = ownedBlockStyles.get(block);
-    if (owned) restoreOwnedInlineStyle(block.style, owned);
-    block.classList.remove(RIPPLE_BLOCK_CLASS);
-    ownedBlockStyles.delete(block);
-  }
-  ownedBlocks.clear();
-  modifiedBlocks.clear();
   cancelSentenceFade();
   if (sentenceHighlightSupported()) CSS.highlights.delete(SENTENCE_DIM_HIGHLIGHT);
   for (const [property, owned] of ownedRootStyles) {
@@ -874,12 +899,6 @@ function clearAll(): void {
     ownedRootStyles.delete(property);
   }
   resetSentenceCache();
-  // 重置缓存：视觉状态已清，下次 apply 必须重建。
-  lastBlockOpacityBlockId = null;
-  lastBlockOpacityContainer = null;
-  lastBlockOpacityContainerTop = null;
-  lastBlockOpacityScrollTop = null;
-  lastBlockOpacityChildCount = null;
   rippleColorActive = false;
   visualStateDirty = false;
 }
