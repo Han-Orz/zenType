@@ -20,147 +20,103 @@ export interface RippleTargetPlan {
 interface FocusPathEntry {
   item: SemanticItem;
   parentList: SemanticList;
+  activeIndex: number;
 }
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
-function hasUniqueStrings(values: readonly string[]): boolean {
-  const seen = new Set<string>();
-  for (const value of values) {
-    if (!isNonEmptyString(value) || seen.has(value)) return false;
-    seen.add(value);
+function isSemanticList(value: unknown): value is SemanticList {
+  if (!value || typeof value !== "object") return false;
+  const list = value as SemanticList;
+  if (
+    !isNonEmptyString(list.id) ||
+    (list.parentItemId !== null && !isNonEmptyString(list.parentItemId)) ||
+    !Array.isArray(list.itemIds)
+  ) {
+    return false;
+  }
+  for (const itemId of list.itemIds) {
+    if (!isNonEmptyString(itemId)) return false;
   }
   return true;
 }
 
-/**
- * Keep invalid input a predictable no-op. This is intentionally a small
- * structural check, not a general validation framework.
- */
-function isValidSemanticTree(tree: RippleSemanticTree): boolean {
+function isSemanticItem(value: unknown): value is SemanticItem {
+  if (!value || typeof value !== "object") return false;
+  const item = value as SemanticItem;
   if (
-    !tree ||
-    !(tree.lists instanceof Map) ||
-    !(tree.items instanceof Map)
+    !isNonEmptyString(item.id) ||
+    !isNonEmptyString(item.parentListId) ||
+    (item.markerId !== null && !isNonEmptyString(item.markerId)) ||
+    !Array.isArray(item.directContentIds)
   ) {
     return false;
   }
-
-  const referencedItemIds = new Set<string>();
-  for (const [mapKey, list] of tree.lists) {
-    if (!list || typeof list !== "object") return false;
-    if (
-      mapKey !== list.id ||
-      !isNonEmptyString(list.id) ||
-      (list.parentItemId !== null && !isNonEmptyString(list.parentItemId)) ||
-      !Array.isArray(list.itemIds)
-    ) {
-      return false;
-    }
-
-    const itemIdsInList = new Set<string>();
-    for (let index = 0; index < list.itemIds.length; index++) {
-      const itemId = list.itemIds[index];
-      const item = tree.items.get(itemId);
-      if (
-        !isNonEmptyString(itemId) ||
-        itemIdsInList.has(itemId) ||
-        !item ||
-        item.id !== itemId ||
-        item.parentListId !== list.id ||
-        item.siblingIndex !== index ||
-        referencedItemIds.has(itemId)
-      ) {
-        return false;
-      }
-      itemIdsInList.add(itemId);
-      referencedItemIds.add(itemId);
-    }
+  for (const contentId of item.directContentIds) {
+    if (!isNonEmptyString(contentId)) return false;
   }
-
-  if (referencedItemIds.size !== tree.items.size) return false;
-
-  const visualTargetIds = new Set<string>();
-  for (const [mapKey, item] of tree.items) {
-    if (!item || typeof item !== "object") return false;
-    if (
-      mapKey !== item.id ||
-      !isNonEmptyString(item.id) ||
-      !isNonEmptyString(item.parentListId) ||
-      !Number.isInteger(item.siblingIndex) ||
-      item.siblingIndex < 0 ||
-      (item.markerId !== null && !isNonEmptyString(item.markerId)) ||
-      !Array.isArray(item.directContentIds) ||
-      !Array.isArray(item.childListIds) ||
-      !hasUniqueStrings(item.directContentIds) ||
-      !hasUniqueStrings(item.childListIds)
-    ) {
-      return false;
-    }
-
-    if (item.markerId !== null) {
-      if (visualTargetIds.has(item.markerId)) return false;
-      visualTargetIds.add(item.markerId);
-    }
-    for (const contentId of item.directContentIds) {
-      if (visualTargetIds.has(contentId)) return false;
-      visualTargetIds.add(contentId);
-    }
-
-    const parentList = tree.lists.get(item.parentListId);
-    if (!parentList || parentList.itemIds[item.siblingIndex] !== item.id) return false;
-
-    for (const childListId of item.childListIds) {
-      const childList = tree.lists.get(childListId);
-      if (!childList || childList.parentItemId !== item.id) return false;
-    }
-  }
-
-  for (const list of tree.lists.values()) {
-    if (list.parentItemId === null) continue;
-    const parentItem = tree.items.get(list.parentItemId);
-    if (!parentItem || !parentItem.childListIds.includes(list.id)) return false;
-  }
-
-  // Every parent link must eventually reach a root list rather than cycle.
-  for (const item of tree.items.values()) {
-    const visited = new Set<string>();
-    let current: SemanticItem | undefined = item;
-    while (current) {
-      if (visited.has(current.id)) return false;
-      visited.add(current.id);
-
-      const parentList = tree.lists.get(current.parentListId);
-      if (!parentList) return false;
-      if (parentList.parentItemId === null) break;
-      current = tree.items.get(parentList.parentItemId);
-      if (!current) return false;
-    }
-  }
-
   return true;
+}
+
+function isItemReference(value: unknown, expectedId: string): value is SemanticItem {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    isNonEmptyString((value as SemanticItem).id) &&
+    (value as SemanticItem).id === expectedId,
+  );
 }
 
 function getFocusPath(
   tree: RippleSemanticTree,
   focusItemId: string,
 ): FocusPathEntry[] | null {
+  if (
+    !tree ||
+    !(tree.lists instanceof Map) ||
+    !(tree.items instanceof Map)
+  ) {
+    return null;
+  }
+
   const path: FocusPathEntry[] = [];
-  const visited = new Set<string>();
+  const visitedItemIds = new Set<string>();
+  const visitedListIds = new Set<string>();
   let item = tree.items.get(focusItemId);
+  let expectedItemId = focusItemId;
 
   while (item) {
-    if (visited.has(item.id)) return null;
-    visited.add(item.id);
+    if (
+      !isSemanticItem(item) ||
+      item.id !== expectedItemId ||
+      visitedItemIds.has(item.id)
+    ) {
+      return null;
+    }
 
     const parentList = tree.lists.get(item.parentListId);
-    if (!parentList) return null;
-    path.push({ item, parentList });
+    if (
+      !isSemanticList(parentList) ||
+      parentList.id !== item.parentListId ||
+      visitedListIds.has(parentList.id)
+    ) {
+      return null;
+    }
+
+    const activeIndex = parentList.itemIds.indexOf(item.id);
+    if (activeIndex === -1) return null;
+
+    visitedItemIds.add(item.id);
+    visitedListIds.add(parentList.id);
+    path.push({ item, parentList, activeIndex });
 
     if (parentList.parentItemId === null) return path;
-    item = tree.items.get(parentList.parentItemId);
+    const parentItem = tree.items.get(parentList.parentItemId);
+    if (!isItemReference(parentItem, parentList.parentItemId)) return null;
+    item = parentItem;
+    expectedItemId = parentList.parentItemId;
   }
 
   return null;
@@ -190,7 +146,7 @@ export function planRippleTargets(
   tree: RippleSemanticTree,
   focusItemId: string,
 ): RippleTargetPlan | null {
-  if (!isValidSemanticTree(tree) || !isNonEmptyString(focusItemId)) return null;
+  if (!isNonEmptyString(focusItemId)) return null;
 
   const focusPath = getFocusPath(tree, focusItemId);
   if (!focusPath) return null;
@@ -203,21 +159,29 @@ export function planRippleTargets(
     addItemTargets(targets, item, distance);
   });
 
-  // A sibling is represented once, at its item ID. We intentionally do not
-  // follow its childListIds, which suppresses all descendants of that branch.
-  focusPath.forEach(({ item: activeItem, parentList }, pathDistance) => {
-    for (const siblingId of parentList.itemIds) {
-      if (siblingId === activeItem.id) continue;
-      const sibling = tree.items.get(siblingId);
-      if (!sibling) return;
+  // A sibling is represented once, at its item ID. We intentionally stop at
+  // that branch root, which suppresses all descendants of that branch.
+  for (let pathDistance = 0; pathDistance < focusPath.length; pathDistance++) {
+    const { item: activeItem, parentList, activeIndex } = focusPath[pathDistance];
+    const visitedSiblingIds = new Set<string>();
+    for (let siblingIndex = 0; siblingIndex < parentList.itemIds.length; siblingIndex++) {
+      const siblingId = parentList.itemIds[siblingIndex];
+      if (visitedSiblingIds.has(siblingId)) return null;
+      visitedSiblingIds.add(siblingId);
+      if (siblingIndex === activeIndex) continue;
+      if (siblingId === activeItem.id) return null;
 
+      const sibling = tree.items.get(siblingId);
+      if (!isItemReference(sibling, siblingId)) return null;
+      const distance = pathDistance + Math.abs(siblingIndex - activeIndex);
+      if (!Number.isInteger(distance) || distance < 0) return null;
       targets.push({
         semanticId: sibling.id,
         role: "branch-root",
-        distance: pathDistance + Math.abs(sibling.siblingIndex - activeItem.siblingIndex),
+        distance,
       });
     }
-  });
+  }
 
   return { focusItemId, targets };
 }

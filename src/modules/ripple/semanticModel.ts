@@ -1,9 +1,10 @@
 /**
  * DOM-independent semantic representation of a nested list.
  *
- * Lists own their direct items, and an item owns its direct content and child
- * lists. The references are deliberately kept as IDs so this model can be
- * built from any adapter in a later phase.
+ * Lists own their direct items, and parentItemId links a child list to its
+ * owning item. Items own only their direct content. The references are
+ * deliberately kept as IDs so this model can be built from any adapter in a
+ * later phase.
  */
 
 export interface SemanticList {
@@ -15,10 +16,8 @@ export interface SemanticList {
 export interface SemanticItem {
   id: string;
   parentListId: string;
-  siblingIndex: number;
   markerId: string | null;
   directContentIds: readonly string[];
-  childListIds: readonly string[];
 }
 
 export interface RippleSemanticTree {

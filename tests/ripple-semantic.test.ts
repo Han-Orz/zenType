@@ -16,22 +16,18 @@ import {
 interface ItemOptions {
   markerId?: string | null;
   directContentIds?: readonly string[];
-  childListIds?: readonly string[];
 }
 
 function item(
   id: string,
   parentListId: string,
-  siblingIndex: number,
   options: ItemOptions = {},
 ): SemanticItem {
   return {
     id,
     parentListId,
-    siblingIndex,
     markerId: options.markerId === undefined ? `marker:${id}` : options.markerId,
     directContentIds: options.directContentIds ?? [`content:${id}`],
-    childListIds: options.childListIds ?? [],
   };
 }
 
@@ -78,14 +74,14 @@ test("canonical nested example assigns path distances and suppresses off-path de
       list("list-B.1", "B.1", ["B.1.a"]),
     ],
     [
-      item("A", "root", 0, { childListIds: ["list-A"] }),
-      item("A.1", "list-A", 0),
-      item("A.2", "list-A", 1),
-      item("B", "root", 1, { childListIds: ["list-B"] }),
-      item("B.1", "list-B", 0, { childListIds: ["list-B.1"] }),
-      item("B.2", "list-B", 1),
-      item("B.3", "list-B", 2),
-      item("B.1.a", "list-B.1", 0),
+      item("A", "root"),
+      item("A.1", "list-A"),
+      item("A.2", "list-A"),
+      item("B", "root"),
+      item("B.1", "list-B"),
+      item("B.2", "list-B"),
+      item("B.3", "list-B"),
+      item("B.1.a", "list-B.1"),
     ],
   );
 
@@ -112,14 +108,14 @@ test("canonical nested example assigns path distances and suppresses off-path de
   assert.equal(plan.targets.some((target) => target.role === "branch-root" && target.semanticId === "B"), false);
 });
 
-test("single-level siblings use absolute sibling index distance", () => {
+test("single-level sibling distance uses parent list itemIds as its order source", () => {
   const input = tree(
     [list("root", null, ["A", "B", "C", "D"])],
     [
-      item("A", "root", 0),
-      item("B", "root", 1),
-      item("C", "root", 2),
-      item("D", "root", 3),
+      item("D", "root"),
+      item("B", "root"),
+      item("A", "root"),
+      item("C", "root"),
     ],
   );
 
@@ -132,16 +128,13 @@ test("single-level siblings use absolute sibling index distance", () => {
   assertNoTarget(plan, "B");
 });
 
-test("deep single chain increments distance for each ancestor", () => {
+test("deep single chain follows parentListId and parentItemId for each ancestor", () => {
   const lists: SemanticList[] = [list("list-0", null, ["item-0"])];
   const items: SemanticItem[] = [];
   for (let index = 0; index < 6; index++) {
     const itemId = `item-${index}`;
-    const childListId = `list-${index + 1}`;
-    items.push(item(itemId, `list-${index}`, 0, {
-      childListIds: index < 5 ? [childListId] : [],
-    }));
-    if (index < 5) lists.push(list(childListId, itemId, [`item-${index + 1}`]));
+    items.push(item(itemId, `list-${index}`));
+    if (index < 5) lists.push(list(`list-${index + 1}`, itemId, [`item-${index + 1}`]));
   }
 
   const plan = requirePlan(tree(lists, items), "item-5");
@@ -160,11 +153,11 @@ test("an off-path sibling with a subtree is emitted only as one branch root", ()
       list("grandchild-list", "branch-child", ["branch-grandchild"]),
     ],
     [
-      item("focus", "root", 0),
-      item("branch", "root", 1, { childListIds: ["branch-list"] }),
-      item("branch-child", "branch-list", 0, { childListIds: ["grandchild-list"] }),
-      item("branch-child-2", "branch-list", 1),
-      item("branch-grandchild", "grandchild-list", 0),
+      item("focus", "root"),
+      item("branch", "root"),
+      item("branch-child", "branch-list"),
+      item("branch-child-2", "branch-list"),
+      item("branch-grandchild", "grandchild-list"),
     ],
   );
 
@@ -190,7 +183,7 @@ test("an off-path sibling with a subtree is emitted only as one branch root", ()
 test("multiple direct contents share the owning item's distance", () => {
   const input = tree(
     [list("root", null, ["focus"])],
-    [item("focus", "root", 0, {
+    [item("focus", "root", {
       directContentIds: ["content:first", "content:second"],
     })],
   );
@@ -204,8 +197,8 @@ test("a null marker is omitted without affecting the rest of the plan", () => {
   const input = tree(
     [list("root", null, ["focus", "sibling"])],
     [
-      item("focus", "root", 0, { markerId: null }),
-      item("sibling", "root", 1),
+      item("focus", "root", { markerId: null }),
+      item("sibling", "root"),
     ],
   );
 
@@ -219,7 +212,7 @@ test("large semantic distances remain unclamped and are non-negative integers", 
   const itemIds = ["focus", "one", "two", "three", "four", "five", "six", "seven", "eight"];
   const input = tree(
     [list("root", null, itemIds)],
-    itemIds.map((id, siblingIndex) => item(id, "root", siblingIndex)),
+    itemIds.map((id) => item(id, "root")),
   );
 
   const plan = requirePlan(input, "focus");
@@ -230,12 +223,42 @@ test("large semantic distances remain unclamped and are non-negative integers", 
 });
 
 test("missing focus and invalid model return null", () => {
-  const valid = tree([list("root", null, ["focus"])], [item("focus", "root", 0)]);
+  const valid = tree([list("root", null, ["focus"])], [item("focus", "root")]);
   assert.equal(planRippleTargets(valid, "missing"), null);
 
   const invalid = tree(
     [list("root", null, ["focus"])],
-    [item("focus", "missing-list", 0)],
+    [item("focus", "missing-list")],
   );
   assert.equal(planRippleTargets(invalid, "focus"), null);
+
+  const brokenParent = tree(
+    [
+      list("root", null, ["parent"]),
+      list("child", "missing-parent", ["focus"]),
+    ],
+    [
+      item("parent", "root"),
+      item("focus", "child"),
+    ],
+  );
+  assert.equal(planRippleTargets(brokenParent, "focus"), null);
+
+  const missingSibling = tree(
+    [list("root", null, ["focus", "missing-sibling"])],
+    [item("focus", "root")],
+  );
+  assert.equal(planRippleTargets(missingSibling, "focus"), null);
+
+  const cyclic = tree(
+    [
+      list("list-a", "item-b", ["item-a"]),
+      list("list-b", "item-a", ["item-b"]),
+    ],
+    [
+      item("item-a", "list-a"),
+      item("item-b", "list-b"),
+    ],
+  );
+  assert.equal(planRippleTargets(cyclic, "item-a"), null);
 });
