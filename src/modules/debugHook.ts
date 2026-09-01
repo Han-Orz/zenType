@@ -1,5 +1,7 @@
 import { getActiveEditor } from "siyuan";
 import type { EventBus, IProtyle, IWebSocketData } from "siyuan";
+import * as structuralEdit from "./structuralEdit";
+import * as typewriterScroll from "./typewriter/scroll";
 
 const SCHEMA = "zentype-debug/v1" as const;
 const GLOBAL_KEY = "__zentypeDebugHook";
@@ -98,6 +100,19 @@ export interface DebugScrollMetrics {
   clientWidth: number;
 }
 
+export interface DebugStructuralEditState {
+  generation: number;
+  phase: structuralEdit.StructuralEditPhase;
+  kind: structuralEdit.StructuralEditKind | null;
+  editorPath: string | null;
+  editorConnected: boolean | null;
+}
+
+export interface DebugScrollState {
+  container: DebugNodeReference;
+  metrics: DebugScrollMetrics;
+}
+
 export interface DebugNodeReference {
   nodeType: "element" | "text" | "other";
   path: string;
@@ -181,6 +196,7 @@ export interface DebugSnapshot {
   focus: DebugElementDescription | null;
   selection: Record<string, unknown> | null;
   currentBlock: DebugElementDescription | null;
+  scroll: DebugScrollState | null;
   dom: DebugDomTreeNode | null;
   observedRoots: DebugNodeReference[];
 }
@@ -277,6 +293,15 @@ function round(value: number): number {
   return Number.isFinite(value) ? Math.round(value * 100) / 100 : 0;
 }
 
+function monotonicNow(): number {
+  if (typeof performance === "undefined" || typeof performance.now !== "function") return 0;
+  try {
+    return round(performance.now());
+  } catch {
+    return 0;
+  }
+}
+
 function rectOf(element: Element | null): DebugRect | null {
   if (!element || typeof element.getBoundingClientRect !== "function") return null;
   try {
@@ -370,6 +395,23 @@ function nodePath(value: EventTarget | Node | null | undefined, root?: Element |
   return parts.join(" > ");
 }
 
+/** Convert the coordinator's DOM-bearing snapshot into debug-safe JSON data. */
+export function serializeStructuralEditSnapshot(
+  snapshot: structuralEdit.StructuralEditSnapshot,
+  root: Element | null = null,
+): DebugStructuralEditState {
+  const editor = snapshot.editor;
+  return {
+    generation: snapshot.generation,
+    phase: snapshot.phase,
+    kind: snapshot.kind,
+    editorPath: editor ? nodePath(editor, root) || null : null,
+    editorConnected: editor
+      ? typeof editor.isConnected === "boolean" ? editor.isConnected : null
+      : null,
+  };
+}
+
 function computedStyleOf(element: Element | null): DebugComputedStyle | null {
   if (!element || typeof getComputedStyle !== "function") return null;
   try {
@@ -447,6 +489,44 @@ function nodeReference(
     result.textLength = redacted?.length ?? 0;
   }
   return result;
+}
+
+function scrollStateFor(
+  value: Element | null,
+  root: Element | null,
+): DebugScrollState | null {
+  const candidates: Element[] = [];
+  const seen = new Set<Element>();
+  let current = value;
+  while (current) {
+    if (!seen.has(current)) {
+      seen.add(current);
+      candidates.push(current);
+    }
+    current = current.parentElement;
+  }
+  if (typeof document !== "undefined") {
+    for (const candidate of [document.body, document.documentElement]) {
+      if (candidate && !seen.has(candidate)) {
+        seen.add(candidate);
+        candidates.push(candidate);
+      }
+    }
+  }
+
+  for (const candidate of candidates) {
+    const metrics = scrollMetricsOf(candidate);
+    if (!metrics) continue;
+    const hasOverflow = metrics.scrollHeight > metrics.clientHeight
+      || metrics.scrollWidth > metrics.clientWidth;
+    if (hasOverflow || metrics.scrollTop !== 0 || metrics.scrollLeft !== 0) {
+      return {
+        container: nodeReference(candidate, root, false),
+        metrics,
+      };
+    }
+  }
+  return null;
 }
 
 function blockDescription(element: Element, root: Element | null): DebugBlockDescription | null {
@@ -776,6 +856,7 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   let pendingSnapshotReason = "scheduled";
   let pendingSnapshotProtyle: IProtyle | null = null;
   let lastProtyle: IProtyle | null = null;
+  let unsubStructuralFinish: (() => void) | null = null;
 
   const globalObject = globalThis as unknown as Record<string, unknown>;
 
@@ -829,7 +910,10 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
       timestamp: new Date().toISOString(),
       kind,
       ...(reason ? { reason } : {}),
-      payload,
+      payload: {
+        ...payload,
+        monotonicMs: monotonicNow(),
+      },
     };
     recentEvents.push(envelope);
     if (recentEvents.length > MAX_RECENT_EVENTS) recentEvents.shift();
@@ -865,6 +949,11 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
       source: "mutation-observer",
       name: "mutation",
       root: nodeReference(root, root, false),
+      structuralEdit: serializeStructuralEditSnapshot(
+        structuralEdit.getStructuralEditSnapshot(),
+        root,
+      ),
+      typewriterScroll: { active: typewriterScroll.isScrolling() },
       recordCount: records.length,
       records: records
         .slice(0, MAX_MUTATION_RECORDS)
@@ -955,6 +1044,11 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
       source: "dom",
       name: event.type,
       ...eventTargetPayload(event, root, includeText),
+      structuralEdit: serializeStructuralEditSnapshot(
+        structuralEdit.getStructuralEditSnapshot(),
+        root,
+      ),
+      typewriterScroll: { active: typewriterScroll.isScrolling() },
     };
     if (event.type === "beforeinput" || event.type === "input") {
       Object.assign(payload, inputEventPayload(event as InputEvent, includeText));
@@ -1015,8 +1109,9 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     const selectionRoot = activeRoot ?? targetRoot;
     const selection = selectionSnapshot(selectionRoot, includeText);
     const selectionNode = typeof window !== "undefined" ? window.getSelection()?.anchorNode : null;
+    const currentBlockElement = asElement(selectionNode)?.closest("[data-node-id]") ?? null;
     const currentBlock = describeElement(
-      asElement(selectionNode)?.closest("[data-node-id]"),
+      currentBlockElement,
       selectionRoot,
       includeText,
     );
@@ -1033,10 +1128,52 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
         : null,
       selection,
       currentBlock,
+      scroll: scrollStateFor(
+        asElement(selectionNode) ?? currentBlockElement ?? treeRoot,
+        targetRoot,
+      ),
       dom: treeRoot ? serializeDomTree(treeRoot) : null,
       observedRoots: Array.from(trackedRoots.keys())
         .map((root) => nodeReference(root, root, false)),
     };
+  }
+
+  function onStructuralEditFinish(finish: structuralEdit.StructuralEditFinish): void {
+    if (!enabled || destroyed) return;
+
+    const active = activeProtyle();
+    const activeRoot = protyleRoot(active);
+    const root = activeRoot
+      ?? currentRoot()
+      ?? (
+        typeof finish.editor.closest === "function"
+          ? (finish.editor.closest(".protyle") as HTMLElement | null) ?? finish.editor
+          : finish.editor
+      );
+    const selection = selectionSnapshot(root, includeText);
+    const selectionNode = typeof window !== "undefined" ? window.getSelection()?.anchorNode : null;
+    const currentBlockElement = asElement(selectionNode)?.closest("[data-node-id]") ?? null;
+
+    publish("event", {
+      source: "structural-edit",
+      name: "structural-edit-finish",
+      generation: finish.generation,
+      kind: finish.kind,
+      stable: finish.stable,
+      structuralStateAfterFinish: serializeStructuralEditSnapshot(
+        structuralEdit.getStructuralEditSnapshot(),
+        root,
+      ),
+      finishEditor: nodeReference(finish.editor, root, false),
+      selection,
+      currentBlock: describeElement(currentBlockElement, root, includeText),
+      activeEditor: protyleDescription(active, activeRoot, includeText),
+      scroll: scrollStateFor(
+        asElement(selectionNode) ?? currentBlockElement ?? finish.editor,
+        root,
+      ),
+      typewriterScroll: { active: typewriterScroll.isScrolling() },
+    }, "structural-edit-finish");
   }
 
   function captureNow(reason = "manual", protyle?: IProtyle): void {
@@ -1285,6 +1422,8 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
       if (destroyed) return;
       publish("status", { state: "destroying", ...state() }, "destroying");
       detach();
+      unsubStructuralFinish?.();
+      unsubStructuralFinish = null;
       destroyed = true;
       flushPending();
       if (globalObject[GLOBAL_KEY] === globalApi) delete globalObject[GLOBAL_KEY];
@@ -1316,6 +1455,7 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   refreshRoots();
   attachDomEvents();
   attachEventBus();
+  unsubStructuralFinish = structuralEdit.subscribeStructuralEditFinish(onStructuralEditFinish);
   publish("status", { state: "started", ...state() }, "started");
   captureNow("hook-start");
 

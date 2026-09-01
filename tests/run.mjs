@@ -15,6 +15,7 @@ const testEntries = [
   "ripple-style-applier.test.ts",
   "ripple-nested-engine.test.ts",
   "structural-edit.test.ts",
+  "debug-hook.test.ts",
 ];
 const outfiles = testEntries.map((entry) => path.join(outdir, entry.replace(/\.ts$/, ".mjs")));
 
