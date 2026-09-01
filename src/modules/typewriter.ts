@@ -4,13 +4,8 @@ import { TYPEWRITER_CONFIG } from "../config";
 import { shouldPauseTypewriter } from "../utils/edgeCases";
 import * as inputMode from "./inputMode";
 import * as inputModeTriggers from "./inputModeTriggers";
+import * as flip from "./typewriter/flip";
 import { isInAllowElements } from "../utils/boundary";
-import {
-  claimInlineStyle,
-  restoreOwnedInlineStyle,
-  setOwnedInlineStyle,
-  type OwnedInlineStyle,
-} from "../utils/inlineStyleOwnership";
 import {
   isCurrentSelectionEditable,
   isCurrentSelectionInActiveEditor,
@@ -19,8 +14,7 @@ import {
 } from "../utils/editorScope";
 import { prefersReducedMotion } from "../utils/reducedMotion";
 
-const { COMFORT_ZONE, SCROLL_DURATION_TIERS, SCROLL_CURVE, TYPING_GAP_MS, CLICK_CENTER_LOW, CLICK_CENTER_HIGH } = TYPEWRITER_CONFIG;
-const FLIP_BLOCK_RADIUS = 30;
+const { COMFORT_ZONE, SCROLL_DURATION_TIERS, TYPING_GAP_MS, CLICK_CENTER_LOW, CLICK_CENTER_HIGH } = TYPEWRITER_CONFIG;
 
 let eventListeners: Array<[string, EventListener, AddEventListenerOptions?]> = [];
 let windowEventListeners: Array<[string, EventListener, AddEventListenerOptions?]> = [];
@@ -28,10 +22,6 @@ let unsubInputMode: (() => void) | null = null;
 let pendingScroll: number | null = null;
 let pendingScrollEnd: number = 0;
 let scrollResyncPending = false;
-let activeFLIPTimer: ReturnType<typeof setTimeout> | null = null;
-let lastFLIPElements: HTMLElement[] = []; // P3-7: 上一轮 FLIP 修改的元素，供下一轮入口清理残留 inline transition
-const ownedFLIPStyles = new WeakMap<HTMLElement, OwnedInlineStyle>();
-let flipGeneration = 0;
 let initialized = false;
 const deferredFrames = new Set<number>();
 
@@ -84,7 +74,7 @@ function cancelDeferredFrames(): void {
 }
 
 function pauseTypewriterMotion(): void {
-  flipGeneration += 1;
+  flip.reset();
   cancelDeferredFrames();
   if (pendingScroll !== null) {
     cancelAnimationFrame(pendingScroll);
@@ -94,11 +84,6 @@ function pauseTypewriterMotion(): void {
     cancelAnimationFrame(pendingCheck);
     pendingCheck = null;
   }
-  if (activeFLIPTimer !== null) {
-    clearTimeout(activeFLIPTimer);
-    activeFLIPTimer = null;
-  }
-  clearLastFLIPElements();
   if (debounceTimer !== null) {
     clearTimeout(debounceTimer);
     debounceTimer = null;
@@ -117,177 +102,6 @@ function easeOutCubic(t: number): number {
 /** 缓起缓收 —— 点击居中用，比 easeOutCubic 更自然（起步不冲，收尾不突兀） */
 function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-}
-
-/**
- * 精简 FLIP 动画：Enter / Backspace 块变更后，下方块平滑过渡回原位。
- *
- * 三阶段批量执行：
- *   Phase 1 (Invert): 采样块一次性写完 transform+transition:none，不读 offsetHeight
- *   Phase 2 (Commit):  读 editor.offsetHeight 一次，唯一 layout — 所有 Invert 一起生效
- *   Phase 3 (Play):    一个 rAF 统一启动所有 transition，一个 setTimeout 集中清理
- *
- * 对比旧版：不逐元素 reflow、不逐元素内层 rAF → 无中间帧残影，定时器从 N×2 降到 2。
- * 防重入：新调用会取消前一轮的 cleanup 定时器，防止覆盖 transform 后又被旧 cleanup 清空。
- */
-function clearLastFLIPElements(): void {
-  for (const el of lastFLIPElements) {
-    const owned = ownedFLIPStyles.get(el);
-    if (owned) restoreOwnedInlineStyle(el.style, owned);
-    ownedFLIPStyles.delete(el);
-  }
-  lastFLIPElements = [];
-}
-
-function setOwnedFLIPStyle(el: HTMLElement, property: string, value: string): void {
-  let owned = ownedFLIPStyles.get(el);
-  if (!owned) {
-    owned = claimInlineStyle(el.style, ["transform", "transition"]);
-    ownedFLIPStyles.set(el, owned);
-  }
-  setOwnedInlineStyle(el.style, owned, property, value);
-}
-
-function isBlockElement(el: Element | null): el is HTMLElement {
-  return el instanceof HTMLElement && el.hasAttribute("data-node-id");
-}
-
-function addSiblingWindow(block: HTMLElement, blocks: Set<HTMLElement>): void {
-  blocks.add(block);
-
-  let prev = block.previousElementSibling;
-  let prevCount = 0;
-  while (prev && prevCount < FLIP_BLOCK_RADIUS) {
-    if (isBlockElement(prev)) {
-      blocks.add(prev);
-      prevCount++;
-    }
-    prev = prev.previousElementSibling;
-  }
-
-  let next = block.nextElementSibling;
-  let nextCount = 0;
-  while (next && nextCount < FLIP_BLOCK_RADIUS) {
-    if (isBlockElement(next)) {
-      blocks.add(next);
-      nextCount++;
-    }
-    next = next.nextElementSibling;
-  }
-}
-
-function addFlipWindowsFromBlock(block: HTMLElement, editor: HTMLElement, blocks: Set<HTMLElement>): void {
-  let current: HTMLElement | null = block;
-  while (current && current !== editor && editor.contains(current)) {
-    if (isBlockElement(current)) addSiblingWindow(current, blocks);
-
-    const parent: HTMLElement | null = current.parentElement;
-    if (!parent || parent === editor) break;
-
-    const ancestor = parent.closest("[data-node-id]") as HTMLElement | null;
-    if (!ancestor || ancestor === current || !editor.contains(ancestor)) break;
-    current = ancestor;
-  }
-}
-
-function collectFlipBlocks(editor: HTMLElement, range: Range): HTMLElement[] {
-  const blocks = new Set<HTMLElement>();
-  const startBlock = elementFromNode(range.startContainer)?.closest("[data-node-id]") as HTMLElement | null;
-  if (startBlock && editor.contains(startBlock)) {
-    addFlipWindowsFromBlock(startBlock, editor, blocks);
-  }
-
-  if (!range.collapsed) {
-    const endBlock = elementFromNode(range.endContainer)?.closest("[data-node-id]") as HTMLElement | null;
-    if (endBlock && endBlock !== startBlock && editor.contains(endBlock)) {
-      addFlipWindowsFromBlock(endBlock, editor, blocks);
-    }
-  }
-
-  // Rare fallback for unexpected selection containers: keep the old behavior.
-  return blocks.size > 0
-    ? Array.from(blocks)
-    : Array.from(editor.querySelectorAll<HTMLElement>("[data-node-id]"));
-}
-
-function animateBlockShift(editor: HTMLElement, range: Range): void {
-  if (prefersReducedMotion()) {
-    flipGeneration += 1;
-    if (activeFLIPTimer !== null) {
-      clearTimeout(activeFLIPTimer);
-      activeFLIPTimer = null;
-    }
-    clearLastFLIPElements();
-    return;
-  }
-  const token = ++flipGeneration;
-
-  // 取消前一轮 FLIP cleanup，防止连续 Enter 时前一轮 Phase 3 的 setTimeout 清空当前 transform
-  if (activeFLIPTimer !== null) {
-    clearTimeout(activeFLIPTimer);
-    activeFLIPTimer = null;
-  }
-
-  // P3-7: 清理上一轮 FLIP 残留的 inline transition/transform。连续 Enter 时前一轮
-  // cleanup setTimeout 已被上方取消，被 |delta|<2 跳过的元素会永久残留 transition。
-  clearLastFLIPElements();
-
-  // First: 捕获阶段同步快照当前块附近的旧位置（在 Enter 的 capture handler 中调用，
-  // 此时 SiYuan bubble handler 尚未改 DOM）。只采样光标附近 sibling + 祖先层级，
-  // 避免长文档里对所有块做 getBoundingClientRect()。
-  const first = new Map<HTMLElement, number>();
-  collectFlipBlocks(editor, range).forEach(el => {
-    first.set(el, el.getBoundingClientRect().top);
-  });
-
-  // 等一帧让 SiYuan 完成 DOM 变更
-  requestDeferredFrame(() => {
-    if (token !== flipGeneration) return;
-
-    const modifiedElements: HTMLElement[] = [];
-
-    // Phase 1 (Invert): 批量写
-    for (const [el, y0] of first) {
-      if (!el.isConnected) continue;
-      const y1 = el.getBoundingClientRect().top;
-      const delta = y0 - y1;
-      if (Math.abs(delta) < 2) continue;
-
-      setOwnedFLIPStyle(el, "transform", `translateY(${delta}px)`);
-      setOwnedFLIPStyle(el, "transition", "none");
-      modifiedElements.push(el);
-    }
-
-    lastFLIPElements = modifiedElements;
-
-    if (modifiedElements.length === 0) return;
-
-    // Phase 2 (Commit): 唯一一次 layout
-    void editor.offsetHeight;
-
-    // Phase 3 (Play): 一个 rAF 统一启动
-    requestDeferredFrame(() => {
-      if (token !== flipGeneration) return;
-
-      for (const el of modifiedElements) {
-        setOwnedFLIPStyle(el, "transition", `transform 250ms ${SCROLL_CURVE}`);
-        setOwnedFLIPStyle(el, "transform", "");
-      }
-      if (activeFLIPTimer !== null) {
-        clearTimeout(activeFLIPTimer);
-        activeFLIPTimer = null;
-      }
-      activeFLIPTimer = setTimeout(() => {
-        if (token !== flipGeneration || activeFLIPTimer === null) return;  // 被新 FLIP 取消，跳过 cleanup
-        activeFLIPTimer = null;
-        modifiedElements.forEach(el => {
-          const owned = ownedFLIPStyles.get(el);
-          if (owned) restoreOwnedInlineStyle(el.style, owned);
-          ownedFLIPStyles.delete(el);
-        });
-      }, 300);
-    });
-  });
 }
 
 function durationForDistance(dist: number): number {
@@ -701,7 +515,9 @@ export function initTypewriter(): void {
         const editor = sel.anchorNode?.parentElement?.closest(
           ".protyle-wysiwyg",
         ) as HTMLElement | null;
-        if (editor && shouldAnimateBlockShift) animateBlockShift(editor, sel.getRangeAt(0));
+        if (editor && shouldAnimateBlockShift) {
+          flip.start(editor, sel.getRangeAt(0), requestDeferredFrame);
+        }
         // 延迟两帧等 SiYuan 布局收敛后再触发滚动对齐
         // 不能用 scheduleCheck() 唯一一帧，因为思源在 Enter/Backspace 的 bubble
         // handler 中还要修改 DOM，一帧不够——两帧后布局稳定
@@ -711,12 +527,12 @@ export function initTypewriter(): void {
             lastCheckRect = null;
             // Enter vs Backspace 区别处理：
             //  - Enter 新建块（常为空）→ 绕过空块守卫 + 立即滚（不等首字输入）
-            //  - Backspace 块级合并（FLIP 检测到块位移 lastFLIPElements.length>0）→ 立即滚
+            //  - Backspace 块级合并（FLIP 检测到块位移）→ 立即滚
             //  - Backspace 字符删除（无块位移）→ 不设 lastInputAt=0，走 debounce
             if (ke.key === "Enter") {
               bypassEmptyBlock = true;
               lastInputAt = 0;
-            } else if (shouldAnimateBlockShift && lastFLIPElements.length > 0) {
+            } else if (shouldAnimateBlockShift && flip.hasShiftedBlocks()) {
               lastInputAt = 0;
             }
             checkAndScroll();
@@ -775,7 +591,7 @@ export function destroyTypewriter(): void {
     unsubInputMode = null;
   }
   initialized = false;
-  flipGeneration += 1;
+  flip.reset();
   cancelDeferredFrames();
 
   if (pendingScroll !== null) {
@@ -787,12 +603,6 @@ export function destroyTypewriter(): void {
     cancelAnimationFrame(pendingCheck);
     pendingCheck = null;
   }
-
-  if (activeFLIPTimer !== null) {
-    clearTimeout(activeFLIPTimer);
-    activeFLIPTimer = null;
-  }
-  clearLastFLIPElements();
 
   if (debounceTimer !== null) {
     clearTimeout(debounceTimer);
