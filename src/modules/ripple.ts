@@ -989,6 +989,11 @@ function onInput(event: Event): void {
     return;
   }
 
+  if (!inputMode.isFocusActive() || shouldPauseFocusAndTypewriter()) {
+    clearAll();
+    return;
+  }
+
   const inputType = (event as InputEvent).inputType;
   if (typeof inputType === "string" && STRUCTURAL_INPUT_TYPES.has(inputType)) {
     structuralRefreshPending = true;

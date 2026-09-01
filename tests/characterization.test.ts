@@ -1845,6 +1845,11 @@ test("ripple preserves valid nested opacity until a structural edit settles", ()
 
     inputMode.setBothOff();
     assert.equal(newContent.style.getPropertyValue("--zt-ripple-opacity"), "");
+    runtime.document.dispatch("input", eventFor(newContent, {
+      inputType: "insertParagraph",
+      isComposing: false,
+    }));
+    assert.equal(runtime.raf.pending.size, 0, "OFF clears structural input immediately");
   } finally {
     destroyRipple();
     inputMode.reset();
