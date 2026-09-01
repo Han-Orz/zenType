@@ -37,6 +37,7 @@ import {
 } from "../utils/editorScope";
 import { prefersReducedMotion } from "../utils/reducedMotion";
 import * as inputMode from "./inputMode";
+import * as inputModeTriggers from "./inputModeTriggers";
 import { createNestedRippleEngine } from "./ripple/nestedEngine";
 
 const { BLOCK_LEVELS, SENTENCE_DIM_ALPHA, TRANSITION_SEC, WEIGHT_MIN } = RIPPLE_CONFIG;
@@ -917,7 +918,7 @@ function clearAll(): void {
 
 function onSelectionChange(): void {
   if (!isCurrentSelectionEditable()) {
-    if (isCurrentSelectionInActiveEditor()) inputMode.setBothOff();
+    if (isCurrentSelectionInActiveEditor()) inputModeTriggers.onReadonly();
     return;
   }
   applyRipple();
@@ -925,7 +926,7 @@ function onSelectionChange(): void {
 
 function onInput(event: Event): void {
   if (!isEditableEvent(event)) {
-    if (isReadonlyEditorTarget(event.target)) inputMode.setBothOff();
+    if (isReadonlyEditorTarget(event.target)) inputModeTriggers.onReadonly();
     return;
   }
   if (pendingFrame !== null) {
