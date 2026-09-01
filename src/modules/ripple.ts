@@ -39,11 +39,16 @@ import { prefersReducedMotion } from "../utils/reducedMotion";
 import * as inputMode from "./inputMode";
 import * as inputModeTriggers from "./inputModeTriggers";
 import { createNestedRippleEngine } from "./ripple/nestedEngine";
+import {
+  releaseAfterOpacityTransition,
+  type TransitionReleaseTimer,
+} from "./ripple/transitionRelease";
 
 const { BLOCK_LEVELS, SENTENCE_DIM_ALPHA, TRANSITION_SEC, WEIGHT_MIN } = RIPPLE_CONFIG;
 
 /** CSS Custom Highlight API 注册名。 */
 const SENTENCE_DIM_HIGHLIGHT = "zt-sentence-dim";
+const SENTENCE_OUTGOING_DIM_HIGHLIGHT = "zt-sentence-outgoing-dim";
 const SENTENCE_FADE_IN_HIGHLIGHT = "zt-sentence-fade-in";
 const SENTENCE_FADE_OUT_HIGHLIGHT = "zt-sentence-fade-out";
 const SENTENCE_FADE_MS = Math.round(TRANSITION_SEC * 1000);
@@ -62,6 +67,7 @@ let eventListeners: Array<[string, EventListener]> = [];
 const modifiedBlocks = new Set<HTMLElement>();
 const ownedBlockStyles = new WeakMap<HTMLElement, OwnedInlineStyle>();
 const ownedBlocks = new Set<HTMLElement>();
+const pendingBlockReleases = new Map<HTMLElement, TransitionReleaseTimer>();
 const ownedRootStyles = new Map<string, OwnedInlineStyle>();
 let unsubInputMode: (() => void) | null = null;
 let visualStateDirty = false;
@@ -117,6 +123,40 @@ function getTopLevelBlock(currentBlock: HTMLElement, container: HTMLElement): HT
     parent = parent.parentElement;
   }
   return topBlock;
+}
+
+function cancelPendingBlockRelease(block: HTMLElement): void {
+  const timer = pendingBlockReleases.get(block);
+  if (timer === undefined) return;
+  clearTimeout(timer);
+  pendingBlockReleases.delete(block);
+}
+
+function releaseOwnedBlock(block: HTMLElement): void {
+  cancelPendingBlockRelease(block);
+  const owned = ownedBlockStyles.get(block);
+  if (owned) restoreOwnedInlineStyle(block.style, owned);
+  block.classList.remove(RIPPLE_BLOCK_CLASS);
+  ownedBlockStyles.delete(block);
+  ownedBlocks.delete(block);
+}
+
+function releaseBlockAfterTransition(block: HTMLElement): void {
+  if (pendingBlockReleases.has(block)) return;
+  const owned = ownedBlockStyles.get(block);
+  if (!owned) return;
+
+  const timer = releaseAfterOpacityTransition(
+    TRANSITION_SEC,
+    () => setOwnedInlineStyle(
+      block.style,
+      owned,
+      RIPPLE_OPACITY_PROPERTY,
+      "1",
+    ),
+    () => releaseOwnedBlock(block),
+  );
+  if (timer !== null) pendingBlockReleases.set(block, timer);
 }
 
 function visualWeightOf(block: HTMLElement, editorRect: DOMRect): number {
@@ -239,6 +279,7 @@ let lastDimText = "";
 let lastCaretSentenceRange: SentenceRange | null = null;
 let lastHadDimRanges = false;
 let lastDimTextNodes: TextNodeSnapshotEntry[] | null = null;
+let lastDimHighlightRanges: Range[] = [];
 let sentenceFadeFrame: number | null = null;
 let sentenceFadeToken = 0;
 let activeSentenceFade: {
@@ -247,6 +288,8 @@ let activeSentenceFade: {
   oldRange: SentenceRange;
   newRange: SentenceRange;
 } | null = null;
+let outgoingSentenceRanges: Range[] = [];
+let outgoingSentenceCleanupTimer: TransitionReleaseTimer | null = null;
 
 function sentenceHighlightSupported(): boolean {
   return "highlights" in CSS && typeof Highlight !== "undefined";
@@ -286,10 +329,55 @@ function rangeFromOffsets(textNodeMap: TextNodeEntry[], start: number, end: numb
 function setSentenceHighlight(name: string, ranges: Range[]): void {
   if (ranges.length > 0) {
     CSS.highlights.set(name, new Highlight(...ranges));
+    if (name === SENTENCE_DIM_HIGHLIGHT) lastDimHighlightRanges = [...ranges];
     visualStateDirty = true;
   } else {
     CSS.highlights.delete(name);
+    if (name === SENTENCE_DIM_HIGHLIGHT) lastDimHighlightRanges = [];
   }
+}
+
+function clearOutgoingSentenceHighlight(): void {
+  if (outgoingSentenceCleanupTimer !== null) {
+    clearTimeout(outgoingSentenceCleanupTimer);
+    outgoingSentenceCleanupTimer = null;
+  }
+  outgoingSentenceRanges = [];
+  if (sentenceHighlightSupported()) {
+    CSS.highlights.delete(SENTENCE_OUTGOING_DIM_HIGHLIGHT);
+  }
+}
+
+function preserveOutgoingSentenceHighlight(): void {
+  if (prefersReducedMotion() || SENTENCE_FADE_MS <= 0) {
+    clearOutgoingSentenceHighlight();
+    return;
+  }
+  if (lastDimHighlightRanges.length === 0) {
+    return;
+  }
+
+  if (outgoingSentenceCleanupTimer !== null) {
+    clearTimeout(outgoingSentenceCleanupTimer);
+    outgoingSentenceCleanupTimer = null;
+  }
+
+  outgoingSentenceRanges = [
+    ...outgoingSentenceRanges,
+    ...lastDimHighlightRanges,
+  ];
+  CSS.highlights.set(
+    SENTENCE_OUTGOING_DIM_HIGHLIGHT,
+    new Highlight(...outgoingSentenceRanges),
+  );
+  visualStateDirty = true;
+  outgoingSentenceCleanupTimer = setTimeout(() => {
+    outgoingSentenceCleanupTimer = null;
+    outgoingSentenceRanges = [];
+    if (sentenceHighlightSupported()) {
+      CSS.highlights.delete(SENTENCE_OUTGOING_DIM_HIGHLIGHT);
+    }
+  }, SENTENCE_FADE_MS);
 }
 
 function buildDimRanges(
@@ -312,6 +400,7 @@ function resetSentenceCache(): void {
   lastCaretSentenceRange = null;
   lastHadDimRanges = false;
   lastDimTextNodes = null;
+  lastDimHighlightRanges = [];
 }
 
 function cancelSentenceFade(): void {
@@ -371,7 +460,7 @@ function getBlockTextColor(block: HTMLElement): Rgba {
 function applyStableSentenceHighlight(block: HTMLElement): void {
   const text = block.textContent ?? "";
   if (!text) {
-    CSS.highlights.delete(SENTENCE_DIM_HIGHLIGHT);
+    setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, []);
     resetSentenceCache();
     return;
   }
@@ -379,7 +468,7 @@ function applyStableSentenceHighlight(block: HTMLElement): void {
   const textNodeMap = buildTextNodeMap(block);
   const caretOffset = getCaretOffset(block, textNodeMap);
   if (caretOffset === null) {
-    CSS.highlights.delete(SENTENCE_DIM_HIGHLIGHT);
+    setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, []);
     resetSentenceCache();
     return;
   }
@@ -516,12 +605,18 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
   const text = block.textContent ?? "";
   if (!text) {
     cancelSentenceFade();
-    CSS.highlights.delete(SENTENCE_DIM_HIGHLIGHT);
+    setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, []);
     resetSentenceCache();
     return;
   }
 
   const blockId = block.dataset?.nodeId ?? null;
+  if (lastDimBlockId !== null && blockId !== lastDimBlockId) {
+    // Keep the previous block's dimmed sentences visible while its block
+    // opacity transitions to the new structural target. Replacing the single
+    // current highlight first would create a visible dim -> normal -> dim peak.
+    preserveOutgoingSentenceHighlight();
+  }
   const textNodesUnchanged = textNodeMapMatchesSnapshot(textNodeMap, lastDimTextNodes);
 
   // Short-circuit: cursor moved within the same sentence of the same block (no text change).
@@ -598,7 +693,7 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
   if (dimRanges.length > 0) {
     setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, dimRanges);
   } else {
-    CSS.highlights.delete(SENTENCE_DIM_HIGHLIGHT);
+    setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, []);
   }
 
   // Update cache
@@ -676,6 +771,7 @@ function applyBlockOpacity(
       : distance >= 2
       ? 1.0
       : WEIGHT_MIN + visualWeightOf(block, editorRect) * (1 - WEIGHT_MIN);
+    cancelPendingBlockRelease(block);
     let owned = ownedBlockStyles.get(block);
     if (!owned) {
       owned = claimInlineStyle(block.style, [
@@ -711,14 +807,12 @@ function applyBlockOpacity(
     visualStateDirty = true;
   });
 
-  // 不在新列表里的旧块：精确恢复 claim 前的 inline style。
+  // 不在新列表里的旧块：先过渡到自然 opacity，再释放 ownership，避免
+  // current block handoff 直接跳回 1。OFF/destroy 仍由 clearLegacyBlockOpacity
+  // 立即释放。
   modifiedBlocks.forEach((block) => {
     if (!newBlocks.has(block)) {
-      const owned = ownedBlockStyles.get(block);
-      if (owned) restoreOwnedInlineStyle(block.style, owned);
-      block.classList.remove(RIPPLE_BLOCK_CLASS);
-      ownedBlockStyles.delete(block);
-      ownedBlocks.delete(block);
+      releaseBlockAfterTransition(block);
     }
   });
 
@@ -727,11 +821,10 @@ function applyBlockOpacity(
 }
 
 function clearLegacyBlockOpacity(): void {
+  for (const timer of pendingBlockReleases.values()) clearTimeout(timer);
+  pendingBlockReleases.clear();
   for (const block of Array.from(ownedBlocks)) {
-    const owned = ownedBlockStyles.get(block);
-    if (owned) restoreOwnedInlineStyle(block.style, owned);
-    block.classList.remove(RIPPLE_BLOCK_CLASS);
-    ownedBlockStyles.delete(block);
+    releaseOwnedBlock(block);
   }
   ownedBlocks.clear();
   modifiedBlocks.clear();
@@ -808,7 +901,7 @@ function applyRippleNow(): RippleApplyResult {
     applySentenceHighlight(currentBlock, caretOffset, textNodeMap);
   } else if (sentenceHighlightSupported()) {
     cancelSentenceFade();
-    CSS.highlights.delete(SENTENCE_DIM_HIGHLIGHT);
+    setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, []);
     resetSentenceCache();
   }
 
@@ -960,10 +1053,17 @@ function clearAll(): void {
   disconnectMutationObserver();
   nestedRippleEngine.clear();
   clearLegacyBlockOpacity();
-  if (!visualStateDirty && ownedBlocks.size === 0 && ownedRootStyles.size === 0) return;
+  if (
+    !visualStateDirty &&
+    ownedBlocks.size === 0 &&
+    ownedRootStyles.size === 0 &&
+    outgoingSentenceRanges.length === 0 &&
+    outgoingSentenceCleanupTimer === null
+  ) return;
 
   cancelSentenceFade();
-  if (sentenceHighlightSupported()) CSS.highlights.delete(SENTENCE_DIM_HIGHLIGHT);
+  setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, []);
+  clearOutgoingSentenceHighlight();
   for (const [property, owned] of ownedRootStyles) {
     restoreOwnedInlineStyle(document.documentElement.style, owned);
     ownedRootStyles.delete(property);

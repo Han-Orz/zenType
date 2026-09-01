@@ -614,7 +614,11 @@ class FakeResizeObserver {
 }
 
 class FakeHighlight {
-  constructor(public readonly ranges: FakeRange[]) {}
+  readonly ranges: FakeRange[];
+
+  constructor(...ranges: FakeRange[]) {
+    this.ranges = ranges;
+  }
 }
 
 class FakeDOMRect {
@@ -1194,7 +1198,7 @@ test("typewriter hard-pauses during IME composition and debounces compositionend
   }
 });
 
-test("typewriter retargets one active scroll after a new caret change", () => {
+test("typewriter defers transient caret changes until active scroll settles", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
   const fixture = createEditorFixture(runtime);
@@ -1219,20 +1223,149 @@ test("typewriter retargets one active scroll after a new caret change", () => {
     const resyncCheckFrame = [...runtime.raf.pending.keys()][1];
     assert.ok(resyncCheckFrame);
     runtime.raf.flush(resyncCheckFrame, runtime.clock.now);
-    assert.equal(runtime.raf.pending.size, 2, "layout defer keeps the active loop and one check");
-
-    const layoutCheckFrame = [...runtime.raf.pending.keys()].find((id) => id !== firstScrollFrame);
-    assert.ok(layoutCheckFrame);
-    runtime.raf.flush(layoutCheckFrame, runtime.clock.now);
-    assert.equal(runtime.raf.pending.size, 1, "retargeting keeps the original scroll loop");
+    assert.equal(runtime.raf.pending.size, 1, "transient geometry does not restart or add a loop");
     assert.equal(runtime.raf.pending.has(firstScrollFrame), true);
 
     runtime.clock.advance(600);
     runtime.raf.flush(firstScrollFrame, runtime.clock.now);
-    assert.equal(Math.round(fixture.content.scrollTop), 350, "the latest caret target owns the completed scroll");
-    assert.equal(runtime.raf.pending.size, 1, "completion schedules one final geometry check");
+    assert.equal(Math.round(fixture.content.scrollTop), 300, "the current motion finishes naturally");
+    assert.equal(runtime.raf.pending.size, 1, "completion schedules one final geometry resync");
     runtime.raf.flushNext(runtime.clock.now);
-    assert.equal(runtime.raf.pending.size, 0, "the final check does not create a second loop");
+    assert.equal(runtime.raf.pending.size, 1, "the resync starts one follow-up loop at the safe point");
+    const resyncScrollFrame = [...runtime.raf.pending.keys()][0];
+    runtime.clock.advance(600);
+    runtime.raf.flush(resyncScrollFrame, runtime.clock.now);
+    assert.equal(fixture.content.scrollTop > 300, true, "the latest caret target is eventually adopted");
+    assert.equal(runtime.raf.pending.size, 0);
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("scroll keeps its active timeline while adopting a structural resync target", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  let settledCount = 0;
+
+  try {
+    scroll.reset();
+    scroll.scrollTo(fixture.content, { deltaY: 400, duration: 600 });
+    const firstFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstFrame);
+
+    runtime.clock.advance(200);
+    runtime.raf.flush(firstFrame, runtime.clock.now);
+    const activeFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(activeFrame);
+
+    scroll.scrollTo(
+      fixture.content,
+      { deltaY: 100, duration: 600 },
+      () => { settledCount++; },
+    );
+    assert.equal(runtime.raf.pending.size, 1, "retargeting reuses the active loop");
+    assert.equal(runtime.raf.pending.has(activeFrame), true);
+
+    runtime.clock.advance(100);
+    runtime.raf.flush(activeFrame, runtime.clock.now);
+    assert.equal(
+      Math.round(fixture.content.scrollTop),
+      334,
+      "the retarget keeps the original easing timeline instead of restarting at t=0",
+    );
+    assert.equal(runtime.raf.pending.size, 1);
+
+    const completionFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(completionFrame);
+    runtime.clock.advance(300);
+    runtime.raf.flush(completionFrame, runtime.clock.now);
+    assert.equal(settledCount, 1, "an active retarget settles exactly once");
+    assert.equal(runtime.raf.pending.size, 0);
+
+    scroll.scrollTo(fixture.content, { deltaY: 50 });
+    const cancellableFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(cancellableFrame);
+    scroll.requestResync(() => { settledCount++; });
+    scroll.cancel();
+    assert.equal(runtime.raf.pending.size, 0, "cancel stops the one active loop");
+    runtime.clock.advance(1000);
+    assert.equal(settledCount, 1, "cancel does not invoke a stale resync callback");
+  } finally {
+    scroll.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("typewriter waits for stable structural geometry before changing active scroll", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  runtime.clock.now = 80_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+    runtime.setCaret(fixture.text, 1, rect(20, 800));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "insertText",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+
+    const activeScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(activeScrollFrame);
+
+    // Start a structural edit while a scroll is in flight. The first
+    // selectionchange reports a transient comfort-zone position.
+    runtime.setCaret(fixture.text, 0, rect(20, 400));
+    runtime.document.dispatch("keydown", eventFor(fixture.block, {
+      key: "Backspace",
+      isComposing: false,
+      defaultPrevented: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    const pendingFrames = [...runtime.raf.pending.keys()];
+    const transientCheck = pendingFrames[pendingFrames.length - 1];
+    assert.ok(transientCheck);
+    runtime.raf.flush(transientCheck, runtime.clock.now);
+    assert.equal(
+      runtime.raf.pending.has(activeScrollFrame),
+      true,
+      "transient geometry does not cancel the active structural motion",
+    );
+
+    // Publish the stable caret before draining the FLIP and two-frame settle
+    // work; only the structural settle callback may consume this target.
+    runtime.setCaret(fixture.text, 1, rect(20, 900));
+    let settleFrameCount = 0;
+    while (true) {
+      const nonScrollFrame = [...runtime.raf.pending.keys()].find((id) => id !== activeScrollFrame);
+      if (nonScrollFrame === undefined) break;
+      assert.ok(settleFrameCount++ < 4, "structural settle frames must remain bounded");
+      runtime.raf.flush(nonScrollFrame, runtime.clock.now);
+    }
+    assert.equal(settleFrameCount >= 2, true, "structural scrolling waits through two settle frames");
+    assert.equal(runtime.raf.pending.has(activeScrollFrame), true);
+    assert.equal(runtime.raf.pending.size, 1, "the structural check reuses one active loop");
+
+    // A later transient comfort-zone check still leaves the authoritative
+    // motion alive; it only requests a post-settle geometry resync.
+    runtime.setCaret(fixture.text, 1, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    let nonScrollFrame = [...runtime.raf.pending.keys()].find((id) => id !== activeScrollFrame);
+    assert.ok(nonScrollFrame);
+    runtime.raf.flush(nonScrollFrame, runtime.clock.now);
+    assert.equal(runtime.raf.pending.has(activeScrollFrame), true);
+
+    runtime.clock.advance(600);
+    runtime.raf.flush(activeScrollFrame, runtime.clock.now);
+    assert.equal(fixture.content.scrollTop > 0, true, "the stable structural target eventually scrolls");
   } finally {
     destroyTypewriter();
     inputMode.reset();
@@ -1859,6 +1992,112 @@ test("ripple preserves valid nested opacity until a structural edit settles", ()
   }
 });
 
+test("ripple transitions a legacy block handoff before releasing ownership", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+  fixture.rootList.setAttribute("data-node-id", "root-list");
+  const topSiblingText = fixture.topSibling.childNodes[0];
+  assert.ok(topSiblingText instanceof FakeText);
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    runtime.setCaret(topSiblingText, 1, rect(20, 400));
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"), "0.4");
+    assert.equal(fixture.rootList.classList.contains("zentype-ripple-block"), true);
+
+    runtime.setCaret(fixture.alternateText, 1, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+
+    assert.equal(
+      fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"),
+      "1",
+      "a stale block first transitions toward natural opacity",
+    );
+    assert.equal(
+      fixture.rootList.classList.contains("zentype-ripple-block"),
+      true,
+      "the Ripple class remains while the handoff transition is active",
+    );
+    assert.deepEqual(runtime.clock.delays(), [400]);
+
+    runtime.clock.advance(399);
+    assert.equal(fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"), "1");
+    assert.equal(fixture.rootList.classList.contains("zentype-ripple-block"), true);
+
+    runtime.clock.advance(1);
+    assert.equal(fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"), "");
+    assert.equal(fixture.rootList.classList.contains("zentype-ripple-block"), false);
+
+    // A later handoff may have a pending CSS transition, but OFF must still
+    // release the host immediately instead of waiting for that timer.
+    runtime.setCaret(topSiblingText, 1, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.setCaret(fixture.alternateText, 1, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(fixture.rootList.classList.contains("zentype-ripple-block"), true);
+    inputMode.setBothOff();
+    assert.equal(fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"), "");
+    assert.equal(fixture.rootList.classList.contains("zentype-ripple-block"), false);
+    runtime.clock.advance(1000);
+  } finally {
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("ripple retains outgoing sentence dim through a block handoff", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+
+    const oldDim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(oldDim);
+    assert.equal(oldDim.ranges.some((range) => range.startContainer === fixture.alternateText), true);
+
+    runtime.setCaret(fixture.focusText, 1, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+
+    const outgoing = runtime.highlights.get("zt-sentence-outgoing-dim");
+    assert.ok(outgoing, "the previous block keeps its dimmed sentence range");
+    assert.equal(
+      outgoing.ranges.some((range) => range.startContainer === fixture.alternateText),
+      true,
+    );
+    const current = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(current);
+    assert.equal(current.ranges.some((range) => range.startContainer === fixture.focusText), true);
+
+    runtime.clock.advance(399);
+    assert.equal(runtime.highlights.has("zt-sentence-outgoing-dim"), true);
+    runtime.clock.advance(1);
+    assert.equal(runtime.highlights.has("zt-sentence-outgoing-dim"), false);
+
+    inputMode.setBothOff();
+    assert.equal(runtime.highlights.size, 0, "OFF clears current and outgoing sentence highlights");
+  } finally {
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
 test("FLIP interruption freezes the rendered position and rebases the next edit", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
@@ -2033,7 +2272,7 @@ test("scroll callbacks are reserved for active-loop retarget completion", () => 
     );
     assert.equal(runtime.raf.pending.size, 1);
     assert.equal(runtime.raf.pending.has(retainedFrame), true);
-    runtime.clock.advance(300);
+    runtime.clock.advance(400);
     runtime.raf.flush(retainedFrame, runtime.clock.now);
     assert.equal(retargetCallbackCount, 1);
     assert.equal(runtime.raf.pending.size, 0);

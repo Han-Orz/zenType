@@ -193,6 +193,13 @@
   color: var(--zt-sentence-dim-color);
 }
 
+// Retain the previous block's sentence dim while its block opacity hands off
+// to the new focus target. The range is removed after the same transition
+// lifecycle; this avoids a dim -> normal -> dim brightness peak on handoff.
+::highlight(zt-sentence-outgoing-dim) {
+  color: var(--zt-sentence-dim-color);
+}
+
 ::highlight(zt-sentence-fade-in) {
   color: var(--zt-sentence-fade-in-color);
 }

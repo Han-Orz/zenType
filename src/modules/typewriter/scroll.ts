@@ -17,6 +17,7 @@ let startTime = 0;
 let duration = 0;
 let easing: (t: number) => number = easeOutCubic;
 let generation = 0;
+let resyncPending = false;
 let retargetSettledCallback: (() => void) | null = null;
 
 function easeOutCubic(t: number): number {
@@ -51,6 +52,7 @@ function clearActiveScroll(): void {
   endScroll = 0;
   startTime = 0;
   duration = 0;
+  resyncPending = false;
   retargetSettledCallback = null;
 }
 
@@ -74,13 +76,25 @@ export function cancelForReducedMotion(): void {
   cancel();
 }
 
+/**
+ * Remember that the caret/layout should be checked again after the current
+ * motion reaches a safe point. The active loop keeps its existing easing
+ * timeline; callers do not need to start a second loop for transient geometry.
+ */
+export function requestResync(onSettled?: () => void): void {
+  if (activeScrollFrame === null) return;
+  resyncPending = true;
+  if (onSettled) retargetSettledCallback = onSettled;
+}
+
 function applyImmediately(target: HTMLElement, deltaY: number): void {
   target.scrollTop = clampScrollTop(target, target.scrollTop + deltaY);
 }
 
 /**
- * Start or retarget the one active scroll loop. Retargeting samples the
- * current scrollTop so a new caret position never restarts from stale state.
+ * Start or retarget the one active scroll loop. An active loop keeps its
+ * current easing timeline while adopting the newest endpoint, so transient
+ * caret geometry cannot repeatedly restart the motion from t=0.
  */
 export function scrollTo(
   target: HTMLElement,
@@ -99,12 +113,11 @@ export function scrollTo(
   const nextEasing = options.easing ?? easeOutCubic;
 
   if (activeScrollFrame !== null && activeTarget === target) {
-    startScroll = target.scrollTop;
+    // Keep startScroll/startTime/duration/easing intact. The current motion
+    // should finish naturally; only its endpoint and post-settle resync change.
     endScroll = target.scrollTop + deltaY;
-    startTime = performance.now();
-    duration = nextDuration;
-    easing = nextEasing;
-    retargetSettledCallback = onRetargetSettled ?? null;
+    resyncPending = true;
+    if (onRetargetSettled) retargetSettledCallback = onRetargetSettled;
     return;
   }
 
@@ -117,6 +130,7 @@ export function scrollTo(
   startTime = performance.now();
   duration = nextDuration;
   easing = nextEasing;
+  resyncPending = false;
   // An initial scroll has no resynchronization callback. Only an active-loop
   // retarget carries a callback for the final geometry check.
   retargetSettledCallback = null;
@@ -139,7 +153,8 @@ export function scrollTo(
 
     activeScrollFrame = null;
     activeTarget = null;
-    const callback = retargetSettledCallback;
+    const callback = resyncPending ? retargetSettledCallback : null;
+    resyncPending = false;
     retargetSettledCallback = null;
     if (callback) callback();
   };

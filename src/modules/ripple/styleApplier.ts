@@ -10,6 +10,7 @@ import type {
   RippleTargetPlan,
   RippleTargetRole,
 } from "./semanticPlanner";
+import { releaseAfterOpacityTransition } from "./transitionRelease";
 
 const RIPPLE_BLOCK_CLASS = "zentype-ripple-block";
 const RIPPLE_OPACITY_PROPERTY = "--zt-ripple-opacity";
@@ -117,31 +118,25 @@ export function createRippleStyleApplier(): RippleStyleApplier {
   ): void {
     if (target.pendingExit !== null) return;
 
-    const opacityApplied = applyPrivateProperty(
-      element,
-      target.owned,
-      RIPPLE_OPACITY_PROPERTY,
-      "1",
+    target.pendingExit = releaseAfterOpacityTransition(
+      RIPPLE_CONFIG.TRANSITION_SEC,
+      () => {
+        const applied = applyPrivateProperty(
+          element,
+          target.owned,
+          RIPPLE_OPACITY_PROPERTY,
+          "1",
+        );
+        if (!applied) target.blocked = true;
+        return applied;
+      },
+      () => {
+        target.pendingExit = null;
+        if (activeTargets.get(element) !== target) return;
+        releaseTarget(element, target);
+        activeTargets.delete(element);
+      },
     );
-    if (!opacityApplied) {
-      target.blocked = true;
-      releaseTarget(element, target);
-      activeTargets.delete(element);
-      return;
-    }
-
-    if (RIPPLE_CONFIG.TRANSITION_SEC === 0) {
-      releaseTarget(element, target);
-      activeTargets.delete(element);
-      return;
-    }
-
-    target.pendingExit = setTimeout(() => {
-      target.pendingExit = null;
-      if (activeTargets.get(element) !== target) return;
-      releaseTarget(element, target);
-      activeTargets.delete(element);
-    }, RIPPLE_CONFIG.TRANSITION_SEC * 1000);
   }
 
   function apply(plan: RippleTargetPlan, bindings: ReadonlyMap<string, HTMLElement>): void {
