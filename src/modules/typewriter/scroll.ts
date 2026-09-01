@@ -17,7 +17,7 @@ let startTime = 0;
 let duration = 0;
 let easing: (t: number) => number = easeOutCubic;
 let generation = 0;
-let onSettled: (() => void) | null = null;
+let retargetSettledCallback: (() => void) | null = null;
 
 function easeOutCubic(t: number): number {
   return 1 - Math.pow(1 - t, 3);
@@ -51,7 +51,7 @@ function clearActiveScroll(): void {
   endScroll = 0;
   startTime = 0;
   duration = 0;
-  onSettled = null;
+  retargetSettledCallback = null;
 }
 
 export function isScrolling(): boolean {
@@ -85,7 +85,7 @@ function applyImmediately(target: HTMLElement, deltaY: number): void {
 export function scrollTo(
   target: HTMLElement,
   options: ScrollOptions,
-  settled?: () => void,
+  onRetargetSettled?: () => void,
 ): void {
   const { deltaY } = options;
 
@@ -104,7 +104,7 @@ export function scrollTo(
     startTime = performance.now();
     duration = nextDuration;
     easing = nextEasing;
-    onSettled = settled ?? null;
+    retargetSettledCallback = onRetargetSettled ?? null;
     return;
   }
 
@@ -117,7 +117,9 @@ export function scrollTo(
   startTime = performance.now();
   duration = nextDuration;
   easing = nextEasing;
-  onSettled = null;
+  // An initial scroll has no resynchronization callback. Only an active-loop
+  // retarget carries a callback for the final geometry check.
+  retargetSettledCallback = null;
 
   const step = (now: number) => {
     if (token !== generation || activeScrollFrame === null || activeTarget === null) return;
@@ -137,8 +139,8 @@ export function scrollTo(
 
     activeScrollFrame = null;
     activeTarget = null;
-    const callback = onSettled;
-    onSettled = null;
+    const callback = retargetSettledCallback;
+    retargetSettledCallback = null;
     if (callback) callback();
   };
 

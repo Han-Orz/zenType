@@ -12,6 +12,7 @@ import {
   initTypewriter,
 } from "../src/modules/typewriter";
 import * as flip from "../src/modules/typewriter/flip";
+import * as scroll from "../src/modules/typewriter/scroll";
 import {
   destroyCursor,
   initCursor,
@@ -1914,6 +1915,143 @@ test("FLIP interruption freezes the rendered position and rebases the next edit"
     assert.equal(flip.hasShiftedBlocks(), false);
   } finally {
     flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("FLIP interruption batches baseline and logical geometry phases", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  const secondBlock = new FakeElement({ dataNodeId: "block-second", contentEditable: true });
+  const thirdBlock = new FakeElement({ dataNodeId: "block-third", contentEditable: true });
+  append(secondBlock, new FakeText("second"));
+  append(thirdBlock, new FakeText("third"));
+  secondBlock.rect = rect(0, 100, 1000, 20);
+  thirdBlock.rect = rect(0, 140, 1000, 20);
+  append(fixture.wysiwyg, secondBlock, thirdBlock);
+
+  const phases: string[] = [];
+  const trackedBlocks: Array<[string, FakeElement]> = [
+    ["second", secondBlock],
+    ["third", thirdBlock],
+  ];
+  trackedBlocks.forEach(([name, block]) => {
+    block.getBoundingClientRect = () => {
+      phases.push(`read:${name}`);
+      if (block.style.transition.includes("250ms") && block.style.transform === "") {
+        return rect(0, block.rect.top + 10, 1000, 20);
+      }
+      const match = block.style.transform.match(/^translateY\((-?\d+(?:\.\d+)?)px\)$/);
+      if (match) return rect(0, block.rect.top + Number(match[1]), 1000, 20);
+      return block.rect;
+    };
+    const setProperty = block.style.setProperty.bind(block.style);
+    block.style.setProperty = (property, value, priority = "") => {
+      phases.push(`write:${name}:${property}`);
+      setProperty(property, value, priority);
+    };
+  });
+  Object.defineProperty(fixture.wysiwyg, "offsetHeight", {
+    configurable: true,
+    get: () => {
+      phases.push("sync");
+      return fixture.wysiwyg.rect.height;
+    },
+  });
+
+  try {
+    flip.reset();
+    const range = new FakeRange(fixture.text, 0);
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+    secondBlock.rect = rect(0, 80, 1000, 20);
+    thirdBlock.rect = rect(0, 120, 1000, 20);
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.raf.flushNext(runtime.clock.now);
+    phases.length = 0;
+
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+
+    const firstWrite = phases.findIndex((phase) => phase.startsWith("write:"));
+    const sync = phases.indexOf("sync");
+    assert.ok(firstWrite >= 0);
+    assert.ok(sync > firstWrite);
+    assert.equal(
+      phases.slice(firstWrite, sync).some((phase) => phase.startsWith("read:")),
+      false,
+      "baseline writes must finish before the synchronization marker",
+    );
+    assert.equal(phases.filter((phase) => phase === "sync").length, 1);
+    for (const name of ["second", "third"]) {
+      assert.equal(phases.includes(`write:${name}:transition`), true);
+      assert.equal(phases.includes(`write:${name}:transform`), true);
+    }
+
+    const logicalReads = phases
+      .map((phase, index) => phase.startsWith("read:") ? index : -1)
+      .filter((index) => index > sync);
+    assert.equal(logicalReads.length >= 2, true);
+    const firstRebaseWrite = phases.findIndex((phase, index) =>
+      index > sync && phase.endsWith(":transform"));
+    assert.ok(firstRebaseWrite > Math.max(...logicalReads));
+  } finally {
+    flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("scroll callbacks are reserved for active-loop retarget completion", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  let initialCallbackCount = 0;
+  let retargetCallbackCount = 0;
+
+  try {
+    scroll.reset();
+    scroll.scrollTo(fixture.content, { deltaY: 100 }, () => { initialCallbackCount++; });
+    const initialFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(initialFrame);
+    runtime.clock.advance(600);
+    runtime.raf.flush(initialFrame, runtime.clock.now);
+    assert.equal(initialCallbackCount, 0, "an initial scroll does not request resync");
+    assert.equal(runtime.raf.pending.size, 0);
+
+    scroll.scrollTo(fixture.content, { deltaY: 100 });
+    const activeFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(activeFrame);
+    runtime.raf.flush(activeFrame, runtime.clock.now);
+    const retainedFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(retainedFrame);
+
+    scroll.scrollTo(
+      fixture.content,
+      { deltaY: 50 },
+      () => { retargetCallbackCount++; },
+    );
+    assert.equal(runtime.raf.pending.size, 1);
+    assert.equal(runtime.raf.pending.has(retainedFrame), true);
+    runtime.clock.advance(300);
+    runtime.raf.flush(retainedFrame, runtime.clock.now);
+    assert.equal(retargetCallbackCount, 1);
+    assert.equal(runtime.raf.pending.size, 0);
+
+    scroll.scrollTo(fixture.content, { deltaY: 100 });
+    const cancellableFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(cancellableFrame);
+    scroll.scrollTo(
+      fixture.content,
+      { deltaY: 50 },
+      () => { retargetCallbackCount++; },
+    );
+    scroll.cancel();
+    assert.equal(runtime.raf.pending.size, 0);
+    runtime.clock.advance(1000);
+    assert.equal(retargetCallbackCount, 1, "cancel prevents a stale retarget callback");
+  } finally {
+    scroll.reset();
     setActiveEditor(null);
     runtime.restore();
   }

@@ -152,37 +152,72 @@ export function start(
   // If an earlier FLIP is still visible, freeze each element at its rendered
   // position and carry that position into the new snapshot. This avoids
   // restoring the old animation to its logical endpoint during interruption.
-  const interruptedElements = new Set(lastFLIPElements);
+  const interruptedElements = new Set<HTMLElement>();
+  const interruptedVisualTops = new Map<HTMLElement, number>();
   for (const el of lastFLIPElements) {
     if (!el.isConnected) {
       releaseFLIPElement(el);
       continue;
     }
+    interruptedElements.add(el);
     const visualTop = first.get(el) ?? el.getBoundingClientRect().top;
+    interruptedVisualTops.set(el, visualTop);
     first.set(el, visualTop);
+  }
+
+  // Interruption preparation is deliberately split into read, baseline-write,
+  // sync, logical-read, and rebase-write phases. The browser can therefore
+  // satisfy all logical reads from one synchronized layout instead of flushing
+  // once per interrupted element.
+  for (const el of interruptedElements) {
     setOwnedFLIPStyle(el, "transition", "none");
+  }
+  for (const el of interruptedElements) {
     setOwnedFLIPStyle(el, "transform", "");
-    const layoutTop = el.getBoundingClientRect().top;
-    setOwnedFLIPStyle(el, "transform", `translateY(${visualTop - layoutTop}px)`);
+  }
+  if (interruptedElements.size > 0) {
+    void editor.offsetHeight;
+  }
+  const interruptedLogicalTops = new Map<HTMLElement, number>();
+  for (const el of interruptedElements) {
+    if (el.isConnected) interruptedLogicalTops.set(el, el.getBoundingClientRect().top);
+  }
+  for (const [el, visualTop] of interruptedVisualTops) {
+    const logicalTop = interruptedLogicalTops.get(el);
+    if (logicalTop === undefined) {
+      releaseFLIPElement(el);
+      continue;
+    }
+    setOwnedFLIPStyle(el, "transform", `translateY(${visualTop - logicalTop}px)`);
   }
 
   // Wait one frame for SiYuan to finish the DOM change.
   requestDeferredFrame(() => {
     if (token !== flipGeneration) return;
 
-    const modifiedElements: HTMLElement[] = [];
+    const interruptedConnected = Array.from(interruptedElements).filter((el) => el.isConnected);
+    for (const el of interruptedConnected) {
+      setOwnedFLIPStyle(el, "transition", "none");
+    }
+    for (const el of interruptedConnected) {
+      setOwnedFLIPStyle(el, "transform", "");
+    }
 
-    // Phase 1 (Invert): batch all writes without an intermediate reflow.
+    const deltas = new Map<HTMLElement, number>();
+
+    // Phase 1 (Invert): read every new position before writing any invert.
     for (const [el, y0] of first) {
       if (!el.isConnected) continue;
-      if (interruptedElements.has(el)) {
-        setOwnedFLIPStyle(el, "transition", "none");
-        setOwnedFLIPStyle(el, "transform", "");
-      }
       const y1 = el.getBoundingClientRect().top;
       const delta = y0 - y1;
       if (Math.abs(delta) < 2) continue;
 
+      deltas.set(el, delta);
+    }
+
+    // Then batch every invert write together.
+    const modifiedElements: HTMLElement[] = [];
+    for (const [el, delta] of deltas) {
       setOwnedFLIPStyle(el, "transform", `translateY(${delta}px)`);
       setOwnedFLIPStyle(el, "transition", "none");
       modifiedElements.push(el);

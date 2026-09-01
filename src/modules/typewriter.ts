@@ -216,7 +216,7 @@ function checkAndScroll(): void {
   const cursorPct = (rect.y - result.editorRect.top) / editorHeight;
 
   // v2.3.0：舒适区间 [COMFORT_ZONE[0], COMFORT_ZONE[1]]，区间内不滚
-  // 符号约定：smoothScroll 中 deltaY > 0 = scrollTop 增加 = 页面/视口向下滚
+  // 符号约定：scroll controller 中 deltaY > 0 = scrollTop 增加 = 页面/视口向下滚
   // 因此要让 cursor 在视口里"下移"（cursor 在顶部时），需要 deltaY < 0（向上滚）
   let deltaY = 0;
   if (cursorPct < COMFORT_ZONE[0]) {
