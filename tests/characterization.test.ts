@@ -24,6 +24,10 @@ import {
   initRipple,
 } from "../src/modules/ripple";
 import {
+  destroyStructuralEditCoordinator,
+  isStructuralEditPending,
+} from "../src/modules/structuralEdit";
+import {
   isSwitchHiddenActive,
   isSwitchRevealPending,
   startSwitchSettle,
@@ -770,6 +774,9 @@ class FakeRuntime {
 
 function installRuntime(runtime: FakeRuntime): void {
   runtime.install();
+  // Each test owns a fresh DOM/runtime. Dispose any transaction that a prior
+  // module-only test may have left pending before installing the next one.
+  destroyStructuralEditCoordinator();
 }
 
 function flushAllFrames(runtime: FakeRuntime): void {
@@ -1340,7 +1347,7 @@ test("typewriter waits for stable structural geometry before changing active scr
       "transient geometry does not cancel the active structural motion",
     );
 
-    // Publish the stable caret before draining the FLIP and two-frame settle
+    // Publish the stable caret before draining the FLIP and coordinator settle
     // work; only the structural settle callback may consume this target.
     runtime.setCaret(fixture.text, 1, rect(20, 900));
     let settleFrameCount = 0;
@@ -1896,7 +1903,11 @@ test("ripple seam keeps nested focus and top-level opacity as separate layers", 
       addedNodes: [replacement],
       removedNodes: [fixture.alternateContent],
     } as unknown as MutationRecord]);
-    runtime.raf.flushNext(runtime.clock.now);
+    let structuralFrames = 0;
+    while (isStructuralEditPending()) {
+      assert.ok(structuralFrames++ < 4, "mutation fallback must settle in a bounded number of frames");
+      runtime.raf.flushNext(runtime.clock.now);
+    }
     assert.equal(replacement.style.getPropertyValue("--zt-ripple-opacity"), "1");
     assert.equal(fixture.alternateContent.style.getPropertyValue("--zt-ripple-opacity"), "");
     assert.equal(fixture.topSibling.style.getPropertyValue("--zt-ripple-opacity"), "0.4");
@@ -1921,7 +1932,7 @@ test("ripple seam keeps nested focus and top-level opacity as separate layers", 
   }
 });
 
-test("ripple preserves valid nested opacity until a structural edit settles", () => {
+test("ripple preserves valid nested opacity until the coordinator commits a structural edit", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
   const fixture = createRippleFixture(runtime);
@@ -1944,7 +1955,8 @@ test("ripple preserves valid nested opacity until a structural edit settles", ()
       inputType: "insertParagraph",
       isComposing: false,
     }));
-    assert.equal(runtime.raf.pending.size, 1, "structural input uses one stable-frame apply");
+    assert.equal(isStructuralEditPending(), true);
+    assert.equal(runtime.raf.pending.size, 1, "structural input starts one coordinator stability chain");
 
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(
@@ -1952,7 +1964,7 @@ test("ripple preserves valid nested opacity until a structural edit settles", ()
       "0.4",
       "the transient malformed structure keeps the last valid opacity",
     );
-    assert.equal(runtime.raf.pending.size, 1, "an invalid transient gets one bounded retry");
+    assert.equal(isStructuralEditPending(), true);
     fixture.alternateItem.removeChild(transientList);
 
     const newItem = new FakeElement({
@@ -2321,7 +2333,7 @@ test("FLIP skips invalid local sampling without scanning the full editor", () =>
   }
 });
 
-test("Enter on an empty block waits for both deferred settle frames", () => {
+test("Enter on an empty block waits for a stable structural commit", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
   const fixture = createEditorFixture(runtime, "");
@@ -2336,16 +2348,14 @@ test("Enter on an empty block waits for both deferred settle frames", () => {
       isComposing: false,
       defaultPrevented: false,
     }));
-    assert.equal(runtime.raf.pending.size, 2, "FLIP and the first settle frame are both deferred");
-
-    runtime.raf.flushNext(runtime.clock.now);
-    assert.equal(fixture.content.scrollTop, 0);
-    runtime.raf.flushNext(runtime.clock.now);
-    assert.equal(runtime.raf.pending.size, 1, "the first settle frame must queue the second");
-    assert.equal(fixture.content.scrollTop, 0);
-
-    runtime.raf.flushNext(runtime.clock.now);
-    assert.equal(runtime.raf.pending.size, 1, "the eventual check starts smooth scroll");
+    assert.equal(isStructuralEditPending(), true);
+    let settleFrames = 0;
+    while (isStructuralEditPending()) {
+      assert.ok(settleFrames++ < 4, "the coordinator must settle in a bounded number of frames");
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+    assert.equal(settleFrames >= 2, true, "the authoritative check waits for quiet frames");
+    assert.equal(runtime.raf.pending.size, 1, "the stable commit starts the smooth scroll");
     assert.equal(fixture.content.scrollTop, 0);
   } finally {
     destroyTypewriter();
@@ -2370,9 +2380,7 @@ test("Backspace character deletion and block merge retain separate characterizat
       isComposing: false,
       defaultPrevented: false,
     }));
-    assert.equal(runtime.raf.pending.size, 1, "ordinary deletion still defers its check");
-    runtime.raf.flushNext(runtime.clock.now);
-    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 0, "ordinary character deletion does not start a structural transaction");
     assert.equal(fixture.block.style.transform, "");
     assert.equal(fixture.block.style.transition, "");
 
@@ -2396,9 +2404,11 @@ test("Backspace character deletion and block merge retain separate characterizat
     }));
     secondBlock.rect = rect(0, 80, 1000, 20);
 
-    runtime.raf.flushNext(runtime.clock.now);
-    runtime.raf.flushNext(runtime.clock.now);
-    runtime.raf.flushNext(runtime.clock.now);
+    let firstMotionFrames = 0;
+    while (!secondBlock.style.transition.includes("250ms")) {
+      assert.ok(firstMotionFrames++ < 8, "the first block FLIP must reach its play phase");
+      runtime.raf.flushNext(runtime.clock.now);
+    }
     assert.match(secondBlock.style.transition, /transform 250ms/);
     const firstCleanupDelays = runtime.clock.delays();
     assert.deepEqual(firstCleanupDelays, [300]);
@@ -2411,11 +2421,11 @@ test("Backspace character deletion and block merge retain separate characterizat
     secondBlock.rect = rect(0, 50, 1000, 20);
     assert.deepEqual(runtime.clock.delays(), [], "a new FLIP cancels the old cleanup timer");
 
-    runtime.raf.flushNext(runtime.clock.now);
-    runtime.raf.flushNext(runtime.clock.now);
-    runtime.raf.flushNext(runtime.clock.now);
-    runtime.raf.flushNext(runtime.clock.now);
-    runtime.raf.flushNext(runtime.clock.now);
+    let secondMotionFrames = 0;
+    while (!secondBlock.style.transition.includes("250ms")) {
+      assert.ok(secondMotionFrames++ < 8, "the second block FLIP must reach its play phase");
+      runtime.raf.flushNext(runtime.clock.now);
+    }
     assert.match(secondBlock.style.transition, /transform 250ms/);
     runtime.clock.advance(300);
     assert.equal(secondBlock.style.transition, "");

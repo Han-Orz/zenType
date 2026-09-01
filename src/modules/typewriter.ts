@@ -4,6 +4,7 @@ import { TYPEWRITER_CONFIG } from "../config";
 import { shouldPauseTypewriter } from "../utils/edgeCases";
 import * as inputMode from "./inputMode";
 import * as inputModeTriggers from "./inputModeTriggers";
+import * as structuralEdit from "./structuralEdit";
 import * as flip from "./typewriter/flip";
 import * as scroll from "./typewriter/scroll";
 import { isInAllowElements } from "../utils/boundary";
@@ -19,6 +20,7 @@ const { COMFORT_ZONE, TYPING_GAP_MS, CLICK_CENTER_LOW, CLICK_CENTER_HIGH } = TYP
 let eventListeners: Array<[string, EventListener, AddEventListenerOptions?]> = [];
 let windowEventListeners: Array<[string, EventListener, AddEventListenerOptions?]> = [];
 let unsubInputMode: (() => void) | null = null;
+let unsubStructuralEditFinish: (() => void) | null = null;
 let initialized = false;
 const deferredFrames = new Set<number>();
 
@@ -28,7 +30,6 @@ let composing = false;                                     // IME composition �
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;  // 停顿后触发一次舒适区对齐的定时器
 let firstCharAfterIdle = false;                            // Option i：空闲后的首个输入立即滚（input 监听器设置，checkAndScroll 消费）
 let bypassEmptyBlock = false;                              // Enter 新建空块时设 true，让空块守卫放行一次
-let structuralEditPending = false;                         // Enter/Backspace 的 two-frame settle 完成前，忽略瞬态几何
 
 export function shouldHandleTypewriterEditKey(
   event: Pick<KeyboardEvent, "key" | "isComposing" | "defaultPrevented">,
@@ -77,7 +78,6 @@ function pauseTypewriterMotion(): void {
   lastInputAt = 0;
   firstCharAfterIdle = false;
   bypassEmptyBlock = false;
-  structuralEditPending = false;
 }
 
 /** 缓起缓收 —— 点击居中用，比 easeOutCubic 更自然（起步不冲，收尾不突兀） */
@@ -98,7 +98,9 @@ function scheduleScrollResync(): void {
   scheduleCheck();
 }
 
-function checkAndScroll(authoritativeStructuralCheck = false): void {
+type ScrollCheckAuthority = "ordinary" | "structural";
+
+function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
   // 打字机模式关闭时：不自动滚动
   if (!inputMode.isTypewriterActive()) return;
 
@@ -108,18 +110,18 @@ function checkAndScroll(authoritativeStructuralCheck = false): void {
   scroll.cancelForReducedMotion();
 
   // SiYuan may emit selectionchange while Enter/Backspace is still settling.
-  // The two-frame structural check below is the authoritative geometry sample;
-  // do not let a transient range start, restart, or cancel that motion.
-  if (structuralEditPending) {
+  // The coordinator's stable finish is the authoritative geometry sample; do
+  // not let a transient range start, restart, or cancel that motion.
+  if (structuralEdit.isStructuralEditPending()) {
     if (scroll.isScrolling()) scroll.requestResync(scheduleScrollResync);
     return;
   }
 
   // Once a smooth motion has started, ordinary selectionchange events are not
   // authoritative enough to retarget it. Let the current loop finish and do a
-  // single resync; the two-frame structural check may explicitly opt into a
-  // stable target at its safe point.
-  if (scroll.isScrolling() && !authoritativeStructuralCheck) {
+  // single resync; only a coordinator stable finish may explicitly opt into a
+  // structural target at its safe point.
+  if (scroll.isScrolling() && authority !== "structural") {
     scroll.requestResync(scheduleScrollResync);
     return;
   }
@@ -334,9 +336,37 @@ function shouldAnimateBlockShiftForKey(key: string): boolean {
   return beforeCaret.toString().replace(/[\u200B\uFEFF\u00A0]/g, '') === '';
 }
 
+function onStructuralEditFinish(finish: structuralEdit.StructuralEditFinish): void {
+  if (!initialized) return;
+
+  if (pendingCheck !== null) {
+    cancelAnimationFrame(pendingCheck);
+    pendingCheck = null;
+  }
+  lastCheckRect = null;
+  if (!finish.stable) {
+    // The coordinator could not establish an authoritative quiet window.
+    // Allow the ordinary guards to decide conservatively on the next frame.
+    scheduleCheck();
+    return;
+  }
+
+  if (finish.kind === "enter") {
+    bypassEmptyBlock = true;
+    lastInputAt = 0;
+  } else if (finish.kind === "backspace" && flip.hasShiftedBlocks()) {
+    lastInputAt = 0;
+  }
+
+  checkAndScroll("structural");
+  bypassEmptyBlock = false;
+}
+
 export function initTypewriter(): void {
   if (initialized) return;
   initialized = true;
+
+  unsubStructuralEditFinish = structuralEdit.subscribeStructuralEditFinish(onStructuralEditFinish);
 
   // 事件数组使用三元组以便保留 options
   const handlers: Array<[string, EventListener, AddEventListenerOptions?]> = [
@@ -436,35 +466,18 @@ export function initTypewriter(): void {
         // 先触发 FLIP 快照
         const sel = window.getSelection();
         if (!sel || !sel.rangeCount) return;
-        structuralEditPending = true;
         const editor = sel.anchorNode?.parentElement?.closest(
           ".protyle-wysiwyg",
         ) as HTMLElement | null;
+        if (editor && (ke.key === "Enter" || shouldAnimateBlockShift)) {
+          structuralEdit.beginStructuralEdit(
+            ke.key === "Enter" ? "enter" : "backspace",
+            editor,
+          );
+        }
         if (editor && shouldAnimateBlockShift) {
           flip.start(editor, sel.getRangeAt(0), requestDeferredFrame);
         }
-        // 延迟两帧等 SiYuan 布局收敛后再触发滚动对齐
-        // 不能用 scheduleCheck() 唯一一帧，因为思源在 Enter/Backspace 的 bubble
-        // handler 中还要修改 DOM，一帧不够——两帧后布局稳定
-        requestDeferredFrame(() => {
-          requestDeferredFrame(() => {
-            // 同时清掉 lastCheckRect 让 checkAndScroll 不因坐标未变而跳过
-            lastCheckRect = null;
-            structuralEditPending = false;
-            // Enter vs Backspace 区别处理：
-            //  - Enter 新建块（常为空）→ 绕过空块守卫 + 立即滚（不等首字输入）
-            //  - Backspace 块级合并（FLIP 检测到块位移）→ 立即滚
-            //  - Backspace 字符删除（无块位移）→ 不设 lastInputAt=0，走 debounce
-            if (ke.key === "Enter") {
-              bypassEmptyBlock = true;
-              lastInputAt = 0;
-            } else if (shouldAnimateBlockShift && flip.hasShiftedBlocks()) {
-              lastInputAt = 0;
-            }
-            checkAndScroll(true);
-            bypassEmptyBlock = false;  // 清理（防止泄漏到后续 checkAndScroll）
-          });
-        });
       },
       { capture: true },
     ],
@@ -516,6 +529,10 @@ export function destroyTypewriter(): void {
     unsubInputMode();
     unsubInputMode = null;
   }
+  if (unsubStructuralEditFinish) {
+    unsubStructuralEditFinish();
+    unsubStructuralEditFinish = null;
+  }
   initialized = false;
   flip.reset();
   scroll.reset();
@@ -538,5 +555,4 @@ export function destroyTypewriter(): void {
   lastInputAt = 0;
   firstCharAfterIdle = false;
   bypassEmptyBlock = false;
-  structuralEditPending = false;
 }
