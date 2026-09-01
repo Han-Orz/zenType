@@ -541,7 +541,8 @@ test("the bounded settle window finishes unstable transactions fail-open", () =>
   try {
     beginStructuralEdit("unknown", editor as unknown as HTMLElement);
     const observer = runtime.mutationObservers[0];
-    for (let frame = 0; frame < 8; frame++) {
+    for (let elapsed = 4; elapsed <= 128; elapsed += 4) {
+      runtime.now = elapsed;
       observer.callback([]);
       runtime.raf.flushNext();
     }
@@ -552,6 +553,63 @@ test("the bounded settle window finishes unstable transactions fail-open", () =>
     assert.equal(runtime.raf.pending.size, 0);
     assert.equal(runtime.document.listenerCount("selectionchange"), 0);
     assert.equal(observer.disconnected, true);
+  } finally {
+    unsubscribe();
+    teardown(runtime);
+  }
+});
+
+test("more than eight high-refresh frames before 48ms remain pending", () => {
+  const { runtime, editor } = setup();
+  const finishes: Array<{ stable: boolean; settleFrames: number }> = [];
+  const unsubscribe = subscribeStructuralEditFinish((finish) => finishes.push(finish));
+
+  try {
+    beginStructuralEdit("enter", editor as unknown as HTMLElement);
+    for (const elapsed of [4, 8, 12, 16, 20, 24, 28, 32, 36]) {
+      runtime.now = elapsed;
+      runtime.raf.flushNext();
+    }
+
+    assert.equal(finishes.length, 0);
+    assert.equal(isStructuralEditPending(), true);
+    runtime.now = 48;
+    runtime.raf.flushNext();
+    assert.equal(finishes.length, 1);
+    assert.equal(finishes[0].stable, true);
+    assert.ok(finishes[0].settleFrames > 8, "frame count is diagnostic only");
+  } finally {
+    unsubscribe();
+    teardown(runtime);
+  }
+});
+
+test("high-refresh late activity waits for trailing quiet instead of failing open", () => {
+  const { runtime, editor } = setup();
+  const finishes: Array<{ stable: boolean }> = [];
+  const unsubscribe = subscribeStructuralEditFinish((finish) => finishes.push(finish));
+
+  try {
+    beginStructuralEdit("backspace", editor as unknown as HTMLElement);
+    runtime.now = 6;
+    runtime.raf.flushNext();
+    runtime.now = 12;
+    runtime.raf.flushNext();
+
+    const observer = runtime.mutationObservers[0];
+    runtime.now = 18;
+    observer.callback([]);
+    for (const elapsed of [24, 30, 36, 42, 48, 54, 60]) {
+      runtime.now = elapsed;
+      runtime.raf.flushNext();
+    }
+
+    assert.equal(finishes.length, 0);
+    assert.equal(isStructuralEditPending(), true);
+    runtime.now = 66;
+    runtime.raf.flushNext();
+    assert.equal(finishes.length, 1);
+    assert.equal(finishes[0].stable, true);
   } finally {
     unsubscribe();
     teardown(runtime);

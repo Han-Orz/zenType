@@ -36,10 +36,10 @@ export interface StructuralEditFinish {
 }
 
 const REQUIRED_QUIET_FRAMES = 2;
-const MAX_SETTLE_FRAMES = 8;
 // Evidence-backed provisional host threshold. Keep this internal until a new
 // clean DebugHook capture confirms the host's trailing-edge quiet period.
 const MIN_STABLE_QUIET_MS = 48;
+const MAX_SETTLE_MS = 128;
 
 export type SemanticMutationClassification = "structural" | "representation";
 
@@ -293,7 +293,9 @@ function checkStable(token: number): void {
     finish(true, token);
     return;
   }
-  if (settleFrames >= MAX_SETTLE_FRAMES) {
+
+  const transactionElapsed = transactionStartedAt !== null ? now - transactionStartedAt : 0;
+  if (transactionStartedAt !== null && transactionElapsed >= MAX_SETTLE_MS) {
     finish(false, token);
     return;
   }
