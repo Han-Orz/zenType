@@ -14,6 +14,10 @@ import {
 } from "./modules/cursor";
 import { initTypewriter, destroyTypewriter } from "./modules/typewriter";
 import { initRipple, destroyRipple } from "./modules/ripple";
+import {
+  initStructuralEditCoordinator,
+  destroyStructuralEditCoordinator,
+} from "./modules/structuralEdit";
 import * as inputMode from "./modules/inputMode";
 import * as inputModeTriggers from "./modules/inputModeTriggers";
 import type { ModuleEnabled, ModuleName } from "./types";
@@ -207,6 +211,7 @@ export default class ZenType extends Plugin {
 
     // === 模块初始化（与 P0 / round-3 相同） ===
     // v2.3.0：cursor 始终初始化（光标常开），不再受 STORAGE_KEY 中 cursor 字段影响
+    initStructuralEditCoordinator();
     initCursor();
     if (this.enabled.typewriter) initTypewriter();
     if (this.enabled.ripple) initRipple();
@@ -235,6 +240,7 @@ export default class ZenType extends Plugin {
       { name: "destroyCursor", run: destroyCursor },
       { name: "destroyTypewriter", run: destroyTypewriter },
       { name: "destroyRipple", run: destroyRipple },
+      { name: "destroyStructuralEditCoordinator", run: destroyStructuralEditCoordinator },
       { name: "inputMode.reset", run: () => inputMode.reset() },
       { name: "removeStyle", run: () => removeStyle(STYLE_ID) },
     ], (name, error) => {
