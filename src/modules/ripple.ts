@@ -967,6 +967,10 @@ function mutationTouchesCurrentBlock(
   currentBlock: HTMLElement,
   topBlock: HTMLElement,
 ): boolean {
+  // The parent observer also sees insertion/removal of a sibling top-level
+  // block. Those records do not contain the current block, but they do change
+  // the semantic distance plan and must remain in scope.
+  if (record.target === topBlock.parentElement) return true;
   if (topBlock.contains(record.target)) return true;
   if (currentBlock.contains(record.target)) return true;
 
@@ -1005,18 +1009,48 @@ function onDomMutation(records: MutationRecord[]): void {
   if (!active || !inputMode.isFocusActive() || shouldPauseFocusAndTypewriter()) return;
 
   const currentBlock = getCurrentBlock();
-  if (!currentBlock) return;
+  if (!currentBlock) {
+    if (structuralEdit.isStructuralEditPending()) {
+      structuralEdit.noteStructuralActivity();
+      nestedRippleEngine.invalidateStructure();
+    }
+    return;
+  }
   const container = currentBlock.closest(".protyle-wysiwyg") as HTMLElement | null;
-  if (!container) return;
+  if (!container) {
+    if (structuralEdit.isStructuralEditPending()) {
+      structuralEdit.noteStructuralActivity();
+      nestedRippleEngine.invalidateStructure();
+    }
+    return;
+  }
   const topBlock = getTopLevelBlock(currentBlock, container);
   const relevantRecords = records.filter((record) =>
     mutationTouchesCurrentBlock(record, currentBlock, topBlock),
   );
   if (relevantRecords.length === 0) return;
-  if (relevantRecords.some((record) => record.type === "childList")) {
-    beginOrNoteStructuralEdit("unknown", container);
+
+  const childListRecords = relevantRecords.filter((record) => record.type === "childList");
+  if (childListRecords.length > 0) {
+    if (structuralEdit.isStructuralEditPending()) {
+      // Once a real transaction is pending, even a same-block rerender is
+      // host follow-up activity and must extend its quiet window.
+      structuralEdit.noteStructuralActivity(container);
+      nestedRippleEngine.invalidateStructure();
+      return;
+    }
+
+    if (structuralEdit.hasSemanticBlockMutation(childListRecords, container)) {
+      structuralEdit.beginStructuralEdit("unknown", container);
+      nestedRippleEngine.invalidateStructure();
+      // The coordinator's stable finish performs the next semantic rebuild.
+      return;
+    }
+
+    // Representation-only rerenders still replace DOM bindings, but do not
+    // establish a structural transaction or suppress the ordinary refresh.
     nestedRippleEngine.invalidateStructure();
-    // The coordinator's stable finish performs the next semantic rebuild.
+    scheduleMutationRefresh();
     return;
   }
 

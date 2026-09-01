@@ -25,6 +25,7 @@ import {
 } from "../src/modules/ripple";
 import {
   destroyStructuralEditCoordinator,
+  getStructuralEditSnapshot,
   isStructuralEditPending,
 } from "../src/modules/structuralEdit";
 import {
@@ -1355,6 +1356,7 @@ test("typewriter waits for stable structural geometry before changing active scr
       const nonScrollFrame = [...runtime.raf.pending.keys()].find((id) => id !== activeScrollFrame);
       if (nonScrollFrame === undefined) break;
       assert.ok(settleFrameCount++ < 4, "structural settle frames must remain bounded");
+      runtime.clock.advance(16);
       runtime.raf.flush(nonScrollFrame, runtime.clock.now);
     }
     assert.equal(settleFrameCount >= 2, true, "structural scrolling waits through two settle frames");
@@ -1906,6 +1908,7 @@ test("ripple seam keeps nested focus and top-level opacity as separate layers", 
     let structuralFrames = 0;
     while (isStructuralEditPending()) {
       assert.ok(structuralFrames++ < 4, "mutation fallback must settle in a bounded number of frames");
+      runtime.clock.advance(16);
       runtime.raf.flushNext(runtime.clock.now);
     }
     assert.equal(replacement.style.getPropertyValue("--zt-ripple-opacity"), "1");
@@ -1916,6 +1919,7 @@ test("ripple seam keeps nested focus and top-level opacity as separate layers", 
     assert.ok(topSiblingText instanceof FakeText);
     runtime.setCaret(topSiblingText, 1, rect(20, 400));
     runtime.document.dispatch("selectionchange");
+    runtime.clock.advance(16);
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(fixture.topSibling.style.getPropertyValue("--zt-ripple-opacity"), "1");
     assert.equal(replacement.style.getPropertyValue("--zt-ripple-opacity"), "");
@@ -1958,6 +1962,7 @@ test("ripple preserves valid nested opacity until the coordinator commits a stru
     assert.equal(isStructuralEditPending(), true);
     assert.equal(runtime.raf.pending.size, 1, "structural input starts one coordinator stability chain");
 
+    runtime.clock.advance(16);
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(
       fixture.focusContent.style.getPropertyValue("--zt-ripple-opacity"),
@@ -1984,6 +1989,10 @@ test("ripple preserves valid nested opacity until the coordinator commits a stru
     append(fixture.rootList, newItem);
     runtime.setCaret(newText, 1, rect(20, 400));
 
+    runtime.clock.advance(16);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(isStructuralEditPending(), true);
+    runtime.clock.advance(16);
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(newContent.style.getPropertyValue("--zt-ripple-opacity"), "1");
     assert.equal(fixture.focusContent.style.getPropertyValue("--zt-ripple-opacity"), "");
@@ -1996,6 +2005,178 @@ test("ripple preserves valid nested opacity until the coordinator commits a stru
       isComposing: false,
     }));
     assert.equal(runtime.raf.pending.size, 0, "OFF clears structural input immediately");
+  } finally {
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("ordinary Backspace and IME same-block rerenders do not start transactions", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+
+    runtime.setCaret(fixture.alternateText, 1, rect(20, 400));
+    runtime.document.dispatch("keydown", eventFor(fixture.alternateContent, {
+      key: "Backspace",
+      isComposing: false,
+      defaultPrevented: false,
+    }));
+    assert.equal(isStructuralEditPending(), false, "mid-block Backspace is not pre-classified as structural");
+    runtime.document.dispatch("input", eventFor(fixture.alternateContent, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+
+    const replacement = new FakeElement({
+      dataType: "NodeParagraph",
+      dataNodeId: "block:alternate",
+      contentEditable: true,
+    });
+    const replacementText = new FakeText("ime replacement");
+    append(replacement, replacementText);
+    fixture.alternateItem.replaceChild(replacement, fixture.alternateContent);
+    runtime.setCaret(replacementText, 1, rect(20, 400));
+    const mutationObserver = runtime.mutationObservers.find((observer) =>
+      observer.observed.includes(fixture.rootList));
+    assert.ok(mutationObserver);
+    mutationObserver.callback([{
+      type: "childList",
+      target: fixture.alternateItem,
+      addedNodes: [replacement],
+      removedNodes: [fixture.alternateContent],
+    } as unknown as MutationRecord]);
+    assert.equal(isStructuralEditPending(), false);
+
+    runtime.document.dispatch("compositionstart", eventFor(replacement));
+    const imeReplacement = new FakeElement({
+      dataType: "NodeParagraph",
+      dataNodeId: "block:alternate",
+      contentEditable: true,
+    });
+    const imeText = new FakeText("ime composition");
+    append(imeReplacement, imeText);
+    fixture.alternateItem.replaceChild(imeReplacement, replacement);
+    runtime.setCaret(imeText, 1, rect(20, 400));
+    mutationObserver.callback([{
+      type: "childList",
+      target: fixture.alternateItem,
+      addedNodes: [imeReplacement],
+      removedNodes: [replacement],
+    } as unknown as MutationRecord]);
+    assert.equal(isStructuralEditPending(), false, "IME tokenization replacement is representation-only");
+  } finally {
+    destroyTypewriter();
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("pending structural transactions extend their quiet window for same-block rerenders", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.document.dispatch("input", eventFor(fixture.alternateContent, {
+      inputType: "insertParagraph",
+      isComposing: false,
+    }));
+    assert.equal(isStructuralEditPending(), true);
+    const beforeRerender = getStructuralEditSnapshot();
+
+    const replacement = new FakeElement({
+      dataType: "NodeParagraph",
+      dataNodeId: "block:alternate",
+      contentEditable: true,
+    });
+    const replacementText = new FakeText("same block");
+    append(replacement, replacementText);
+    fixture.alternateItem.replaceChild(replacement, fixture.alternateContent);
+    runtime.setCaret(replacementText, 1, rect(20, 400));
+    runtime.clock.now = 20;
+    const mutationObserver = runtime.mutationObservers.find((observer) =>
+      observer.observed.includes(fixture.rootList));
+    assert.ok(mutationObserver);
+    mutationObserver.callback([{
+      type: "childList",
+      target: fixture.alternateItem,
+      addedNodes: [replacement],
+      removedNodes: [fixture.alternateContent],
+    } as unknown as MutationRecord]);
+
+    const afterRerender = getStructuralEditSnapshot();
+    assert.equal(isStructuralEditPending(), true);
+    assert.equal(afterRerender.activityVersion > beforeRerender.activityVersion, true);
+    assert.equal(afterRerender.lastActivityAt, 20);
+
+    runtime.clock.now = 36;
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(isStructuralEditPending(), true);
+    runtime.clock.now = 52;
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(isStructuralEditPending(), true, "two quiet frames before 48ms must remain pending");
+    runtime.clock.now = 68;
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(isStructuralEditPending(), false);
+    assert.equal(replacement.style.getPropertyValue("--zt-ripple-opacity"), "1");
+  } finally {
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("a semantic top-level block addition starts the idle fallback transaction", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+
+    const addedItem = new FakeElement({
+      dataType: "NodeListItem",
+      dataNodeId: "item:added",
+    });
+    append(fixture.rootList, addedItem);
+    const mutationObserver = runtime.mutationObservers.find((observer) =>
+      observer.observed.includes(fixture.rootList));
+    assert.ok(mutationObserver);
+    mutationObserver.callback([{
+      type: "childList",
+      target: fixture.rootList,
+      addedNodes: [addedItem],
+      removedNodes: [],
+    } as unknown as MutationRecord]);
+    assert.equal(isStructuralEditPending(), true);
+
+    runtime.clock.now = 16;
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.clock.now = 32;
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(isStructuralEditPending(), true);
+    runtime.clock.now = 48;
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(isStructuralEditPending(), false);
   } finally {
     destroyRipple();
     inputMode.reset();
@@ -2352,6 +2533,7 @@ test("Enter on an empty block waits for a stable structural commit", () => {
     let settleFrames = 0;
     while (isStructuralEditPending()) {
       assert.ok(settleFrames++ < 4, "the coordinator must settle in a bounded number of frames");
+      runtime.clock.advance(16);
       runtime.raf.flushNext(runtime.clock.now);
     }
     assert.equal(settleFrames >= 2, true, "the authoritative check waits for quiet frames");

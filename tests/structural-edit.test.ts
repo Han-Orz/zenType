@@ -3,8 +3,10 @@ import test from "node:test";
 import * as inputMode from "../src/modules/inputMode";
 import {
   beginStructuralEdit,
+  classifySemanticMutations,
   destroyStructuralEditCoordinator,
   getStructuralEditSnapshot,
+  hasSemanticBlockMutation,
   initStructuralEditCoordinator,
   isStructuralEditPending,
   resetStructuralEdit,
@@ -58,9 +60,62 @@ class FakeEditor {
   }
 }
 
+class FakeSemanticElement {
+  readonly nodeType = 1;
+  readonly children: FakeSemanticElement[] = [];
+  private readonly classes = new Set<string>();
+  readonly classList = { contains: (name: string): boolean => this.classes.has(name) };
+  parentElement: FakeSemanticElement | null = null;
+  private readonly attributes = new Map<string, string>();
+
+  constructor(options: { id?: string; classes?: string[] } = {}) {
+    if (options.id) this.attributes.set("data-node-id", options.id);
+    options.classes?.forEach((name) => this.classes.add(name));
+  }
+
+  appendChild(child: FakeSemanticElement): void {
+    child.parentElement = this;
+    this.children.push(child);
+  }
+
+  removeChild(child: FakeSemanticElement): void {
+    const index = this.children.indexOf(child);
+    if (index === -1) return;
+    this.children.splice(index, 1);
+    child.parentElement = null;
+  }
+
+  getAttribute(name: string): string | null {
+    return this.attributes.get(name) ?? null;
+  }
+
+  contains(node: object | null): boolean {
+    return node === this || this.children.some((child) => child.contains(node));
+  }
+}
+
+function semanticNode(id: string): FakeSemanticElement {
+  return new FakeSemanticElement({ id });
+}
+
+function childListRecord(
+  target: FakeSemanticElement,
+  addedNodes: FakeSemanticElement[] = [],
+  removedNodes: FakeSemanticElement[] = [],
+): MutationRecord {
+  return {
+    type: "childList",
+    target: target as unknown as Node,
+    addedNodes: addedNodes as unknown as NodeList,
+    removedNodes: removedNodes as unknown as NodeList,
+  } as MutationRecord;
+}
+
 class FakeRafQueue {
   private nextId = 1;
   readonly pending = new Map<number, FrameRequestCallback>();
+
+  constructor(private readonly now: () => number) {}
 
   request = (callback: FrameRequestCallback): number => {
     const id = this.nextId++;
@@ -72,11 +127,11 @@ class FakeRafQueue {
     this.pending.delete(id);
   };
 
-  flushNext(): void {
+  flushNext(time = this.now()): void {
     const entry = this.pending.entries().next().value as [number, FrameRequestCallback] | undefined;
     assert.ok(entry, "expected a pending stability frame");
     this.pending.delete(entry[0]);
-    entry[1](0);
+    entry[1](time);
   }
 }
 
@@ -101,7 +156,8 @@ class FakeMutationObserver {
 class FakeRuntime {
   readonly document = new FakeDocument();
   readonly window = new FakeWindow(this.document);
-  readonly raf = new FakeRafQueue();
+  now = 0;
+  readonly raf = new FakeRafQueue(() => this.now);
   readonly mutationObservers: FakeMutationObserver[] = [];
   private readonly originalGlobals = new Map<string, PropertyDescriptor | undefined>();
 
@@ -121,6 +177,7 @@ class FakeRuntime {
     define("window", this.window);
     define("requestAnimationFrame", this.raf.request);
     define("cancelAnimationFrame", this.raf.cancel);
+    define("performance", { now: () => this.now });
     const runtime = this;
     define("MutationObserver", class extends FakeMutationObserver {
       constructor(callback: (records: MutationRecord[]) => void) {
@@ -153,6 +210,141 @@ function teardown(runtime: FakeRuntime): void {
   runtime.restore();
 }
 
+test("semantic classifier ignores same-id replacement under the same parent", () => {
+  const editor = new FakeSemanticElement();
+  const parent = new FakeSemanticElement({ id: "parent" });
+  const previous = semanticNode("block-a");
+  const replacement = semanticNode("block-a");
+  editor.appendChild(parent);
+  parent.appendChild(replacement);
+
+  const records = [childListRecord(parent, [replacement], [previous])];
+  assert.equal(classifySemanticMutations(records, editor as unknown as HTMLElement), "representation");
+  assert.equal(hasSemanticBlockMutation(records, editor as unknown as HTMLElement), false);
+});
+
+test("semantic classifier detects block additions, removals, and reparenting", () => {
+  const editor = new FakeSemanticElement();
+  const firstParent = new FakeSemanticElement({ id: "parent-a" });
+  const secondParent = new FakeSemanticElement({ id: "parent-b" });
+  const first = semanticNode("block-a");
+  const second = semanticNode("block-b");
+  editor.appendChild(firstParent);
+  editor.appendChild(secondParent);
+
+  firstParent.appendChild(first);
+  firstParent.appendChild(second);
+  assert.equal(
+    hasSemanticBlockMutation(
+      [childListRecord(firstParent, [second])],
+      editor as unknown as HTMLElement,
+    ),
+    true,
+    "adding a semantic block changes topology",
+  );
+
+  firstParent.removeChild(second);
+  assert.equal(
+    hasSemanticBlockMutation(
+      [childListRecord(firstParent, [], [second])],
+      editor as unknown as HTMLElement,
+    ),
+    true,
+    "removing a semantic block changes topology",
+  );
+
+  firstParent.removeChild(first);
+  secondParent.appendChild(first);
+  assert.equal(
+    hasSemanticBlockMutation([
+      childListRecord(firstParent, [], [first]),
+      childListRecord(secondParent, [first]),
+    ], editor as unknown as HTMLElement),
+    true,
+    "moving a semantic block to another parent changes topology",
+  );
+});
+
+test("two quiet frames shorter than 48ms do not finish a transaction", () => {
+  const { runtime, editor } = setup();
+  const finishes: Array<{ stable: boolean }> = [];
+  const unsubscribe = subscribeStructuralEditFinish((finish) => finishes.push(finish));
+
+  try {
+    beginStructuralEdit("enter", editor as unknown as HTMLElement);
+    runtime.now = 16;
+    runtime.raf.flushNext();
+    runtime.now = 32;
+    runtime.raf.flushNext();
+    assert.equal(finishes.length, 0);
+    assert.equal(isStructuralEditPending(), true);
+
+    runtime.now = 48;
+    runtime.raf.flushNext();
+    assert.equal(finishes.length, 1);
+    assert.equal(finishes[0].stable, true);
+  } finally {
+    unsubscribe();
+    teardown(runtime);
+  }
+});
+
+test("a late mutation prevents the old-generation-78 premature finish", () => {
+  const { runtime, editor } = setup();
+  const finishes: Array<{ stable: boolean }> = [];
+  const unsubscribe = subscribeStructuralEditFinish((finish) => finishes.push(finish));
+
+  try {
+    beginStructuralEdit("backspace", editor as unknown as HTMLElement);
+    const observer = runtime.mutationObservers[0];
+    runtime.now = 16;
+    runtime.raf.flushNext();
+    runtime.now = 20;
+    observer.callback([]);
+    runtime.now = 32;
+    runtime.raf.flushNext();
+    runtime.now = 48;
+    runtime.raf.flushNext();
+    assert.equal(finishes.length, 0);
+    assert.equal(isStructuralEditPending(), true);
+  } finally {
+    unsubscribe();
+    teardown(runtime);
+  }
+});
+
+test("after a late mutation, 48ms of quiet produces exactly one stable finish", () => {
+  const { runtime, editor } = setup();
+  const finishes: Array<{ stable: boolean }> = [];
+  const unsubscribe = subscribeStructuralEditFinish((finish) => finishes.push(finish));
+
+  try {
+    beginStructuralEdit("backspace", editor as unknown as HTMLElement);
+    const observer = runtime.mutationObservers[0];
+    runtime.now = 16;
+    runtime.raf.flushNext();
+    runtime.now = 20;
+    observer.callback([]);
+    runtime.now = 36;
+    runtime.raf.flushNext();
+    runtime.now = 52;
+    runtime.raf.flushNext();
+    assert.equal(finishes.length, 0);
+    runtime.now = 68;
+    runtime.raf.flushNext();
+    assert.equal(finishes.length, 1);
+    assert.equal(finishes[0].stable, true);
+    assert.equal(isStructuralEditPending(), false);
+
+    runtime.now = 100;
+    assert.equal(runtime.raf.pending.size, 0);
+    assert.equal(finishes.length, 1);
+  } finally {
+    unsubscribe();
+    teardown(runtime);
+  }
+});
+
 test("structural edit begins in mutating phase and is not immediately stable", () => {
   const { runtime, editor } = setup();
   const finishes: unknown[] = [];
@@ -171,16 +363,22 @@ test("structural edit begins in mutating phase and is not immediately stable", (
   }
 });
 
-test("two quiet frames produce one stable finish", () => {
+test("two quiet frames still wait for the 48ms quiet threshold", () => {
   const { runtime, editor } = setup();
   const finishes: Array<{ generation: number; stable: boolean }> = [];
   const unsubscribe = subscribeStructuralEditFinish((finish) => finishes.push(finish));
 
   try {
     const generation = beginStructuralEdit("backspace", editor as unknown as HTMLElement);
+    runtime.now = 16;
     runtime.raf.flushNext();
     assert.equal(finishes.length, 0);
     assert.equal(getStructuralEditSnapshot().phase, "stabilizing");
+    runtime.now = 32;
+    runtime.raf.flushNext();
+    assert.equal(finishes.length, 0);
+    assert.equal(isStructuralEditPending(), true);
+    runtime.now = 48;
     runtime.raf.flushNext();
     assert.equal(finishes.length, 1);
     assert.equal(finishes[0].generation, generation);
@@ -201,13 +399,18 @@ test("mutation activity resets the quiet-frame count", () => {
 
   try {
     beginStructuralEdit("list-change", editor as unknown as HTMLElement);
+    runtime.now = 16;
     runtime.raf.flushNext();
     const observer = runtime.mutationObservers[0];
+    runtime.now = 20;
     observer.callback([]);
+    runtime.now = 36;
     runtime.raf.flushNext();
     assert.equal(finishes.length, 0);
+    runtime.now = 52;
     runtime.raf.flushNext();
     assert.equal(finishes.length, 0);
+    runtime.now = 68;
     runtime.raf.flushNext();
     assert.equal(finishes.length, 1);
     assert.equal(finishes[0].kind, "list-change");
@@ -225,13 +428,18 @@ test("selection activity resets the quiet-frame count only inside the active edi
 
   try {
     beginStructuralEdit("unknown", editor as unknown as HTMLElement);
+    runtime.now = 16;
     runtime.raf.flushNext();
+    runtime.now = 20;
     runtime.document.selection = { rangeCount: 1, anchorNode: editor.child };
     runtime.document.dispatch("selectionchange");
+    runtime.now = 36;
     runtime.raf.flushNext();
     assert.equal(finishes.length, 0);
+    runtime.now = 52;
     runtime.raf.flushNext();
     assert.equal(finishes.length, 0);
+    runtime.now = 68;
     runtime.raf.flushNext();
     assert.equal(finishes.length, 1);
     assert.equal(finishes[0].kind, "unknown");
@@ -254,7 +462,12 @@ test("a rapid second begin supersedes the first generation", () => {
     assert.notEqual(secondGeneration, firstGeneration);
     assert.equal(firstObserver.disconnected, true);
     assert.equal(runtime.raf.pending.size, 1);
+    runtime.now = 16;
     runtime.raf.flushNext();
+    runtime.now = 32;
+    runtime.raf.flushNext();
+    assert.equal(finishes.length, 0);
+    runtime.now = 48;
     runtime.raf.flushNext();
     assert.equal(finishes.length, 1);
     assert.equal(finishes[0].generation, secondGeneration);

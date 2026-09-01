@@ -16,6 +16,11 @@ export interface StructuralEditSnapshot {
   phase: StructuralEditPhase;
   kind: StructuralEditKind | null;
   editor: HTMLElement | null;
+  transactionStartedAt: number | null;
+  lastActivityAt: number | null;
+  activityVersion: number;
+  quietFrames: number;
+  settleFrames: number;
 }
 
 export interface StructuralEditFinish {
@@ -23,10 +28,157 @@ export interface StructuralEditFinish {
   kind: StructuralEditKind;
   editor: HTMLElement;
   stable: boolean;
+  transactionStartedAt: number;
+  lastActivityAt: number;
+  finishedAt: number;
+  quietFrames: number;
+  settleFrames: number;
 }
 
 const REQUIRED_QUIET_FRAMES = 2;
 const MAX_SETTLE_FRAMES = 8;
+// Evidence-backed provisional host threshold. Keep this internal until a new
+// clean DebugHook capture confirms the host's trailing-edge quiet period.
+const MIN_STABLE_QUIET_MS = 48;
+
+export type SemanticMutationClassification = "structural" | "representation";
+
+type SemanticNodeReference = {
+  id: string;
+  element: Element;
+};
+
+type SemanticMutationGroup = {
+  added: SemanticNodeReference[];
+  removed: SemanticNodeReference[];
+};
+
+function elementFromNode(node: Node | null | undefined): Element | null {
+  return node && node.nodeType === 1 ? node as Element : null;
+}
+
+function childrenOf(element: Element): Element[] {
+  return element.children ? Array.from(element.children) : [];
+}
+
+function attributeOf(element: Element, name: string): string | null {
+  try {
+    return element.getAttribute(name);
+  } catch {
+    return null;
+  }
+}
+
+function hasClass(element: Element, name: string): boolean {
+  return element.classList?.contains(name) === true;
+}
+
+function isSemanticBlock(element: Element): boolean {
+  if (!attributeOf(element, "data-node-id")) return false;
+  if (hasClass(element, "protyle-action") || hasClass(element, "protyle-attr")) return false;
+  const tagName = typeof element.tagName === "string" ? element.tagName.toLowerCase() : "";
+  return tagName !== "svg" && tagName !== "use";
+}
+
+function semanticRoots(node: Node): SemanticNodeReference[] {
+  const element = elementFromNode(node);
+  if (!element) return [];
+
+  if (isSemanticBlock(element)) {
+    return [{ id: attributeOf(element, "data-node-id") as string, element }];
+  }
+
+  const roots: SemanticNodeReference[] = [];
+  for (const child of childrenOf(element)) roots.push(...semanticRoots(child));
+  return roots;
+}
+
+function belongsToEditor(editor: HTMLElement | null, node: Node): boolean {
+  if (!editor) return true;
+  if (node === editor) return true;
+  try {
+    return editor.contains(node);
+  } catch {
+    return false;
+  }
+}
+
+function parentKey(element: Element): Element | string {
+  return attributeOf(element, "data-node-id") ?? element;
+}
+
+function countById(references: readonly SemanticNodeReference[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const reference of references) {
+    counts.set(reference.id, (counts.get(reference.id) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function hasMovedSemanticNode(
+  added: readonly SemanticNodeReference[],
+  removed: readonly SemanticNodeReference[],
+): boolean {
+  return added.some((candidate) => removed.some((previous) => (
+    candidate.id === previous.id && candidate.element === previous.element
+  )));
+}
+
+/**
+ * Classify child-list mutations by semantic topology rather than DOM churn.
+ * Replacing a block representation with another element carrying the same
+ * node id under the same semantic parent is intentionally representation-only.
+ */
+export function classifySemanticMutations(
+  records: readonly MutationRecord[],
+  editor: HTMLElement | null = null,
+): SemanticMutationClassification {
+  const groups = new Map<Element | string, SemanticMutationGroup>();
+
+  for (const record of records) {
+    if (record.type !== "childList") continue;
+    const target = elementFromNode(record.target);
+    if (!target || !belongsToEditor(editor, target)) continue;
+
+    const added = Array.from(record.addedNodes).flatMap((node) => semanticRoots(node));
+    const removed = Array.from(record.removedNodes).flatMap((node) => semanticRoots(node));
+    if (added.length === 0 && removed.length === 0) continue;
+
+    const key = parentKey(target);
+    const group = groups.get(key) ?? { added: [], removed: [] };
+    group.added.push(...added);
+    group.removed.push(...removed);
+    groups.set(key, group);
+  }
+
+  for (const group of groups.values()) {
+    if (hasMovedSemanticNode(group.added, group.removed)) return "structural";
+
+    const addedCounts = countById(group.added);
+    const removedCounts = countById(group.removed);
+    const ids = new Set([...addedCounts.keys(), ...removedCounts.keys()]);
+    for (const id of ids) {
+      if ((addedCounts.get(id) ?? 0) !== (removedCounts.get(id) ?? 0)) {
+        return "structural";
+      }
+    }
+
+    // Equal id counts under one semantic parent are representation replacement
+    // (remove A + add A). Reordering/reparenting the same DOM node is caught by
+    // hasMovedSemanticNode above; a different parent produces an unmatched
+    // add/remove count in separate groups.
+  }
+
+  return "representation";
+}
+
+/** Whether a mutation batch changes semantic block topology. */
+export function hasSemanticBlockMutation(
+  records: readonly MutationRecord[],
+  editor: HTMLElement | null = null,
+): boolean {
+  return classifySemanticMutations(records, editor) === "structural";
+}
 
 let initialized = false;
 let generation = 0;
@@ -41,8 +193,22 @@ let settleFrame: number | null = null;
 let mutationObserver: MutationObserver | null = null;
 let selectionChangeListener: (() => void) | null = null;
 let inputModeUnsubscribe: (() => void) | null = null;
+let transactionStartedAt: number | null = null;
+let lastActivityAt: number | null = null;
 
 const finishSubscribers = new Set<(finish: StructuralEditFinish) => void>();
+
+function safeMonotonicNow(): number {
+  if (typeof performance !== "undefined" && typeof performance.now === "function") {
+    try {
+      const value = performance.now();
+      if (Number.isFinite(value)) return value;
+    } catch {
+      // Fall through to the safe sentinel below.
+    }
+  }
+  return 0;
+}
 
 function onInputModeChange(state: { focusActive: boolean; typewriterActive: boolean }): void {
   if (!state.focusActive && !state.typewriterActive) resetStructuralEdit();
@@ -77,16 +243,24 @@ function resetState(): void {
   observedActivityVersion = 0;
   quietFrames = 0;
   settleFrames = 0;
+  transactionStartedAt = null;
+  lastActivityAt = null;
 }
 
 function finish(stable: boolean, token: number): void {
   if (token !== generation || phase === "idle" || !activeKind || !activeEditor) return;
 
+  const finishedAt = safeMonotonicNow();
   const result: StructuralEditFinish = {
     generation: token,
     kind: activeKind,
     editor: activeEditor,
     stable,
+    transactionStartedAt: transactionStartedAt ?? finishedAt,
+    lastActivityAt: lastActivityAt ?? finishedAt,
+    finishedAt,
+    quietFrames,
+    settleFrames,
   };
   detachTransactionResources();
   resetState();
@@ -103,6 +277,7 @@ function finish(stable: boolean, token: number): void {
 function checkStable(token: number): void {
   if (token !== generation || phase === "idle") return;
 
+  const now = safeMonotonicNow();
   settleFrames++;
   if (activityVersion !== observedActivityVersion) {
     observedActivityVersion = activityVersion;
@@ -113,7 +288,8 @@ function checkStable(token: number): void {
     phase = "stabilizing";
   }
 
-  if (quietFrames >= REQUIRED_QUIET_FRAMES) {
+  const timeQuiet = lastActivityAt !== null && now - lastActivityAt >= MIN_STABLE_QUIET_MS;
+  if (quietFrames >= REQUIRED_QUIET_FRAMES && timeQuiet) {
     finish(true, token);
     return;
   }
@@ -144,8 +320,10 @@ function attachTransactionResources(token: number): void {
     selectionChangeListener = () => {
       if (token !== generation || phase === "idle") return;
       const selection = typeof window !== "undefined" ? window.getSelection() : null;
-      if (!selection || selection.rangeCount === 0 || !selection.anchorNode) return;
-      if (editor.contains(selection.anchorNode)) noteStructuralActivity(editor);
+      if (!selection || selection.rangeCount === 0) return;
+      const anchorInside = selection.anchorNode ? editor.contains(selection.anchorNode) : false;
+      const focusInside = selection.focusNode ? editor.contains(selection.focusNode) : false;
+      if (anchorInside || focusInside) noteStructuralActivity(editor);
     };
     document.addEventListener("selectionchange", selectionChangeListener);
   }
@@ -183,6 +361,9 @@ export function beginStructuralEdit(
   phase = "mutating";
   activeKind = kind;
   activeEditor = editor;
+  const now = safeMonotonicNow();
+  transactionStartedAt = now;
+  lastActivityAt = now;
   activityVersion++;
   observedActivityVersion = activityVersion;
   quietFrames = 0;
@@ -197,6 +378,7 @@ export function noteStructuralActivity(editor?: HTMLElement | null): void {
   activityVersion++;
   quietFrames = 0;
   phase = "mutating";
+  lastActivityAt = safeMonotonicNow();
 }
 
 export function isStructuralEditPending(): boolean {
@@ -209,6 +391,11 @@ export function getStructuralEditSnapshot(): StructuralEditSnapshot {
     phase,
     kind: activeKind,
     editor: activeEditor,
+    transactionStartedAt,
+    lastActivityAt,
+    activityVersion,
+    quietFrames,
+    settleFrames,
   };
 }
 

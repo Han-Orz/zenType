@@ -106,6 +106,11 @@ export interface DebugStructuralEditState {
   kind: structuralEdit.StructuralEditKind | null;
   editorPath: string | null;
   editorConnected: boolean | null;
+  transactionStartedAt: number | null;
+  lastActivityAt: number | null;
+  activityVersion: number;
+  quietFrames: number;
+  settleFrames: number;
 }
 
 export interface DebugScrollState {
@@ -409,6 +414,11 @@ export function serializeStructuralEditSnapshot(
     editorConnected: editor
       ? typeof editor.isConnected === "boolean" ? editor.isConnected : null
       : null,
+    transactionStartedAt: snapshot.transactionStartedAt,
+    lastActivityAt: snapshot.lastActivityAt,
+    activityVersion: snapshot.activityVersion,
+    quietFrames: snapshot.quietFrames,
+    settleFrames: snapshot.settleFrames,
   };
 }
 
@@ -1160,6 +1170,11 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
       generation: finish.generation,
       kind: finish.kind,
       stable: finish.stable,
+      transactionStartedAt: finish.transactionStartedAt,
+      lastActivityAt: finish.lastActivityAt,
+      finishedAt: finish.finishedAt,
+      quietFrames: finish.quietFrames,
+      settleFrames: finish.settleFrames,
       structuralStateAfterFinish: serializeStructuralEditSnapshot(
         structuralEdit.getStructuralEditSnapshot(),
         root,

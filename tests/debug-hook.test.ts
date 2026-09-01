@@ -157,6 +157,8 @@ class FakeRafQueue {
   private nextId = 1;
   readonly pending = new Map<number, FrameRequestCallback>();
 
+  constructor(private readonly now: () => number) {}
+
   request = (callback: FrameRequestCallback): number => {
     const id = this.nextId++;
     this.pending.set(id, callback);
@@ -167,11 +169,11 @@ class FakeRafQueue {
     this.pending.delete(id);
   };
 
-  flushNext(): void {
+  flushNext(time = this.now()): void {
     const entry = this.pending.entries().next().value as [number, FrameRequestCallback] | undefined;
     assert.ok(entry, "expected a pending animation frame");
     this.pending.delete(entry[0]);
-    entry[1](0);
+    entry[1](time);
   }
 }
 
@@ -200,7 +202,8 @@ class FakeEventBus {
 class FakeRuntime {
   readonly document = new FakeDocument();
   readonly window = { getSelection: () => this.document.selection };
-  readonly raf = new FakeRafQueue();
+  now = 0;
+  readonly raf = new FakeRafQueue(() => this.now);
   readonly mutationObservers: FakeMutationObserver[] = [];
   private readonly originalGlobals = new Map<string, PropertyDescriptor | undefined>();
 
@@ -212,6 +215,7 @@ class FakeRuntime {
     this.defineGlobal("HTMLElement", FakeElement);
     this.defineGlobal("requestAnimationFrame", this.raf.request);
     this.defineGlobal("cancelAnimationFrame", this.raf.cancel);
+    this.defineGlobal("performance", { now: () => this.now });
     const runtime = this;
     this.defineGlobal("MutationObserver", class extends FakeMutationObserver {
       constructor(callback: (records: MutationRecord[]) => void) {
@@ -312,7 +316,11 @@ test("debug hook emits structural finish diagnostics and removes its subscriber 
       "enter",
       editor as unknown as HTMLElement,
     );
+    runtime.now = 16;
     runtime.raf.flushNext();
+    runtime.now = 32;
+    runtime.raf.flushNext();
+    runtime.now = 48;
     runtime.raf.flushNext();
 
     const finishEvent = controller.getRecentEvents().find(
@@ -333,7 +341,11 @@ test("debug hook emits structural finish diagnostics and removes its subscriber 
     controller.destroy();
     const eventCountAfterDestroy = controller.getRecentEvents().length;
     structuralEdit.beginStructuralEdit("backspace", editor as unknown as HTMLElement);
+    runtime.now = 64;
     runtime.raf.flushNext();
+    runtime.now = 80;
+    runtime.raf.flushNext();
+    runtime.now = 96;
     runtime.raf.flushNext();
     assert.equal(controller.getRecentEvents().length, eventCountAfterDestroy);
   } finally {
@@ -422,7 +434,11 @@ test("disabled debug hook does not inspect a structural editor at finish", () =>
   try {
     controller.setEnabled(false);
     structuralEdit.beginStructuralEdit("enter", editor as unknown as HTMLElement);
+    runtime.now = 16;
     runtime.raf.flushNext();
+    runtime.now = 32;
+    runtime.raf.flushNext();
+    runtime.now = 48;
     runtime.raf.flushNext();
     assert.equal(accessed, false);
   } finally {
