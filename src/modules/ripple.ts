@@ -65,10 +65,29 @@ const ownedBlocks = new Set<HTMLElement>();
 const ownedRootStyles = new Map<string, OwnedInlineStyle>();
 let unsubInputMode: (() => void) | null = null;
 let visualStateDirty = false;
+let structuralRefreshPending = false;
+let structuralRefreshRetries = 0;
 let mutationObserver: MutationObserver | null = null;
 let themeObserver: MutationObserver | null = null;
 let observedMutationBlock: HTMLElement | null = null;
 let observedMutationParent: HTMLElement | null = null;
+
+const STRUCTURAL_INPUT_TYPES = new Set([
+  "insertParagraph",
+  "insertLineBreak",
+  "deleteContentBackward",
+  "deleteContentForward",
+  "deleteByCut",
+  "deleteByDrag",
+  "historyUndo",
+  "historyRedo",
+  "insertOrderedList",
+  "insertUnorderedList",
+  "formatBlock",
+  "formatIndent",
+  "formatOutdent",
+]);
+const MAX_STRUCTURAL_REFRESH_RETRIES = 1;
 
 // P0-3: 块级 opacity 缓存——同一顶层块 + 无滚动 + 无块增删时跳过整个 applyBlockOpacity。
 // containerTop（rect.top）捕获祖先滚动；scrollTop 捕获 container 自身滚动。
@@ -726,24 +745,30 @@ function clearLegacyBlockOpacity(): void {
 
 // --- Main apply ---
 
-function applyRippleNow(): void {
+type RippleApplyResult = "applied" | "cleared" | "deferred";
+
+function applyRippleNow(): RippleApplyResult {
+  const preserveTransientVisualState = structuralRefreshPending;
+
   if (!inputMode.isFocusActive() || shouldPauseFocusAndTypewriter()) {
     clearAll();
-    return;
+    return "cleared";
   }
 
   const currentBlock = getCurrentBlock();
   if (!currentBlock) {
+    if (preserveTransientVisualState) return "deferred";
     disconnectMutationObserver();
     clearAll();
-    return;
+    return "cleared";
   }
 
   const container = currentBlock.closest(".protyle-wysiwyg") as HTMLElement | null;
   if (!container) {
+    if (preserveTransientVisualState) return "deferred";
     disconnectMutationObserver();
     clearAll();
-    return;
+    return "cleared";
   }
 
   bindMutationObserver(currentBlock, container);
@@ -762,8 +787,19 @@ function applyRippleNow(): void {
   }
 
   const nestedApplied = NESTED_RIPPLE_ENABLED
-    ? nestedRippleEngine.apply(container, currentBlock)
+    ? nestedRippleEngine.apply(container, currentBlock, {
+      preserveOnInvalid: preserveTransientVisualState,
+    })
     : false;
+  if (
+    preserveTransientVisualState &&
+    NESTED_RIPPLE_ENABLED &&
+    !nestedApplied &&
+    nestedRippleEngine.hasActiveStyles()
+  ) {
+    return "deferred";
+  }
+
   applyBlockOpacity(container, currentBlock, nestedApplied);
 
   const textNodeMap = buildTextNodeMap(currentBlock);
@@ -775,12 +811,29 @@ function applyRippleNow(): void {
     CSS.highlights.delete(SENTENCE_DIM_HIGHLIGHT);
     resetSentenceCache();
   }
+
+  structuralRefreshPending = false;
+  structuralRefreshRetries = 0;
+  return "applied";
 }
 
 function applyRipple(): void {
   if (pendingFrame !== null) return;
   pendingFrame = requestAnimationFrame(() => {
     pendingFrame = null;
+    const result = applyRippleNow();
+    if (result !== "deferred") return;
+
+    if (structuralRefreshRetries < MAX_STRUCTURAL_REFRESH_RETRIES) {
+      structuralRefreshRetries++;
+      applyRipple();
+      return;
+    }
+
+    // A structure that remains invalid after one stable-frame retry is no
+    // longer treated as a transient. Fall back to the existing clear path.
+    structuralRefreshPending = false;
+    structuralRefreshRetries = 0;
     applyRippleNow();
   });
 }
@@ -881,6 +934,10 @@ function onDomMutation(records: MutationRecord[]): void {
     NESTED_RIPPLE_ENABLED &&
     relevantRecords.some((record) => record.type === "childList")
   ) {
+    if (!structuralRefreshPending) {
+      structuralRefreshPending = true;
+      structuralRefreshRetries = 0;
+    }
     nestedRippleEngine.invalidateStructure();
   }
 
@@ -898,6 +955,8 @@ function setOwnedRootStyle(property: string, value: string): void {
 }
 
 function clearAll(): void {
+  structuralRefreshPending = false;
+  structuralRefreshRetries = 0;
   disconnectMutationObserver();
   nestedRippleEngine.clear();
   clearLegacyBlockOpacity();
@@ -929,6 +988,23 @@ function onInput(event: Event): void {
     if (isReadonlyEditorTarget(event.target)) inputModeTriggers.onReadonly();
     return;
   }
+
+  const inputType = (event as InputEvent).inputType;
+  if (typeof inputType === "string" && STRUCTURAL_INPUT_TYPES.has(inputType)) {
+    structuralRefreshPending = true;
+    structuralRefreshRetries = 0;
+    if (NESTED_RIPPLE_ENABLED) nestedRippleEngine.invalidateStructure();
+    applyRipple();
+    return;
+  }
+
+  // Do not let an ordinary follow-up event force a synchronous rebuild while
+  // a structural edit is waiting for its stable DOM frame.
+  if (structuralRefreshPending) {
+    applyRipple();
+    return;
+  }
+
   if (pendingFrame !== null) {
     cancelAnimationFrame(pendingFrame);
     pendingFrame = null;
@@ -942,6 +1018,8 @@ export function initRipple(): void {
   initialized = true;
   active = true;
   pendingFrame = null;
+  structuralRefreshPending = false;
+  structuralRefreshRetries = 0;
 
   const handler: EventListener = onSelectionChange;
   document.addEventListener("selectionchange", handler);

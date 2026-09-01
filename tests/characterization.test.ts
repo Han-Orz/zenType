@@ -1787,6 +1787,72 @@ test("ripple seam keeps nested focus and top-level opacity as separate layers", 
   }
 });
 
+test("ripple preserves valid nested opacity until a structural edit settles", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+  runtime.document.querySelector = () => null;
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(fixture.focusContent.style.getPropertyValue("--zt-ripple-opacity"), "0.4");
+
+    const transientList = new FakeElement({ dataType: "NodeList" });
+    Object.defineProperty(transientList, "children", {
+      configurable: true,
+      value: undefined,
+    });
+    append(fixture.alternateItem, transientList);
+    runtime.document.dispatch("input", eventFor(fixture.alternateContent, {
+      inputType: "insertParagraph",
+      isComposing: false,
+    }));
+    assert.equal(runtime.raf.pending.size, 1, "structural input uses one stable-frame apply");
+
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(
+      fixture.focusContent.style.getPropertyValue("--zt-ripple-opacity"),
+      "0.4",
+      "the transient malformed structure keeps the last valid opacity",
+    );
+    assert.equal(runtime.raf.pending.size, 1, "an invalid transient gets one bounded retry");
+    fixture.alternateItem.removeChild(transientList);
+
+    const newItem = new FakeElement({
+      dataType: "NodeListItem",
+      dataNodeId: "item:parent-level",
+    });
+    const newMarker = new FakeElement({ classes: ["protyle-action"] });
+    const newContent = new FakeElement({
+      dataType: "NodeParagraph",
+      dataNodeId: "block:parent-level",
+      contentEditable: true,
+    });
+    const newText = new FakeText("parent level");
+    const newAttr = new FakeElement({ classes: ["protyle-attr"] });
+    append(newContent, newText);
+    append(newItem, newMarker, newContent, newAttr);
+    append(fixture.rootList, newItem);
+    runtime.setCaret(newText, 1, rect(20, 400));
+
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(newContent.style.getPropertyValue("--zt-ripple-opacity"), "1");
+    assert.equal(fixture.focusContent.style.getPropertyValue("--zt-ripple-opacity"), "");
+    assert.equal(runtime.raf.pending.size, 0);
+
+    inputMode.setBothOff();
+    assert.equal(newContent.style.getPropertyValue("--zt-ripple-opacity"), "");
+  } finally {
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
 test("FLIP interruption freezes the rendered position and rebases the next edit", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);

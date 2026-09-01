@@ -12,7 +12,12 @@ import {
 } from "./styleApplier";
 
 export interface NestedRippleEngine {
-  apply(wysiwyg: HTMLElement, focusElement: HTMLElement): boolean;
+  apply(
+    wysiwyg: HTMLElement,
+    focusElement: HTMLElement,
+    options?: { preserveOnInvalid?: boolean },
+  ): boolean;
+  hasActiveStyles(): boolean;
   invalidateStructure(): void;
   clear(): void;
 }
@@ -31,6 +36,7 @@ export function createNestedRippleEngine(): NestedRippleEngine {
   const styleApplier: RippleStyleApplier = createRippleStyleApplier();
   let cached: SnapshotCache | null = null;
   let structureDirty = true;
+  let activeStyles = false;
 
   function discardSnapshot(): void {
     cached = null;
@@ -58,23 +64,38 @@ export function createNestedRippleEngine(): NestedRippleEngine {
     return snapshot;
   }
 
-  function apply(wysiwyg: HTMLElement, focusElement: HTMLElement): boolean {
+  function apply(
+    wysiwyg: HTMLElement,
+    focusElement: HTMLElement,
+    options: { preserveOnInvalid?: boolean } = {},
+  ): boolean {
     const snapshot = getSnapshot(wysiwyg, focusElement);
     if (!snapshot) {
-      styleApplier.clear();
+      if (!options.preserveOnInvalid) {
+        styleApplier.clear();
+        activeStyles = false;
+      }
       discardSnapshot();
       return false;
     }
 
     const plan = planSnapshot(snapshot);
     if (!plan) {
-      styleApplier.clear();
+      if (!options.preserveOnInvalid) {
+        styleApplier.clear();
+        activeStyles = false;
+      }
       discardSnapshot();
       return false;
     }
 
     styleApplier.apply(plan, snapshot.bindings);
+    activeStyles = plan.targets.length > 0;
     return true;
+  }
+
+  function hasActiveStyles(): boolean {
+    return activeStyles;
   }
 
   function invalidateStructure(): void {
@@ -83,8 +104,9 @@ export function createNestedRippleEngine(): NestedRippleEngine {
 
   function clear(): void {
     styleApplier.clear();
+    activeStyles = false;
     discardSnapshot();
   }
 
-  return { apply, invalidateStructure, clear };
+  return { apply, hasActiveStyles, invalidateStructure, clear };
 }
