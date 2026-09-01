@@ -7,3 +7,7 @@ export function getActiveEditor(): any {
 export function setActiveEditor(editor: unknown): void {
   activeEditor = editor;
 }
+
+export function getFrontend(): string {
+  return "desktop";
+}

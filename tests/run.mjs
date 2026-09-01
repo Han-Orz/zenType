@@ -8,6 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outdir = mkdtempSync(path.join(root, ".tmp-tests-"));
 const testEntries = [
   "immediate-fixes.test.ts",
+  "characterization.test.ts",
   "ripple-semantic.test.ts",
   "ripple-dom-adapter.test.ts",
   "ripple-style-applier.test.ts",
