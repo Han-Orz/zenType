@@ -11,6 +11,7 @@ import {
   destroyTypewriter,
   initTypewriter,
 } from "../src/modules/typewriter";
+import * as flip from "../src/modules/typewriter/flip";
 import {
   destroyCursor,
   initCursor,
@@ -1192,7 +1193,7 @@ test("typewriter hard-pauses during IME composition and debounces compositionend
   }
 });
 
-test("typewriter resynchronizes one pending scroll after a new caret change", () => {
+test("typewriter retargets one active scroll after a new caret change", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
   const fixture = createEditorFixture(runtime);
@@ -1211,18 +1212,26 @@ test("typewriter resynchronizes one pending scroll after a new caret change", ()
     assert.equal(runtime.raf.pending.size, 1);
 
     const firstScrollFrame = [...runtime.raf.pending.keys()][0];
+    runtime.clock.advance(401);
     runtime.setCaret(fixture.text, 1, rect(20, 850));
     runtime.document.dispatch("selectionchange");
     const resyncCheckFrame = [...runtime.raf.pending.keys()][1];
     assert.ok(resyncCheckFrame);
     runtime.raf.flush(resyncCheckFrame, runtime.clock.now);
-    assert.equal(runtime.raf.pending.size, 1, "a caret change must not start a competing loop");
+    assert.equal(runtime.raf.pending.size, 2, "layout defer keeps the active loop and one check");
+
+    const layoutCheckFrame = [...runtime.raf.pending.keys()].find((id) => id !== firstScrollFrame);
+    assert.ok(layoutCheckFrame);
+    runtime.raf.flush(layoutCheckFrame, runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 1, "retargeting keeps the original scroll loop");
+    assert.equal(runtime.raf.pending.has(firstScrollFrame), true);
 
     runtime.clock.advance(600);
     runtime.raf.flush(firstScrollFrame, runtime.clock.now);
-    assert.equal(runtime.raf.pending.size, 1, "scroll completion schedules one resync check");
+    assert.equal(Math.round(fixture.content.scrollTop), 350, "the latest caret target owns the completed scroll");
+    assert.equal(runtime.raf.pending.size, 1, "completion schedules one final geometry check");
     runtime.raf.flushNext(runtime.clock.now);
-    assert.equal(runtime.raf.pending.size, 1, "the resync check may take over with one new scroll");
+    assert.equal(runtime.raf.pending.size, 0, "the final check does not create a second loop");
   } finally {
     destroyTypewriter();
     inputMode.reset();
@@ -1773,6 +1782,92 @@ test("ripple seam keeps nested focus and top-level opacity as separate layers", 
   } finally {
     destroyRipple();
     inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("FLIP interruption freezes the rendered position and rebases the next edit", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  const secondBlock = new FakeElement({
+    dataNodeId: "block-second",
+    contentEditable: true,
+  });
+  const secondText = new FakeText("second");
+  secondBlock.rect = rect(0, 100, 1000, 20);
+  append(secondBlock, secondText);
+  append(fixture.wysiwyg, secondBlock);
+
+  secondBlock.getBoundingClientRect = () => {
+    if (secondBlock.style.transition.includes("250ms") && secondBlock.style.transform === "") {
+      return rect(0, 90, 1000, 20);
+    }
+    const match = secondBlock.style.transform.match(/^translateY\((-?\d+(?:\.\d+)?)px\)$/);
+    if (match) return rect(0, secondBlock.rect.top + Number(match[1]), 1000, 20);
+    return secondBlock.rect;
+  };
+
+  try {
+    flip.reset();
+    const range = new FakeRange(fixture.text, 0);
+
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+    secondBlock.rect = rect(0, 80, 1000, 20);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(secondBlock.style.transform, "translateY(20px)");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(secondBlock.style.transition.includes("250ms"), true);
+    assert.equal(flip.hasShiftedBlocks(), true);
+    assert.deepEqual(runtime.clock.delays(), [300]);
+
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+    assert.equal(secondBlock.style.transform, "translateY(10px)");
+    assert.deepEqual(runtime.clock.delays(), [], "the old cleanup timer is cancelled at interruption");
+
+    secondBlock.rect = rect(0, 60, 1000, 20);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(
+      secondBlock.style.transform,
+      "translateY(30px)",
+      "the new Invert phase starts from the frozen rendered position",
+    );
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(secondBlock.style.transform, "");
+    assert.equal(secondBlock.style.transition.includes("250ms"), true);
+
+    runtime.clock.advance(300);
+    assert.equal(secondBlock.style.transform, "");
+    assert.equal(secondBlock.style.transition, "");
+    assert.equal(flip.hasShiftedBlocks(), false);
+  } finally {
+    flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("FLIP skips invalid local sampling without scanning the full editor", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  const neutral = new FakeElement();
+  const neutralText = new FakeText("neutral");
+  append(neutral, neutralText);
+  append(fixture.wysiwyg, neutral);
+  fixture.wysiwyg.querySelectorAll = () => {
+    throw new Error("FLIP must not perform a full-editor fallback scan");
+  };
+
+  try {
+    flip.reset();
+    const range = new FakeRange(neutralText, 0);
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+    assert.equal(runtime.raf.pending.size, 0);
+    assert.equal(flip.hasShiftedBlocks(), false);
+  } finally {
+    flip.reset();
     setActiveEditor(null);
     runtime.restore();
   }

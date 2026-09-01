@@ -23,12 +23,14 @@ function clearActiveFLIPTimer(): void {
   activeFLIPTimer = null;
 }
 
+function releaseFLIPElement(el: HTMLElement): void {
+  const owned = ownedFLIPStyles.get(el);
+  if (owned) restoreOwnedInlineStyle(el.style, owned);
+  ownedFLIPStyles.delete(el);
+}
+
 function clearLastFLIPElements(): void {
-  for (const el of lastFLIPElements) {
-    const owned = ownedFLIPStyles.get(el);
-    if (owned) restoreOwnedInlineStyle(el.style, owned);
-    ownedFLIPStyles.delete(el);
-  }
+  for (const el of lastFLIPElements) releaseFLIPElement(el);
   lastFLIPElements = [];
 }
 
@@ -89,7 +91,7 @@ function elementFromNode(node: Node): Element | null {
     : node.parentElement;
 }
 
-function collectFlipBlocks(editor: HTMLElement, range: Range): HTMLElement[] {
+function collectFlipBlocks(editor: HTMLElement, range: Range): HTMLElement[] | null {
   const blocks = new Set<HTMLElement>();
   const startBlock = elementFromNode(range.startContainer)?.closest("[data-node-id]") as HTMLElement | null;
   if (startBlock && editor.contains(startBlock)) {
@@ -103,10 +105,9 @@ function collectFlipBlocks(editor: HTMLElement, range: Range): HTMLElement[] {
     }
   }
 
-  // Rare fallback for unexpected selection containers: keep the old behavior.
-  return blocks.size > 0
-    ? Array.from(blocks)
-    : Array.from(editor.querySelectorAll<HTMLElement>("[data-node-id]"));
+  // FLIP is an enhancement: do not scan a long editor when the local block
+  // boundary cannot be established reliably.
+  return blocks.size > 0 ? Array.from(blocks) : null;
 }
 
 /** Cancel the current FLIP generation, cleanup timer, and owned inline styles. */
@@ -134,17 +135,36 @@ export function start(
     reset();
     return;
   }
+  const blocks = collectFlipBlocks(editor, range);
+  if (!blocks) return;
+
   const token = ++flipGeneration;
 
   // Cancel the previous cleanup before a new FLIP can own these styles.
   clearActiveFLIPTimer();
-  clearLastFLIPElements();
 
-  // Capture the nearby blocks before SiYuan's bubble handler changes the DOM.
+  // Capture nearby blocks before SiYuan's bubble handler changes the DOM.
   const first = new Map<HTMLElement, number>();
-  collectFlipBlocks(editor, range).forEach((el) => {
+  blocks.forEach((el) => {
     first.set(el, el.getBoundingClientRect().top);
   });
+
+  // If an earlier FLIP is still visible, freeze each element at its rendered
+  // position and carry that position into the new snapshot. This avoids
+  // restoring the old animation to its logical endpoint during interruption.
+  const interruptedElements = new Set(lastFLIPElements);
+  for (const el of lastFLIPElements) {
+    if (!el.isConnected) {
+      releaseFLIPElement(el);
+      continue;
+    }
+    const visualTop = first.get(el) ?? el.getBoundingClientRect().top;
+    first.set(el, visualTop);
+    setOwnedFLIPStyle(el, "transition", "none");
+    setOwnedFLIPStyle(el, "transform", "");
+    const layoutTop = el.getBoundingClientRect().top;
+    setOwnedFLIPStyle(el, "transform", `translateY(${visualTop - layoutTop}px)`);
+  }
 
   // Wait one frame for SiYuan to finish the DOM change.
   requestDeferredFrame(() => {
@@ -155,6 +175,10 @@ export function start(
     // Phase 1 (Invert): batch all writes without an intermediate reflow.
     for (const [el, y0] of first) {
       if (!el.isConnected) continue;
+      if (interruptedElements.has(el)) {
+        setOwnedFLIPStyle(el, "transition", "none");
+        setOwnedFLIPStyle(el, "transform", "");
+      }
       const y1 = el.getBoundingClientRect().top;
       const delta = y0 - y1;
       if (Math.abs(delta) < 2) continue;
@@ -165,6 +189,10 @@ export function start(
     }
 
     lastFLIPElements = modifiedElements;
+    const modifiedSet = new Set(modifiedElements);
+    for (const el of interruptedElements) {
+      if (!modifiedSet.has(el)) releaseFLIPElement(el);
+    }
 
     if (modifiedElements.length === 0) return;
 
@@ -183,11 +211,8 @@ export function start(
       activeFLIPTimer = setTimeout(() => {
         if (token !== flipGeneration || activeFLIPTimer === null) return;
         activeFLIPTimer = null;
-        modifiedElements.forEach((el) => {
-          const owned = ownedFLIPStyles.get(el);
-          if (owned) restoreOwnedInlineStyle(el.style, owned);
-          ownedFLIPStyles.delete(el);
-        });
+        modifiedElements.forEach(releaseFLIPElement);
+        lastFLIPElements = [];
       }, 300);
     });
   });

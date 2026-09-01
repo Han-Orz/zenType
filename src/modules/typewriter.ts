@@ -5,6 +5,7 @@ import { shouldPauseTypewriter } from "../utils/edgeCases";
 import * as inputMode from "./inputMode";
 import * as inputModeTriggers from "./inputModeTriggers";
 import * as flip from "./typewriter/flip";
+import * as scroll from "./typewriter/scroll";
 import { isInAllowElements } from "../utils/boundary";
 import {
   isCurrentSelectionEditable,
@@ -12,16 +13,12 @@ import {
   isEditableEvent,
   isReadonlyEditorTarget,
 } from "../utils/editorScope";
-import { prefersReducedMotion } from "../utils/reducedMotion";
 
-const { COMFORT_ZONE, SCROLL_DURATION_TIERS, TYPING_GAP_MS, CLICK_CENTER_LOW, CLICK_CENTER_HIGH } = TYPEWRITER_CONFIG;
+const { COMFORT_ZONE, TYPING_GAP_MS, CLICK_CENTER_LOW, CLICK_CENTER_HIGH } = TYPEWRITER_CONFIG;
 
 let eventListeners: Array<[string, EventListener, AddEventListenerOptions?]> = [];
 let windowEventListeners: Array<[string, EventListener, AddEventListenerOptions?]> = [];
 let unsubInputMode: (() => void) | null = null;
-let pendingScroll: number | null = null;
-let pendingScrollEnd: number = 0;
-let scrollResyncPending = false;
 let initialized = false;
 const deferredFrames = new Set<number>();
 
@@ -32,11 +29,6 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null;  // 停顿后触
 let firstCharAfterIdle = false;                            // Option i：空闲后的首个输入立即滚（input 监听器设置，checkAndScroll 消费）
 let bypassEmptyBlock = false;                              // Enter 新建空块时设 true，让空块守卫放行一次
 
-/** isScrolling 由 pendingScroll !== null 推断，无需独立状态管理 — 避免动画结束到定时器置 false 间的竞态窗口 */
-function isScrolling(): boolean {
-  return pendingScroll !== null;
-}
-
 export function shouldHandleTypewriterEditKey(
   event: Pick<KeyboardEvent, "key" | "isComposing" | "defaultPrevented">,
 ): boolean {
@@ -44,12 +36,7 @@ export function shouldHandleTypewriterEditKey(
     (event.key === "Enter" || event.key === "Backspace");
 }
 
-export function shouldCancelPendingScrollForReducedMotion(
-  reducedMotion: boolean,
-  hasPendingScroll: boolean,
-): boolean {
-  return reducedMotion && hasPendingScroll;
-}
+export { shouldCancelPendingScrollForReducedMotion } from "./typewriter/scroll";
 
 let pendingCheck: number | null = null;
 let cachedContainer: HTMLElement | null = null;
@@ -75,11 +62,8 @@ function cancelDeferredFrames(): void {
 
 function pauseTypewriterMotion(): void {
   flip.reset();
+  scroll.reset();
   cancelDeferredFrames();
-  if (pendingScroll !== null) {
-    cancelAnimationFrame(pendingScroll);
-    pendingScroll = null;
-  }
   if (pendingCheck !== null) {
     cancelAnimationFrame(pendingCheck);
     pendingCheck = null;
@@ -88,97 +72,15 @@ function pauseTypewriterMotion(): void {
     clearTimeout(debounceTimer);
     debounceTimer = null;
   }
-  scrollResyncPending = false;
   composing = false;
   lastInputAt = 0;
   firstCharAfterIdle = false;
   bypassEmptyBlock = false;
 }
 
-function easeOutCubic(t: number): number {
-  return 1 - Math.pow(1 - t, 3);
-}
-
 /** 缓起缓收 —— 点击居中用，比 easeOutCubic 更自然（起步不冲，收尾不突兀） */
 function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-}
-
-function durationForDistance(dist: number): number {
-  if (dist < 20) return SCROLL_DURATION_TIERS[0];
-  if (dist < 60) return SCROLL_DURATION_TIERS[1];
-  if (dist < 150) return SCROLL_DURATION_TIERS[2];
-  if (dist < 400) return SCROLL_DURATION_TIERS[3];
-  return SCROLL_DURATION_TIERS[4];
-}
-
-interface SmoothScrollOptions {
-  deltaY: number;
-  duration?: number;
-  easing?: (t: number) => number;
-}
-
-function smoothScroll(target: HTMLElement, options: SmoothScrollOptions): void {
-  const { deltaY, duration, easing } = options;
-  const easeFn = easing ?? easeOutCubic;
-
-  if (prefersReducedMotion()) {
-    if (pendingScroll !== null) cancelAnimationFrame(pendingScroll);
-    pendingScroll = null;
-    const maxScroll = target.scrollHeight - target.clientHeight;
-    target.scrollTop = Math.max(0, Math.min(target.scrollTop + deltaY, maxScroll));
-    if (scrollResyncPending) {
-      scrollResyncPending = false;
-      lastCheckRect = null;
-      scheduleCheck();
-    }
-    return;
-  }
-
-  // 设计决策（TODO-5）：checkAndScroll 的 isScrolling() 守卫在动画进行中直接 return，
-  // 新滚动请求被丢弃而非合并。下方 cancelAnimationFrame 为防御性保留（未来若有其他
-  // 调用方绕过守卫进入此函数时可安全接管）。
-  if (pendingScroll !== null) cancelAnimationFrame(pendingScroll);
-
-  pendingScrollEnd = target.scrollTop + deltaY;
-
-  const startScroll = target.scrollTop;
-  const startTime = performance.now();
-  const dur = duration ?? durationForDistance(Math.abs(deltaY));
-
-  function step() {
-    const elapsed = performance.now() - startTime;
-    const t = Math.min(elapsed / dur, 1);
-    const eased = easeFn(t);
-    const maxScroll = target.scrollHeight - target.clientHeight;
-    const currentEnd = pendingScrollEnd;
-    target.scrollTop = Math.max(0, Math.min(
-        startScroll + (currentEnd - startScroll) * eased,
-        maxScroll
-    ));
-    if (t < 1) {
-      pendingScroll = requestAnimationFrame(step);
-    } else {
-      pendingScroll = null;
-      if (scrollResyncPending) {
-        scrollResyncPending = false;
-        lastCheckRect = null;
-        scheduleCheck();
-      }
-    }
-  }
-  pendingScroll = requestAnimationFrame(step);
-}
-
-function cancelPendingScrollForReducedMotion(): void {
-  if (!shouldCancelPendingScrollForReducedMotion(prefersReducedMotion(), pendingScroll !== null)) {
-    return;
-  }
-  const frame = pendingScroll;
-  if (frame === null) return;
-  cancelAnimationFrame(frame);
-  pendingScroll = null;
-  scrollResyncPending = false;
 }
 
 function scheduleCheck(): void {
@@ -194,18 +96,12 @@ function checkAndScroll(): void {
   if (!inputMode.isTypewriterActive()) return;
 
   // Reduced motion may be enabled while an existing smooth scroll is running.
-  // Cancel it before any pause or isScrolling guard so this action cannot leave
-  // the old animation alive.
-  cancelPendingScrollForReducedMotion();
+  // Cancel it before reading the new target so this action cannot leave the old
+  // animation alive.
+  scroll.cancelForReducedMotion();
 
   // 暂停场景（悬浮窗 / 只读 / 嵌入块）：不滚动
   if (shouldPauseTypewriter()) return;
-
-  // 动画进行中：不触发新 scroll，防止连续 keystroke 雪崩到 clamp 边界
-  if (isScrolling()) {
-    scrollResyncPending = true;
-    return;
-  }
 
   // IME composition 进行中：硬暂停，避免 per-frame scrollTop 拖动 IME 候选框（修复 3c）
   if (composing) return;
@@ -333,7 +229,9 @@ function checkAndScroll(): void {
   // else: 舒适区内，deltaY = 0，不滚
 
   if (Math.abs(deltaY) >= 1) {
-    smoothScroll(container, { deltaY });
+    scroll.scrollTo(container, { deltaY }, scheduleCheck);
+  } else if (scroll.isScrolling()) {
+    scroll.cancel();
   }
 }
 
@@ -363,8 +261,12 @@ function centerIfFarOff(target: Element): void {
     // 用 easeInOutCubic（缓起缓收）+ 略加时长，比打字滚动的 easeOutCubic 更自然
     const deltaY = (cursorPct - 0.5) * editorHeight;
     if (Math.abs(deltaY) >= 1) {
-      const baseDur = durationForDistance(Math.abs(deltaY));
-      smoothScroll(container, { deltaY, easing: easeInOutCubic, duration: Math.round(baseDur * 1.4) });
+      const baseDur = scroll.durationForDistance(Math.abs(deltaY));
+      scroll.scrollTo(container, {
+        deltaY,
+        easing: easeInOutCubic,
+        duration: Math.round(baseDur * 1.4),
+      });
     }
   });
 }
@@ -452,11 +354,7 @@ export function initTypewriter(): void {
         }
         composing = true;
         firstCharAfterIdle = false;  // composition 走自己的路径，不消费 firstChar 标志
-        if (pendingScroll !== null) {
-          cancelAnimationFrame(pendingScroll);
-          pendingScroll = null;
-        }
-        scrollResyncPending = false;
+        if (scroll.isScrolling()) scroll.cancel();
         if (debounceTimer !== null) {
           clearTimeout(debounceTimer);
           debounceTimer = null;
@@ -592,12 +490,8 @@ export function destroyTypewriter(): void {
   }
   initialized = false;
   flip.reset();
+  scroll.reset();
   cancelDeferredFrames();
-
-  if (pendingScroll !== null) {
-    cancelAnimationFrame(pendingScroll);
-    pendingScroll = null;
-  }
 
   if (pendingCheck !== null) {
     cancelAnimationFrame(pendingCheck);
@@ -612,8 +506,6 @@ export function destroyTypewriter(): void {
   cachedContainer = null;
   cachedCursorElement = null;
   lastCheckRect = null;
-  pendingScrollEnd = 0;
-  scrollResyncPending = false;
   composing = false;
   lastInputAt = 0;
   firstCharAfterIdle = false;
