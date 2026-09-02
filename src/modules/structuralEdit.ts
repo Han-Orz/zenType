@@ -53,6 +53,19 @@ type SemanticMutationGroup = {
   removed: SemanticNodeReference[];
 };
 
+export interface SemanticMutationSummary {
+  classification: SemanticMutationClassification;
+  addedBlockIds: string[];
+  removedBlockIds: string[];
+  parentChanges: Array<{
+    blockId: string;
+    fromParentId: string | null;
+    toParentId: string | null;
+  }>;
+}
+
+const MAX_SEMANTIC_BLOCK_IDS = 256;
+
 function elementFromNode(node: Node | null | undefined): Element | null {
   return node && node.nodeType === 1 ? node as Element : null;
 }
@@ -93,6 +106,31 @@ function semanticRoots(node: Node): SemanticNodeReference[] {
   return roots;
 }
 
+function boundedSemanticRoots(
+  node: Node,
+  result: SemanticNodeReference[] = [],
+): SemanticNodeReference[] {
+  if (result.length >= MAX_SEMANTIC_BLOCK_IDS) return result;
+  const element = elementFromNode(node);
+  if (!element) return result;
+
+  if (isSemanticBlock(element)) {
+    result.push({ id: attributeOf(element, "data-node-id") as string, element });
+    return result;
+  }
+
+  for (const child of childrenOf(element)) {
+    boundedSemanticRoots(child, result);
+    if (result.length >= MAX_SEMANTIC_BLOCK_IDS) break;
+  }
+  return result;
+}
+
+/** Collect bounded semantic block ids for development diagnostics. */
+export function collectSemanticBlockIds(node: Node): string[] {
+  return [...new Set(boundedSemanticRoots(node).map((reference) => reference.id))];
+}
+
 function belongsToEditor(editor: HTMLElement | null, node: Node): boolean {
   if (!editor) return true;
   if (node === editor) return true;
@@ -115,6 +153,44 @@ function countById(references: readonly SemanticNodeReference[]): Map<string, nu
   return counts;
 }
 
+function semanticMutationGroups(
+  records: readonly MutationRecord[],
+  editor: HTMLElement | null,
+  bounded = false,
+): Map<Element | string, SemanticMutationGroup> {
+  const groups = new Map<Element | string, SemanticMutationGroup>();
+  const collect = (node: Node): SemanticNodeReference[] => bounded
+    ? boundedSemanticRoots(node)
+    : semanticRoots(node);
+
+  for (const record of records) {
+    if (record.type !== "childList") continue;
+    const target = elementFromNode(record.target);
+    if (!target || !belongsToEditor(editor, target)) continue;
+
+    const added = Array.from(record.addedNodes).flatMap(collect);
+    const removed = Array.from(record.removedNodes).flatMap(collect);
+    if (added.length === 0 && removed.length === 0) continue;
+
+    const key = parentKey(target);
+    const group = groups.get(key) ?? { added: [], removed: [] };
+    group.added.push(...added);
+    group.removed.push(...removed);
+    groups.set(key, group);
+  }
+
+  return groups;
+}
+
+function nearestSemanticParentId(element: Element | null): string | null {
+  let current = element;
+  while (current) {
+    if (isSemanticBlock(current)) return attributeOf(current, "data-node-id");
+    current = current.parentElement;
+  }
+  return null;
+}
+
 function hasMovedSemanticNode(
   added: readonly SemanticNodeReference[],
   removed: readonly SemanticNodeReference[],
@@ -133,23 +209,7 @@ export function classifySemanticMutations(
   records: readonly MutationRecord[],
   editor: HTMLElement | null = null,
 ): SemanticMutationClassification {
-  const groups = new Map<Element | string, SemanticMutationGroup>();
-
-  for (const record of records) {
-    if (record.type !== "childList") continue;
-    const target = elementFromNode(record.target);
-    if (!target || !belongsToEditor(editor, target)) continue;
-
-    const added = Array.from(record.addedNodes).flatMap((node) => semanticRoots(node));
-    const removed = Array.from(record.removedNodes).flatMap((node) => semanticRoots(node));
-    if (added.length === 0 && removed.length === 0) continue;
-
-    const key = parentKey(target);
-    const group = groups.get(key) ?? { added: [], removed: [] };
-    group.added.push(...added);
-    group.removed.push(...removed);
-    groups.set(key, group);
-  }
+  const groups = semanticMutationGroups(records, editor);
 
   for (const group of groups.values()) {
     if (hasMovedSemanticNode(group.added, group.removed)) return "structural";
@@ -170,6 +230,90 @@ export function classifySemanticMutations(
   }
 
   return "representation";
+}
+
+/**
+ * Return the same semantic classification plus bounded ids useful to the
+ * development-only DebugHook. This does not participate in production edit
+ * coordination or alter the classifier's definition.
+ */
+export function summarizeSemanticMutations(
+  records: readonly MutationRecord[],
+  editor: HTMLElement | null = null,
+): SemanticMutationSummary {
+  const groups = semanticMutationGroups(records, editor, true);
+  const addedBlockIds: string[] = [];
+  const removedBlockIds: string[] = [];
+  const addedSeen = new Set<string>();
+  const removedSeen = new Set<string>();
+  const removedByNode = new Map<SemanticNodeReference, string | null>();
+  const addedByNode = new Map<SemanticNodeReference, string | null>();
+
+  for (const record of records) {
+    if (record.type !== "childList") continue;
+    const target = elementFromNode(record.target);
+    if (!target || !belongsToEditor(editor, target)) continue;
+    const parentId = nearestSemanticParentId(target);
+    for (const reference of Array.from(record.removedNodes).flatMap((node) => boundedSemanticRoots(node))) {
+      removedByNode.set(reference, parentId);
+      if (!removedSeen.has(reference.id) && removedBlockIds.length < MAX_SEMANTIC_BLOCK_IDS) {
+        removedSeen.add(reference.id);
+        removedBlockIds.push(reference.id);
+      }
+    }
+    for (const reference of Array.from(record.addedNodes).flatMap((node) => boundedSemanticRoots(node))) {
+      addedByNode.set(reference, parentId);
+      if (!addedSeen.has(reference.id) && addedBlockIds.length < MAX_SEMANTIC_BLOCK_IDS) {
+        addedSeen.add(reference.id);
+        addedBlockIds.push(reference.id);
+      }
+    }
+  }
+
+  let classification: SemanticMutationClassification = "representation";
+  for (const group of groups.values()) {
+    if (hasMovedSemanticNode(group.added, group.removed)) {
+      classification = "structural";
+      break;
+    }
+
+    const addedCounts = countById(group.added);
+    const removedCounts = countById(group.removed);
+    const ids = new Set([...addedCounts.keys(), ...removedCounts.keys()]);
+    for (const id of ids) {
+      if ((addedCounts.get(id) ?? 0) !== (removedCounts.get(id) ?? 0)) {
+        classification = "structural";
+        break;
+      }
+    }
+    if (classification === "structural") break;
+  }
+
+  const parentChanges: SemanticMutationSummary["parentChanges"] = [];
+  const parentChangeKeys = new Set<string>();
+  for (const [removedReference, fromParentId] of removedByNode) {
+    const addedReference = [...addedByNode.keys()].find((candidate) => (
+      candidate.id === removedReference.id && candidate.element === removedReference.element
+    ));
+    if (!addedReference) continue;
+    const toParentId = addedByNode.get(addedReference) ?? null;
+    const key = `${removedReference.id}\u0000${fromParentId ?? ""}\u0000${toParentId ?? ""}`;
+    if (parentChangeKeys.has(key)) continue;
+    if (parentChanges.length >= MAX_SEMANTIC_BLOCK_IDS) break;
+    parentChangeKeys.add(key);
+    parentChanges.push({
+      blockId: removedReference.id,
+      fromParentId,
+      toParentId,
+    });
+  }
+
+  return {
+    classification,
+    addedBlockIds,
+    removedBlockIds,
+    parentChanges,
+  };
 }
 
 /** Whether a mutation batch changes semantic block topology. */

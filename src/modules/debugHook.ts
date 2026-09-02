@@ -16,6 +16,7 @@ const MAX_OBSERVED_ROOTS = 24;
 const FLUSH_DELAY_MS = 80;
 const SNAPSHOT_DELAY_MS = 120;
 const MAX_TEXT_LENGTH = 2000;
+const TIMING_START_STATE = "minimal" as const;
 
 const OBSERVED_ATTRIBUTES = [
   "class",
@@ -30,7 +31,7 @@ const OBSERVED_ATTRIBUTES = [
   "aria-expanded",
 ] as const;
 
-const DOM_EVENT_NAMES = [
+const FORENSIC_DOM_EVENT_NAMES = [
   "beforeinput",
   "input",
   "compositionstart",
@@ -47,12 +48,28 @@ const DOM_EVENT_NAMES = [
   "selectionchange",
 ] as const;
 
-type TrackedDomEventName = (typeof DOM_EVENT_NAMES)[number];
+const TIMING_DOM_EVENT_NAMES = [
+  "keydown",
+  "beforeinput",
+  "input",
+  "compositionstart",
+  "compositionend",
+  "selectionchange",
+  "click",
+  "pointerdown",
+] as const;
+
+export type DebugProfile = "timing" | "forensic";
+type TrackedDomEventName = (typeof FORENSIC_DOM_EVENT_NAMES)[number];
+type TimingDomEventName = (typeof TIMING_DOM_EVENT_NAMES)[number];
+type DomEventName = TrackedDomEventName | TimingDomEventName;
 
 export interface DebugHookController {
   toggle(): boolean;
   setEnabled(enabled: boolean): void;
   isEnabled(): boolean;
+  setProfile(profile: DebugProfile): void;
+  getProfile(): DebugProfile;
   captureNow(reason?: string, protyle?: IProtyle): void;
   toggleIncludeText(): boolean;
   getRecentEvents(): readonly DebugEnvelope[];
@@ -62,12 +79,17 @@ export interface DebugHookController {
 
 export interface DebugHookState {
   enabled: boolean;
+  profile: DebugProfile;
   includeText: boolean;
   sessionId: string;
   recentEventCount: number;
   pendingEventCount: number;
   observedRootCount: number;
   bridgeUrl: string;
+  timingEvents: number;
+  forensicSnapshots: number;
+  mutationBatches: number;
+  serializedMutationRecords: number;
 }
 
 export interface DebugEnvelope {
@@ -232,6 +254,8 @@ interface DebugGlobalApi {
   getRecentEvents: () => readonly DebugEnvelope[];
   getState: () => DebugHookState;
   setEnabled: (enabled: boolean) => void;
+  setProfile: (profile: DebugProfile) => void;
+  getProfile: () => DebugProfile;
   setIncludeText: (enabled: boolean) => void;
   toggle: () => boolean;
   toggleIncludeText: () => boolean;
@@ -849,15 +873,193 @@ function safeRootContains(root: Element, value: EventTarget | Node | null | unde
   return !!node && (root === node || root.contains(node));
 }
 
+interface TimingStructuralState {
+  generation: number;
+  phase: structuralEdit.StructuralEditPhase;
+  kind: structuralEdit.StructuralEditKind | null;
+}
+
+function timingStructuralState(): TimingStructuralState {
+  const snapshot = structuralEdit.getStructuralEditSnapshot();
+  return {
+    generation: snapshot.generation,
+    phase: snapshot.phase,
+    kind: snapshot.kind,
+  };
+}
+
+function timingStructuralCompatibility(
+  root: Element | null,
+): DebugStructuralEditState {
+  return serializeStructuralEditSnapshot(structuralEdit.getStructuralEditSnapshot(), root);
+}
+
+function blockIdForNode(value: EventTarget | Node | null | undefined): string | null {
+  const element = asElement(value);
+  if (!element || typeof element.closest !== "function") return null;
+  return element.closest("[data-node-id]")?.getAttribute("data-node-id") ?? null;
+}
+
+function timingSelection(): {
+  anchorBlockId: string | null;
+  focusBlockId: string | null;
+  collapsed: boolean | null;
+} {
+  if (typeof window === "undefined" || typeof window.getSelection !== "function") {
+    return { anchorBlockId: null, focusBlockId: null, collapsed: null };
+  }
+  try {
+    const selection = window.getSelection();
+    return {
+      anchorBlockId: blockIdForNode(selection?.anchorNode),
+      focusBlockId: blockIdForNode(selection?.focusNode),
+      collapsed: selection ? selection.isCollapsed : null,
+    };
+  } catch {
+    return { anchorBlockId: null, focusBlockId: null, collapsed: null };
+  }
+}
+
+function timingRootReference(root: Element | null): Record<string, unknown> | null {
+  if (!root) return null;
+  return {
+    path: nodePath(root, root) || null,
+    nodeId: root.getAttribute("data-node-id"),
+    dataType: root.getAttribute("data-type"),
+  };
+}
+
+function timingProtyleReference(
+  protyle: IProtyle | null,
+  root: Element | null,
+): Record<string, unknown> | null {
+  if (!protyle && !root) return null;
+  return {
+    id: protyle?.id ?? null,
+    path: protyle?.path ?? null,
+    blockId: (protyle?.block as BlockLike | undefined)?.id ?? null,
+    root: timingRootReference(root),
+  };
+}
+
+function timingEventPayload(
+  event: Event,
+  root: HTMLElement | null,
+): Record<string, unknown> {
+  const structural = timingStructuralState();
+  const selection = timingSelection();
+  const currentBlockId = blockIdForNode(event.target) ?? selection.anchorBlockId;
+  const typewriterScrollActive = typewriterScroll.isScrolling();
+  const payload: Record<string, unknown> = {
+    source: "dom",
+    name: event.type,
+    targetPath: nodePath(event.target, root),
+    structural,
+    // Keep the old field as a cheap compatibility seam for existing captures;
+    // unlike forensic snapshots it contains no rect/style/tree data.
+    structuralEdit: timingStructuralCompatibility(root),
+    selection,
+    currentBlockId,
+    typewriterScrollActive,
+    typewriterScroll: { active: typewriterScrollActive },
+  };
+
+  if (event.type === "beforeinput" || event.type === "input") {
+    const input = event as InputEvent;
+    payload.inputType = input.inputType ?? "";
+    payload.isComposing = input.isComposing ?? false;
+  } else if (event.type === "keydown") {
+    const keyboard = event as KeyboardEvent;
+    payload.key = summarizeKeyboardKey(keyboard.key);
+    payload.code = keyboard.code;
+    payload.isComposing = keyboard.isComposing;
+    payload.repeat = keyboard.repeat;
+  } else if (event.type === "compositionstart" || event.type === "compositionend") {
+    payload.isComposing = event.type === "compositionstart";
+  } else if (event.type === "click" || event.type === "pointerdown") {
+    payload.button = (event as MouseEvent).button;
+  }
+
+  return payload;
+}
+
+function timingMutationPayload(
+  root: HTMLElement,
+  records: readonly MutationRecord[],
+): Record<string, unknown> {
+  const structuralSnapshot = structuralEdit.getStructuralEditSnapshot();
+  const childListCount = records.reduce(
+    (count, record) => count + (record.type === "childList" ? 1 : 0),
+    0,
+  );
+  const details = childListCount > 0
+    ? structuralEdit.summarizeSemanticMutations(
+      records,
+      structuralSnapshot.editor ?? root,
+    )
+    : {
+      classification: "representation" as const,
+      addedBlockIds: [],
+      removedBlockIds: [],
+      parentChanges: [],
+    };
+  const semanticClassification = childListCount === 0 ? "none" : details.classification;
+  const anomaly = semanticClassification === "structural" && structuralSnapshot.phase === "idle"
+    ? "IDLE_SEMANTIC_MUTATION"
+    : null;
+  const structural = {
+    generation: structuralSnapshot.generation,
+    phase: structuralSnapshot.phase,
+    kind: structuralSnapshot.kind,
+  };
+
+  return {
+    source: "mutation-observer",
+    name: "mutation",
+    root: timingRootReference(root),
+    structural,
+    structuralEdit: timingStructuralCompatibility(root),
+    typewriterScrollActive: typewriterScroll.isScrolling(),
+    recordCount: records.length,
+    childListCount,
+    structuralGeneration: structuralSnapshot.generation,
+    structuralPhase: structuralSnapshot.phase,
+    structuralKind: structuralSnapshot.kind,
+    semanticClassification,
+    addedBlockIds: details.addedBlockIds,
+    removedBlockIds: details.removedBlockIds,
+    parentChanges: details.parentChanges,
+    anomaly,
+    anomalies: anomaly ? [anomaly] : [],
+  };
+}
+
+function timingStartState(
+  reason: string,
+  protyle: IProtyle | null,
+  root: HTMLElement | null,
+): Record<string, unknown> {
+  const selection = timingSelection();
+  return {
+    capture: { reason, profile: "timing", state: TIMING_START_STATE },
+    activeEditor: timingProtyleReference(protyle, root),
+    structural: timingStructuralState(),
+    selection,
+    currentBlockId: selection.anchorBlockId,
+    typewriterScrollActive: typewriterScroll.isScrolling(),
+  };
+}
+
 export function initDebugHook(eventBus: EventBus): DebugHookController {
   const sessionId = createSessionId();
   const recentEvents: DebugEnvelope[] = [];
   const pendingEvents: DebugEnvelope[] = [];
   const trackedRoots = new Map<HTMLElement, TrackedRoot>();
   const eventBusOffs: Array<() => void> = [];
-  const domEventListeners: Array<{ type: TrackedDomEventName; handler: EventListener }> = [];
+  const domEventListeners: Array<{ type: DomEventName; handler: EventListener }> = [];
   let sequence = 0;
   let enabled = true;
+  let profile: DebugProfile = "timing";
   let includeText = false;
   let destroyed = false;
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -866,6 +1068,14 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   let pendingSnapshotReason = "scheduled";
   let pendingSnapshotProtyle: IProtyle | null = null;
   let lastProtyle: IProtyle | null = null;
+  let timingProtyle: IProtyle | null = null;
+  let timingProtyleRoot: HTMLElement | null = null;
+  let timingObservedRoot: HTMLElement | null = null;
+  let timingObserver: MutationObserver | null = null;
+  let timingEvents = 0;
+  let forensicSnapshots = 0;
+  let mutationBatches = 0;
+  let serializedMutationRecords = 0;
   let unsubStructuralFinish: (() => void) | null = null;
 
   const globalObject = globalThis as unknown as Record<string, unknown>;
@@ -873,12 +1083,19 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   function state(): DebugHookState {
     return {
       enabled,
+      profile,
       includeText,
       sessionId,
       recentEventCount: recentEvents.length,
       pendingEventCount: pendingEvents.length,
-      observedRootCount: trackedRoots.size,
+      observedRootCount: profile === "timing"
+        ? (timingObserver ? 1 : 0)
+        : trackedRoots.size,
       bridgeUrl: BRIDGE_URL,
+      timingEvents,
+      forensicSnapshots,
+      mutationBatches,
+      serializedMutationRecords,
     };
   }
 
@@ -913,6 +1130,13 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     reason?: string,
   ): DebugEnvelope | null {
     if (destroyed) return null;
+    if (profile === "timing" && kind === "event") timingEvents += 1;
+    const debugCounters = {
+      timingEvents,
+      forensicSnapshots,
+      mutationBatches,
+      serializedMutationRecords,
+    };
     const envelope: DebugEnvelope = {
       schema: SCHEMA,
       sessionId,
@@ -923,6 +1147,7 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
       payload: {
         ...payload,
         monotonicMs: monotonicNow(),
+        debugCounters,
       },
     };
     recentEvents.push(envelope);
@@ -934,6 +1159,11 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   }
 
   function currentRoot(fallback?: Element | null): HTMLElement | null {
+    if (profile === "timing") {
+      if (timingProtyleRoot) return timingProtyleRoot;
+      if (fallback instanceof HTMLElement) return fallback;
+      return null;
+    }
     const active = protyleRoot(activeProtyle());
     if (active) return active;
     if (fallback instanceof HTMLElement) return fallback;
@@ -942,10 +1172,23 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   }
 
   function protyleForRoot(root: HTMLElement | null): IProtyle | null {
+    if (profile === "timing") {
+      return root === timingObservedRoot || root === timingProtyleRoot ? timingProtyle : null;
+    }
     return root ? trackedRoots.get(root)?.protyle ?? null : null;
   }
 
   function pruneRoots(): void {
+    if (profile === "timing") {
+      if (timingObservedRoot && !timingObservedRoot.isConnected) {
+        timingObserver?.disconnect();
+        timingObserver = null;
+        timingObservedRoot = null;
+        timingProtyleRoot = null;
+        timingProtyle = null;
+      }
+      return;
+    }
     for (const [root, tracked] of trackedRoots) {
       if (root.isConnected) continue;
       tracked.observer.disconnect();
@@ -955,6 +1198,13 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
 
   function onMutations(root: HTMLElement, records: MutationRecord[]): void {
     if (!enabled || destroyed || records.length === 0) return;
+    mutationBatches += 1;
+    if (profile === "timing") {
+      publish("event", timingMutationPayload(root, records), "mutation");
+      return;
+    }
+
+    serializedMutationRecords += Math.min(records.length, MAX_MUTATION_RECORDS);
     publish("event", {
       source: "mutation-observer",
       name: "mutation",
@@ -971,6 +1221,40 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
       omittedRecords: Math.max(0, records.length - MAX_MUTATION_RECORDS),
     }, "mutation");
     scheduleSnapshot("after-mutation", protyleForRoot(root));
+  }
+
+  function disconnectTimingObserver(): void {
+    timingObserver?.disconnect();
+    timingObserver = null;
+    timingObservedRoot = null;
+    timingProtyleRoot = null;
+    timingProtyle = null;
+  }
+
+  function attachTimingProtyle(protyle: IProtyle | null | undefined): HTMLElement | null {
+    const root = protyleRoot(protyle);
+    if (!root) {
+      disconnectTimingObserver();
+      return null;
+    }
+    const observedRoot = (root.querySelector?.(".protyle-wysiwyg") as HTMLElement | null) ?? root;
+    if (timingObserver && timingObservedRoot === observedRoot) {
+      timingProtyle = protyle ?? timingProtyle;
+      timingProtyleRoot = root;
+      return root;
+    }
+
+    disconnectTimingObserver();
+    timingProtyle = protyle ?? null;
+    timingProtyleRoot = root;
+    if (typeof MutationObserver === "undefined") return root;
+    timingObservedRoot = observedRoot;
+    timingObserver = new MutationObserver((records) => onMutations(observedRoot, records));
+    timingObserver.observe(observedRoot, {
+      subtree: true,
+      childList: true,
+    });
+    return root;
   }
 
   function trackRoot(root: HTMLElement, protyle: IProtyle | null): void {
@@ -1003,6 +1287,12 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   function trackProtyle(protyle: IProtyle | null | undefined): HTMLElement | null {
     const root = protyleRoot(protyle);
     if (!root) return null;
+    if (profile === "timing") {
+      const active = activeProtyle();
+      if (!active || active === protyle || !timingProtyleRoot) attachTimingProtyle(protyle);
+      if (protyle) lastProtyle = protyle;
+      return root;
+    }
     trackRoot(root, protyle ?? null);
     if (protyle) lastProtyle = protyle;
     return root;
@@ -1010,6 +1300,30 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
 
   function refreshRoots(): void {
     if (typeof document === "undefined") return;
+    if (profile === "timing") {
+      const active = activeProtyle();
+      if (active) {
+        attachTimingProtyle(active);
+        lastProtyle = active;
+        return;
+      }
+      const firstRoot = document.querySelectorAll<HTMLElement>(".protyle")[0] ?? null;
+      if (firstRoot) {
+        const firstWysiwyg = (firstRoot.querySelector?.(".protyle-wysiwyg") as HTMLElement | null) ?? firstRoot;
+        if (!timingObserver || timingObservedRoot !== firstWysiwyg) {
+          disconnectTimingObserver();
+          timingProtyleRoot = firstRoot;
+          timingObservedRoot = firstWysiwyg;
+          if (typeof MutationObserver !== "undefined") {
+            timingObserver = new MutationObserver((records) => onMutations(firstWysiwyg, records));
+            timingObserver.observe(firstWysiwyg, { subtree: true, childList: true });
+          }
+        }
+      } else {
+        disconnectTimingObserver();
+      }
+      return;
+    }
     for (const root of Array.from(document.querySelectorAll<HTMLElement>(".protyle"))) {
       trackRoot(root, trackedRoots.get(root)?.protyle ?? null);
     }
@@ -1021,6 +1335,12 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     if (typeof window === "undefined" || typeof window.getSelection !== "function") return false;
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return false;
+    if (profile === "timing") {
+      return !!timingProtyleRoot && (
+        safeRootContains(timingProtyleRoot, selection.anchorNode)
+        || safeRootContains(timingProtyleRoot, selection.focusNode)
+      );
+    }
     for (const root of trackedRoots.keys()) {
       if (safeRootContains(root, selection.anchorNode) || safeRootContains(root, selection.focusNode)) {
         return true;
@@ -1031,6 +1351,12 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
 
   function rootForEvent(event: Event): HTMLElement | null {
     const target = asElement(event.target);
+    if (profile === "timing") {
+      if (event.type === "selectionchange") return timingProtyleRoot;
+      return timingProtyleRoot && target && safeRootContains(timingProtyleRoot, target)
+        ? timingProtyleRoot
+        : null;
+    }
     const closest = target?.closest(".protyle") as HTMLElement | null;
     if (closest) {
       trackRoot(closest, trackedRoots.get(closest)?.protyle ?? null);
@@ -1043,6 +1369,9 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     if (event.type === "selectionchange") return selectionBelongsToTrackedRoot();
     const target = asNode(event.target);
     if (!target) return false;
+    if (profile === "timing") {
+      return !!timingProtyleRoot && safeRootContains(timingProtyleRoot, target);
+    }
     for (const root of trackedRoots.keys()) {
       if (safeRootContains(root, target)) return true;
     }
@@ -1101,7 +1430,13 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   function handleDomEvent(event: Event): void {
     if (!enabled || destroyed || !relevantEvent(event)) return;
     const root = rootForEvent(event);
-    publish("event", domEventPayload(event, root), event.type);
+    if (!root) return;
+    publish(
+      "event",
+      profile === "timing" ? timingEventPayload(event, root) : domEventPayload(event, root),
+      event.type,
+    );
+    if (profile === "timing") return;
     if (shouldScheduleAfterDomEvent(event)) {
       scheduleSnapshot(`after-${event.type}`, protyleForRoot(root));
     }
@@ -1151,6 +1486,35 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   function onStructuralEditFinish(finish: structuralEdit.StructuralEditFinish): void {
     if (!enabled || destroyed) return;
 
+    if (profile === "timing") {
+      const root = protyleRoot(activeProtyle()) ?? timingProtyleRoot;
+      publish("event", {
+        source: "structural-edit",
+        name: "structural-edit-finish",
+        generation: finish.generation,
+        kind: finish.kind,
+        stable: finish.stable,
+        transactionStartedAt: finish.transactionStartedAt,
+        lastActivityAt: finish.lastActivityAt,
+        finishedAt: finish.finishedAt,
+        quietFrames: finish.quietFrames,
+        settleFrames: finish.settleFrames,
+        structural: {
+          generation: finish.generation,
+          phase: "idle",
+          kind: null,
+        },
+        structuralStateAfterFinish: timingStructuralCompatibility(root),
+        finishEditor: nodeReference(finish.editor, root, false),
+        selection: timingSelection(),
+        currentBlockId: blockIdForNode(
+          typeof window !== "undefined" ? window.getSelection()?.anchorNode : null,
+        ),
+        typewriterScrollActive: typewriterScroll.isScrolling(),
+      }, "structural-edit-finish");
+      return;
+    }
+
     const active = activeProtyle();
     const activeRoot = protyleRoot(active);
     const root = activeRoot
@@ -1193,6 +1557,13 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
 
   function captureNow(reason = "manual", protyle?: IProtyle): void {
     if (!enabled || destroyed) return;
+    if (profile === "timing" && (reason === "hook-start" || reason === "enabled")) {
+      const active = activeProtyle();
+      const root = protyleRoot(active) ?? timingProtyleRoot;
+      publish("snapshot", timingStartState(reason, active ?? timingProtyle, root), reason);
+      return;
+    }
+    forensicSnapshots += 1;
     publish("snapshot", { ...createSnapshot(reason, protyle) }, reason);
   }
 
@@ -1210,7 +1581,7 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   }
 
   function scheduleSnapshot(reason: string, protyle: IProtyle | null): void {
-    if (!enabled || destroyed) return;
+    if (!enabled || destroyed || profile === "timing") return;
     pendingSnapshotReason = reason;
     pendingSnapshotProtyle = protyle ?? pendingSnapshotProtyle;
     const generation = ++snapshotGeneration;
@@ -1227,6 +1598,21 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   }
 
   function onLoadedStatic(event: CustomEvent<{ protyle: IProtyle }>): void {
+    if (profile === "timing") {
+      const active = activeProtyle();
+      if (!timingProtyleRoot || !active || active === event.detail.protyle) {
+        attachTimingProtyle(event.detail.protyle);
+      }
+      publish("event", {
+        source: "eventbus",
+        name: "loaded-protyle-static",
+        protyle: timingProtyleReference(
+          event.detail.protyle,
+          protyleRoot(event.detail.protyle),
+        ),
+      }, "loaded-protyle-static");
+      return;
+    }
     trackProtyle(event.detail.protyle);
     publish("event", {
       source: "eventbus",
@@ -1239,6 +1625,22 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   function onLoadedDynamic(
     event: CustomEvent<{ protyle: IProtyle; position: "afterend" | "beforebegin" }>,
   ): void {
+    if (profile === "timing") {
+      const active = activeProtyle();
+      if (!timingProtyleRoot || !active || active === event.detail.protyle) {
+        attachTimingProtyle(event.detail.protyle);
+      }
+      publish("event", {
+        source: "eventbus",
+        name: "loaded-protyle-dynamic",
+        position: event.detail.position,
+        protyle: timingProtyleReference(
+          event.detail.protyle,
+          protyleRoot(event.detail.protyle),
+        ),
+      }, "loaded-protyle-dynamic");
+      return;
+    }
     trackProtyle(event.detail.protyle);
     publish("event", {
       source: "eventbus",
@@ -1251,6 +1653,18 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
 
   function onSwitch(event: CustomEvent<{ protyle: IProtyle }>): void {
     lastProtyle = event.detail.protyle;
+    if (profile === "timing") {
+      attachTimingProtyle(event.detail.protyle);
+      publish("event", {
+        source: "eventbus",
+        name: "switch-protyle",
+        protyle: timingProtyleReference(
+          event.detail.protyle,
+          protyleRoot(event.detail.protyle),
+        ),
+      }, "switch-protyle");
+      return;
+    }
     trackProtyle(event.detail.protyle);
     publish("event", {
       source: "eventbus",
@@ -1261,6 +1675,7 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   }
 
   function onSwitchMode(event: CustomEvent<{ protyle: IProtyle }>): void {
+    if (profile === "timing") return;
     trackProtyle(event.detail.protyle);
     publish("event", {
       source: "eventbus",
@@ -1272,6 +1687,17 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
 
   function onDestroyProtyle(event: CustomEvent<{ protyle: IProtyle }>): void {
     const root = protyleRoot(event.detail.protyle);
+    if (profile === "timing") {
+      if (root && (root === timingProtyleRoot || root === timingObservedRoot)) {
+        disconnectTimingObserver();
+      }
+      publish("event", {
+        source: "eventbus",
+        name: "destroy-protyle",
+        protyle: timingProtyleReference(event.detail.protyle, root),
+      }, "destroy-protyle");
+      return;
+    }
     if (root) {
       const tracked = trackedRoots.get(root);
       tracked?.observer.disconnect();
@@ -1343,6 +1769,17 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   }
 
   function attachEventBus(): void {
+    if (profile === "timing") {
+      eventBus.on("loaded-protyle-static", onLoadedStatic);
+      eventBusOffs.push(() => eventBus.off("loaded-protyle-static", onLoadedStatic));
+      eventBus.on("loaded-protyle-dynamic", onLoadedDynamic);
+      eventBusOffs.push(() => eventBus.off("loaded-protyle-dynamic", onLoadedDynamic));
+      eventBus.on("switch-protyle", onSwitch);
+      eventBusOffs.push(() => eventBus.off("switch-protyle", onSwitch));
+      eventBus.on("destroy-protyle", onDestroyProtyle);
+      eventBusOffs.push(() => eventBus.off("destroy-protyle", onDestroyProtyle));
+      return;
+    }
     eventBus.on("loaded-protyle-static", onLoadedStatic);
     eventBusOffs.push(() => eventBus.off("loaded-protyle-static", onLoadedStatic));
     eventBus.on("loaded-protyle-dynamic", onLoadedDynamic);
@@ -1365,7 +1802,10 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
 
   function attachDomEvents(): void {
     if (typeof document === "undefined") return;
-    for (const type of DOM_EVENT_NAMES) {
+    const eventNames = profile === "timing"
+      ? TIMING_DOM_EVENT_NAMES
+      : FORENSIC_DOM_EVENT_NAMES;
+    for (const type of eventNames) {
       const handler: EventListener = handleDomEvent;
       document.addEventListener(type, handler, { capture: true, passive: true });
       domEventListeners.push({ type, handler });
@@ -1388,6 +1828,7 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     }
     for (const tracked of trackedRoots.values()) tracked.observer.disconnect();
     trackedRoots.clear();
+    disconnectTimingObserver();
     if (snapshotTimer !== null) {
       clearTimeout(snapshotTimer);
       snapshotTimer = null;
@@ -1413,6 +1854,18 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     captureNow("enabled");
   }
 
+  function setProfile(next: DebugProfile): void {
+    if (destroyed || profile === next) return;
+    profile = next;
+    detach();
+    if (!enabled) return;
+    refreshRoots();
+    attachDomEvents();
+    attachEventBus();
+    publish("status", { state: "profile-changed", ...state() }, "profile-changed");
+    captureNow("enabled");
+  }
+
   const controller: DebugHookController = {
     toggle(): boolean {
       setEnabled(!enabled);
@@ -1421,6 +1874,10 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     setEnabled,
     isEnabled(): boolean {
       return enabled;
+    },
+    setProfile,
+    getProfile(): DebugProfile {
+      return profile;
     },
     captureNow,
     toggleIncludeText(): boolean {
@@ -1455,6 +1912,8 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     getRecentEvents: () => controller.getRecentEvents(),
     getState: () => controller.getState(),
     setEnabled: (next) => controller.setEnabled(next),
+    setProfile: (next) => controller.setProfile(next),
+    getProfile: () => controller.getProfile(),
     setIncludeText: (next) => {
       includeText = next;
       publish("status", { state: "include-text-changed", ...state() }, "include-text-changed");

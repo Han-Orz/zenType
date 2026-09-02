@@ -1,6 +1,5 @@
 import http from "node:http";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   appendFile,
   mkdir,
@@ -9,6 +8,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
+import { createDebugSummary } from "./debug-summary.mjs";
 
 const SCHEMA = "zentype-debug/v1";
 const DEFAULT_PORT = 27369;
@@ -16,6 +16,8 @@ const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
 const MAX_ROTATED_LOGS = 3;
 const DEFAULT_OUTPUT_DIR = path.join(process.cwd(), ".debug");
+const SUMMARY_FILE_NAME = "siyuan-hook.summary.ndjson";
+const REPORT_FILE_NAME = "siyuan-hook.report.json";
 
 function jsonResponse(response, statusCode, body) {
   response.statusCode = statusCode;
@@ -72,7 +74,30 @@ async function rotateLogs(logPath) {
   }
 }
 
-async function appendEvents(outputDir, events) {
+async function appendSummaryRecords(summaryPath, records) {
+  if (!Array.isArray(records) || records.length === 0) return 0;
+  const text = `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
+  await appendFile(summaryPath, text, "utf8");
+  return records.length;
+}
+
+async function persistSummaryState(
+  outputDir,
+  summaryState,
+  writeReport = true,
+  summaryRecords = summaryState.drainFinalized(),
+) {
+  await mkdir(outputDir, { recursive: true });
+  const summaryPath = path.join(outputDir, SUMMARY_FILE_NAME);
+  const reportPath = path.join(outputDir, REPORT_FILE_NAME);
+  const summaryAccepted = await appendSummaryRecords(summaryPath, summaryRecords);
+  if (writeReport) {
+    await writeFile(reportPath, `${JSON.stringify(summaryState.getReport(), null, 2)}\n`, "utf8");
+  }
+  return { summaryAccepted, summaryPath, reportPath };
+}
+
+export async function appendEvents(outputDir, events, summarySessions = new Map()) {
   if (!Array.isArray(events) || events.length === 0) {
     throw new Error("payload.events must be a non-empty array");
   }
@@ -100,10 +125,41 @@ async function appendEvents(outputDir, events) {
   if (latestSnapshot) {
     await writeFile(latestPath, `${JSON.stringify(latestSnapshot, null, 2)}\n`, "utf8");
   }
+  let latestSessionId = null;
+  let summaryAccepted = 0;
+  for (const event of validEvents) {
+    const sessionId = typeof event.sessionId === "string" && event.sessionId.length > 0
+      ? event.sessionId
+      : "unknown";
+    let summaryState = summarySessions.get(sessionId);
+    if (!summaryState) {
+      summaryState = createDebugSummary(sessionId);
+      summarySessions.set(sessionId, summaryState);
+    }
+    const finalized = summaryState.accept(event);
+    const persisted = await persistSummaryState(
+      outputDir,
+      summaryState,
+      false,
+      finalized,
+    );
+    summaryAccepted += persisted.summaryAccepted;
+    latestSessionId = sessionId;
+  }
+  const latestSummaryState = latestSessionId ? summarySessions.get(latestSessionId) : null;
+  const summaryPath = path.join(outputDir, SUMMARY_FILE_NAME);
+  const reportPath = path.join(outputDir, REPORT_FILE_NAME);
+  if (latestSummaryState) {
+    await writeFile(reportPath, `${JSON.stringify(latestSummaryState.getReport(), null, 2)}\n`, "utf8");
+  }
   return {
     accepted: validEvents.length,
     logPath,
     latestPath,
+    summaryAccepted,
+    summaryPath,
+    reportPath,
+    latestSessionId,
   };
 }
 
@@ -134,6 +190,42 @@ export function parseArgs(argv) {
 
 export function createDebugBridge({ port = DEFAULT_PORT, outputDir = DEFAULT_OUTPUT_DIR } = {}) {
   let writeQueue = Promise.resolve();
+  let latestSessionId = null;
+  const summarySessions = new Map();
+  const summaryTimers = new Map();
+
+  const enqueueSummaryFinalization = (sessionId) => {
+    const existingTimer = summaryTimers.get(sessionId);
+    if (existingTimer) clearTimeout(existingTimer);
+    const summaryState = summarySessions.get(sessionId);
+    const dueAt = summaryState?.nextFinalizationAt();
+    const delay = summaryState?.nextFinalizationDelayMs();
+    if (dueAt === null || delay === null) {
+      summaryTimers.delete(sessionId);
+      return;
+    }
+    const timer = setTimeout(() => {
+      summaryTimers.delete(sessionId);
+      writeQueue = writeQueue
+        .catch(() => undefined)
+        .then(async () => {
+          const current = summarySessions.get(sessionId);
+          if (!current) return;
+          const currentDueAt = current.nextFinalizationAt();
+          if (currentDueAt !== null && currentDueAt <= dueAt) {
+            current.finalizeDue(dueAt);
+          }
+          await persistSummaryState(
+            outputDir,
+            current,
+            sessionId === latestSessionId,
+          );
+          enqueueSummaryFinalization(sessionId);
+        });
+    }, delay);
+    summaryTimers.set(sessionId, timer);
+  };
+
   const server = http.createServer((request, response) => {
     setCorsHeaders(response);
     if (request.method === "OPTIONS") {
@@ -147,6 +239,7 @@ export function createDebugBridge({ port = DEFAULT_PORT, outputDir = DEFAULT_OUT
         ok: true,
         port,
         outputDir,
+        summaryEnabled: true,
       });
       return;
     }
@@ -161,7 +254,17 @@ export function createDebugBridge({ port = DEFAULT_PORT, outputDir = DEFAULT_OUT
         const events = Array.isArray(payload) ? payload : payload?.events;
         writeQueue = writeQueue
           .catch(() => undefined)
-          .then(() => appendEvents(outputDir, events));
+          .then(async () => {
+            const result = await appendEvents(outputDir, events, summarySessions);
+            if (result.latestSessionId) latestSessionId = result.latestSessionId;
+            for (const event of events ?? []) {
+              const sessionId = typeof event?.sessionId === "string" && event.sessionId.length > 0
+                ? event.sessionId
+                : "unknown";
+              enqueueSummaryFinalization(sessionId);
+            }
+            return result;
+          });
         return writeQueue;
       })
       .then((result) => jsonResponse(response, 202, result))
@@ -190,6 +293,8 @@ export function createDebugBridge({ port = DEFAULT_PORT, outputDir = DEFAULT_OUT
     },
     stop() {
       return new Promise((resolve, reject) => {
+        for (const timer of summaryTimers.values()) clearTimeout(timer);
+        summaryTimers.clear();
         if (!server.listening) {
           resolve();
           return;
@@ -202,11 +307,11 @@ export function createDebugBridge({ port = DEFAULT_PORT, outputDir = DEFAULT_OUT
 
 function printHelp() {
   console.log("Usage: pnpm run debug:bridge [--port 27369] [--dir .debug]");
-  console.log("Listens only on 127.0.0.1 and writes siyuan-hook.latest.json + siyuan-hook.ndjson.");
+  console.log("Listens only on 127.0.0.1 and writes raw, summary, report, and latest snapshot files.");
 }
 
 const isMain = process.argv[1]
-  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  && path.basename(process.argv[1]) === "debug-bridge.mjs";
 
 if (isMain) {
   let options;

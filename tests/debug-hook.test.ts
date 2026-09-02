@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setActiveEditor } from "siyuan";
 import type { EventBus } from "siyuan";
 import {
   initDebugHook,
@@ -178,11 +179,20 @@ class FakeRafQueue {
 }
 
 class FakeMutationObserver {
+  target: object | null = null;
+  options: MutationObserverInit | null = null;
+  disconnectCount = 0;
+
   constructor(readonly callback: (records: MutationRecord[]) => void) {}
 
-  observe(_target: object): void {}
+  observe(target: object, options?: MutationObserverInit): void {
+    this.target = target;
+    this.options = options ?? null;
+  }
 
-  disconnect(): void {}
+  disconnect(): void {
+    this.disconnectCount += 1;
+  }
 }
 
 class FakeEventBus {
@@ -197,6 +207,10 @@ class FakeEventBus {
   off(name: string, listener: (event: unknown) => void): void {
     this.listeners.get(name)?.delete(listener);
   }
+
+  emit(name: string, event: unknown): void {
+    for (const listener of [...(this.listeners.get(name) ?? [])]) listener(event);
+  }
 }
 
 class FakeRuntime {
@@ -205,6 +219,7 @@ class FakeRuntime {
   now = 0;
   readonly raf = new FakeRafQueue(() => this.now);
   readonly mutationObservers: FakeMutationObserver[] = [];
+  computedStyleCalls = 0;
   private readonly originalGlobals = new Map<string, PropertyDescriptor | undefined>();
 
   install(): void {
@@ -223,7 +238,9 @@ class FakeRuntime {
         runtime.mutationObservers.push(this);
       }
     });
-    this.defineGlobal("getComputedStyle", () => ({
+    this.defineGlobal("getComputedStyle", () => {
+      this.computedStyleCalls += 1;
+      return {
       display: "block",
       position: "static",
       opacity: "1",
@@ -242,7 +259,8 @@ class FakeRuntime {
       padding: "0px",
       pointerEvents: "auto",
       getPropertyValue: () => "",
-    }));
+      };
+    });
     this.defineGlobal("fetch", () => Promise.resolve({}));
   }
 
@@ -275,6 +293,7 @@ function setup(): FakeRuntime {
 
 function teardown(runtime: FakeRuntime): void {
   structuralEdit.destroyStructuralEditCoordinator();
+  setActiveEditor(null);
   runtime.restore();
 }
 
@@ -441,6 +460,99 @@ test("disabled debug hook does not inspect a structural editor at finish", () =>
     runtime.now = 48;
     runtime.raf.flushNext();
     assert.equal(accessed, false);
+  } finally {
+    controller.destroy();
+    teardown(runtime);
+  }
+});
+
+test("timing profile is the default, observes one active WYSIWYG, and stays cheap", () => {
+  const runtime = setup();
+  const root = new FakeElement("DIV", { class: "protyle" });
+  const editor = new FakeElement("DIV", { class: "protyle-wysiwyg", "data-type": "protyle-wysiwyg" });
+  root.appendChild(editor);
+  runtime.document.roots = [root];
+  const protyle = { element: root };
+  setActiveEditor({ protyle });
+  const controller = initDebugHook(new FakeEventBus() as unknown as EventBus);
+
+  try {
+    assert.equal(controller.getProfile(), "timing");
+    assert.equal(controller.getState().observedRootCount, 1);
+    const observer = runtime.mutationObservers[0];
+    assert.equal(observer.target, editor);
+    assert.deepEqual(observer.options, { subtree: true, childList: true });
+    assert.equal(runtime.computedStyleCalls, 0);
+
+    runtime.document.dispatch("input", {
+      type: "input",
+      target: editor,
+      inputType: "insertText",
+      isComposing: false,
+      composedPath: () => [editor, root],
+    } as unknown as Event);
+    observer.callback([{
+      type: "childList",
+      target: editor,
+      attributeName: null,
+      oldValue: null,
+      addedNodes: [],
+      removedNodes: [],
+    } as unknown as MutationRecord]);
+
+    const events = controller.getRecentEvents();
+    const inputEvent = events.find((event) => event.payload.name === "input");
+    const mutationEvent = events.find((event) => event.payload.name === "mutation");
+    assert.ok(inputEvent);
+    assert.ok(mutationEvent);
+    assert.equal("dom" in inputEvent.payload, false);
+    assert.equal("records" in mutationEvent.payload, false);
+    assert.equal("computed" in mutationEvent.payload, false);
+    assert.equal(runtime.computedStyleCalls, 0);
+    assert.equal(controller.getState().timingEvents >= 2, true);
+    assert.equal(controller.getState().mutationBatches, 1);
+  } finally {
+    controller.destroy();
+    teardown(runtime);
+  }
+});
+
+test("timing observer follows the active Protyle and forensic restores rich observation", () => {
+  const runtime = setup();
+  const rootA = new FakeElement("DIV", { class: "protyle" });
+  const editorA = new FakeElement("DIV", { class: "protyle-wysiwyg", "data-type": "protyle-wysiwyg" });
+  rootA.appendChild(editorA);
+  const rootB = new FakeElement("DIV", { class: "protyle" });
+  const editorB = new FakeElement("DIV", { class: "protyle-wysiwyg", "data-type": "protyle-wysiwyg" });
+  rootB.appendChild(editorB);
+  runtime.document.roots = [rootA, rootB];
+  const protyleA = { element: rootA };
+  const protyleB = { element: rootB };
+  setActiveEditor({ protyle: protyleA });
+  const eventBus = new FakeEventBus();
+  const controller = initDebugHook(eventBus as unknown as EventBus);
+
+  try {
+    const firstTimingObserver = runtime.mutationObservers[0];
+    setActiveEditor({ protyle: protyleB });
+    eventBus.emit("switch-protyle", { detail: { protyle: protyleB } });
+    assert.equal(firstTimingObserver.disconnectCount, 1);
+    assert.equal(controller.getState().observedRootCount, 1);
+    assert.equal(runtime.mutationObservers[1].target, editorB);
+    assert.deepEqual(runtime.mutationObservers[1].options, { subtree: true, childList: true });
+
+    controller.setProfile("forensic");
+    assert.equal(controller.getProfile(), "forensic");
+    assert.equal(controller.getState().observedRootCount, 2);
+    const forensicObserver = runtime.mutationObservers[2];
+    assert.equal(forensicObserver.target, rootA);
+    assert.equal(forensicObserver.options?.attributes, true);
+    assert.equal(forensicObserver.options?.characterData, true);
+    assert.equal(forensicObserver.options?.attributeOldValue, true);
+
+    controller.setProfile("timing");
+    assert.equal(controller.getState().observedRootCount, 1);
+    assert.deepEqual(runtime.mutationObservers[4].options, { subtree: true, childList: true });
   } finally {
     controller.destroy();
     teardown(runtime);
