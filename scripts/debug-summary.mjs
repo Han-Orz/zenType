@@ -66,27 +66,53 @@ function arrayOfStrings(value) {
 }
 
 function blockIdsForPayload(payload) {
+  const parentBlockIds = [];
+  for (const change of Array.isArray(payload.parentChanges) ? payload.parentChanges : []) {
+    const candidate = asRecord(change);
+    if (typeof candidate.blockId === "string") parentBlockIds.push(candidate.blockId);
+  }
   return uniqueBounded([
     ...arrayOfStrings(payload.addedBlockIds),
     ...arrayOfStrings(payload.removedBlockIds),
     typeof payload.currentBlockId === "string" ? payload.currentBlockId : "",
+    ...parentBlockIds,
   ]);
 }
 
 function contextBlockIdsForPayload(payload) {
   const selection = asRecord(payload.selection);
   const finishEditor = asRecord(payload.finishEditor);
+  const parentChangeIds = [];
+  for (const change of Array.isArray(payload.parentChanges) ? payload.parentChanges : []) {
+    const candidate = asRecord(change);
+    for (const key of ["blockId", "fromParentId", "toParentId"]) {
+      if (typeof candidate[key] === "string") parentChangeIds.push(candidate[key]);
+    }
+  }
   return uniqueBounded([
     ...blockIdsForPayload(payload),
     typeof selection.anchorBlockId === "string" ? selection.anchorBlockId : "",
     typeof selection.focusBlockId === "string" ? selection.focusBlockId : "",
     typeof finishEditor.nodeId === "string" ? finishEditor.nodeId : "",
+    ...parentChangeIds,
   ]);
 }
 
-function generationOf(payload) {
+function tokenGenerationOf(payload) {
   const state = structuralStateOf(payload);
   return state.generation > 0 ? state.generation : null;
+}
+
+function activeGenerationOf(payload) {
+  const state = structuralStateOf(payload);
+  return state.phase !== "idle" && state.generation > 0
+    ? state.generation
+    : null;
+}
+
+function explicitGenerationOf(payload) {
+  const generation = finiteNumber(payload.generation);
+  return generation !== null && generation > 0 ? generation : null;
 }
 
 function operationName(payload) {
@@ -137,7 +163,29 @@ class StructuralAccumulator {
     this.anomalyDetails = [];
     this.status = "pending";
     this.pendingFinalizationAt = null;
-    this.observationFinalizationAt = null;
+    this.emitted = false;
+  }
+}
+
+class StructuralObservationAccumulator {
+  constructor(observationId, at) {
+    this.observationId = observationId;
+    this.firstObservedAt = at;
+    this.lastActivityAt = at;
+    this.mutationBatches = 0;
+    this.childListRecords = 0;
+    this.structuralMutationCount = 0;
+    this.blockIds = new Set();
+    this.addedBlockIds = new Set();
+    this.removedBlockIds = new Set();
+    this.contextBlockIds = new Set();
+    this.parentChanges = [];
+    this.parentChangeKeys = new Set();
+    this.anomalies = [];
+    this.anomalyDetails = [];
+    this.status = "observed";
+    this.pendingFinalizationAt = null;
+    this.finalizeAt = null;
     this.emitted = false;
   }
 }
@@ -148,6 +196,7 @@ export class DebugSummarySession {
     this.lateWindowMs = finiteNumber(options.lateWindowMs)
       ?? LATE_SEMANTIC_MUTATION_WINDOW_MS;
     this.transactions = new Map();
+    this.observations = new Map();
     this.finalized = [];
     this.allFinalized = [];
     this.lastObservedAt = null;
@@ -160,6 +209,7 @@ export class DebugSummarySession {
     this.pendingBackspace = null;
     this.ime = null;
     this.activeGeneration = 0;
+    this.nextObservationId = 1;
   }
 
   accept(envelope) {
@@ -168,9 +218,14 @@ export class DebugSummarySession {
     this.finalizeDue(at);
     this.lastObservedAt = at;
     this.captureCounters(envelope);
+    const payload = payloadOf(envelope);
+    const state = structuralStateOf(payload);
+    const activeGeneration = activeGenerationOf(payload);
+    if (activeGeneration !== null) {
+      this.ensureTransaction(activeGeneration, payload.kind ?? state.kind, at);
+    }
     if (envelope.kind !== "event") return this.drainFinalized();
 
-    const payload = payloadOf(envelope);
     const name = operationName(payload);
     switch (name) {
       case "structural-edit-begin":
@@ -213,13 +268,14 @@ export class DebugSummarySession {
   nextFinalizationAt() {
     let next = null;
     for (const accumulator of this.transactions.values()) {
-      for (const candidate of [
-        accumulator.pendingFinalizationAt,
-        accumulator.observationFinalizationAt,
-      ]) {
-        if (candidate === null) continue;
-        if (next === null || candidate < next) next = candidate;
-      }
+      const candidate = accumulator.pendingFinalizationAt;
+      if (candidate === null) continue;
+      if (next === null || candidate < next) next = candidate;
+    }
+    for (const observation of this.observations.values()) {
+      const candidate = observation.pendingFinalizationAt;
+      if (candidate === null) continue;
+      if (next === null || candidate < next) next = candidate;
     }
     if (this.pendingBackspace) {
       const candidate = this.pendingBackspace.lastAt + this.lateWindowMs;
@@ -244,12 +300,15 @@ export class DebugSummarySession {
         && accumulator.pendingFinalizationAt <= time
       ) {
         this.finalizeTransaction(accumulator, accumulator.status);
-      } else if (
-        accumulator.finishedAt === null
-        && accumulator.observationFinalizationAt !== null
-        && accumulator.observationFinalizationAt <= time
+      }
+    }
+    for (const observation of this.observations.values()) {
+      if (
+        !observation.emitted
+        && observation.pendingFinalizationAt !== null
+        && observation.pendingFinalizationAt <= time
       ) {
-        this.finalizeTransaction(accumulator, "observed");
+        this.finalizeObservation(observation);
       }
     }
     if (
@@ -268,6 +327,9 @@ export class DebugSummarySession {
           this.finalizeTransaction(accumulator, accumulator.finishedAt === null ? "observed" : accumulator.status);
         }
       }
+      for (const observation of this.observations.values()) {
+        if (!observation.emitted) this.finalizeObservation(observation);
+      }
       if (this.pendingBackspace) this.finalizeBackspace();
     }
     return this.drainFinalized();
@@ -275,6 +337,9 @@ export class DebugSummarySession {
 
   getReport() {
     const structuralRecords = this.allFinalized.filter((record) => record.operation === "structural");
+    const structuralObservations = this.allFinalized.filter(
+      (record) => record.operation === "structural-observation",
+    );
     const completed = structuralRecords.filter((record) => record.status === "completed");
     const elapsed = completed.map((record) => record.elapsedMs).filter((value) => value !== null);
     const quiet = completed.map((record) => record.quietMs).filter((value) => value !== null);
@@ -285,11 +350,14 @@ export class DebugSummarySession {
     const report = {
       sessionId: this.sessionId,
       transactions: structuralRecords.length,
+      structuralObservations: structuralObservations.length,
       stable: completed.filter((record) => record.stable === true).length,
       unstable: completed.filter((record) => record.stable === false).length,
       superseded: structuralRecords.filter((record) => record.status === "superseded").length,
       ordinaryEdits: this.allFinalized.filter((record) => (
-        record.operation === "character-backspace" || record.operation === "ime"
+        record.operation === "backspace"
+        || record.operation === "character-backspace"
+        || record.operation === "ime"
       )).length,
       timing: {
         minElapsedMs: elapsed.length > 0 ? Math.min(...elapsed) : null,
@@ -330,7 +398,6 @@ export class DebugSummarySession {
       ) {
         accumulator.status = "superseded";
         accumulator.pendingFinalizationAt = null;
-        accumulator.observationFinalizationAt = null;
         this.finalizeTransaction(accumulator, "superseded", at);
       }
     }
@@ -351,7 +418,8 @@ export class DebugSummarySession {
   }
 
   findLateContextAccumulator(payload, at) {
-    const generation = generationOf(payload);
+    const state = structuralStateOf(payload);
+    const generation = tokenGenerationOf(payload);
     const blockIds = contextBlockIdsForPayload(payload);
     for (const accumulator of this.transactions.values()) {
       if (
@@ -360,8 +428,10 @@ export class DebugSummarySession {
         || at <= accumulator.finishedAt
         || at > accumulator.finishedAt + this.lateWindowMs
       ) continue;
-      if (generation === accumulator.generation) return accumulator;
-      if (blockIds.some((id) => accumulator.contextBlockIds.has(id))) return accumulator;
+      if (state.phase !== "idle" && generation === accumulator.generation) return accumulator;
+      if (state.phase === "idle" && blockIds.some((id) => accumulator.contextBlockIds.has(id))) {
+        return accumulator;
+      }
     }
     return null;
   }
@@ -377,7 +447,7 @@ export class DebugSummarySession {
     if (!duplicate) accumulator.anomalyDetails.push({ code, at, blockIds: ids });
   }
 
-  updateAccumulatorFromMutation(accumulator, payload, at, state) {
+  recordMutationData(accumulator, payload, at) {
     accumulator.mutationBatches += 1;
     const childListRecords = finiteNumber(payload.childListCount);
     accumulator.childListRecords += childListRecords ?? finiteNumber(payload.recordCount) ?? 0;
@@ -391,36 +461,55 @@ export class DebugSummarySession {
     for (const id of contextBlockIdsForPayload(payload)) {
       if (accumulator.contextBlockIds.size < MAX_IDS) accumulator.contextBlockIds.add(id);
     }
+    if (accumulator.blockIds) {
+      for (const id of blockIdsForPayload(payload)) {
+        if (accumulator.blockIds.size < MAX_IDS) accumulator.blockIds.add(id);
+      }
+    }
     addParentChanges(accumulator, payload.parentChanges);
+  }
+
+  updateAccumulatorFromMutation(accumulator, payload, at, state, options = {}) {
+    this.recordMutationData(accumulator, payload, at);
 
     if (payload.semanticClassification === "structural") {
       accumulator.structuralMutationCount += 1;
       const blocks = blockIdsForPayload(payload);
-      if (state.phase === "idle") {
-        this.addAnomaly(accumulator, "IDLE_SEMANTIC_MUTATION", at, blocks);
-        if (accumulator.finishedAt === null) {
-          accumulator.observationFinalizationAt = at + this.lateWindowMs;
-        }
-      }
-      if (
-        accumulator.finishedAt !== null
-        && at > accumulator.finishedAt
-        && at <= accumulator.finishedAt + this.lateWindowMs
-      ) {
+      if (options.late) {
         this.addAnomaly(accumulator, "LATE_SEMANTIC_MUTATION", at, blocks);
+      } else if (state.phase === "idle") {
+        this.addAnomaly(accumulator, "IDLE_SEMANTIC_MUTATION", at, blocks);
       }
       this.markBackspaceStructural(accumulator.generation, blocks);
       this.markImeStructural(accumulator.generation);
     } else if (payload.semanticClassification === "representation") {
       accumulator.representationMutationCount += 1;
+      this.noteBackspaceTransaction(accumulator.generation, accumulator.kind, at);
       this.markBackspaceRepresentation();
       this.markImeRepresentation();
     }
   }
 
+  ensureStructuralObservation(at) {
+    const observationId = `idle-${this.nextObservationId}`;
+    this.nextObservationId += 1;
+    const observation = new StructuralObservationAccumulator(observationId, at);
+    this.observations.set(observationId, observation);
+    return observation;
+  }
+
+  updateStructuralObservation(observation, payload, at, state) {
+    this.recordMutationData(observation, payload, at);
+    if (payload.semanticClassification !== "structural") return;
+    observation.structuralMutationCount += 1;
+    this.addAnomaly(observation, "IDLE_SEMANTIC_MUTATION", at, blockIdsForPayload(payload));
+    observation.pendingFinalizationAt = at + this.lateWindowMs;
+    observation.finalizeAt = observation.pendingFinalizationAt;
+  }
+
   handleStructuralBegin(payload, at) {
     const state = structuralStateOf(payload);
-    const generation = generationOf(payload);
+    const generation = explicitGenerationOf(payload) ?? activeGenerationOf(payload);
     const accumulator = this.ensureTransaction(generation, payload.kind ?? state.kind, at);
     if (!accumulator) return;
     accumulator.firstObservedAt = finiteNumber(payload.transactionStartedAt) ?? accumulator.firstObservedAt;
@@ -429,14 +518,15 @@ export class DebugSummarySession {
 
   handleStructuralActivity(payload, at) {
     const state = structuralStateOf(payload);
-    const accumulator = this.ensureTransaction(generationOf(payload), state.kind, at);
+    const generation = explicitGenerationOf(payload) ?? activeGenerationOf(payload);
+    const accumulator = this.ensureTransaction(generation, payload.kind ?? state.kind, at);
     if (!accumulator) return;
     accumulator.lastActivityAt = finiteNumber(payload.lastActivityAt) ?? at;
   }
 
   handleStructuralFinish(payload, at) {
     const state = structuralStateOf(payload);
-    const generation = finiteNumber(payload.generation) ?? generationOf(payload);
+    const generation = explicitGenerationOf(payload) ?? tokenGenerationOf(payload);
     const accumulator = this.ensureTransaction(generation, payload.kind ?? state.kind, at);
     if (!accumulator || accumulator.status === "superseded") return;
     const startedAt = finiteNumber(payload.transactionStartedAt);
@@ -456,47 +546,79 @@ export class DebugSummarySession {
       : Math.max(0, finishedAt - accumulator.firstObservedAt);
     accumulator.settleFrames = finiteNumber(payload.settleFrames);
     accumulator.status = "completed";
-    accumulator.observationFinalizationAt = null;
     accumulator.pendingFinalizationAt = finishedAt + this.lateWindowMs;
-    this.markBackspaceStructural(generation, []);
-    this.markImeStructural(generation);
+    if ((payload.kind ?? state.kind) === "backspace") {
+      this.noteBackspaceTransaction(generation, payload.kind ?? state.kind, at);
+    }
   }
 
   handleMutation(payload, at) {
     const state = structuralStateOf(payload);
-    const generation = generationOf(payload);
-    const lateContext = this.findLateContextAccumulator(payload, at);
-    if (
-      lateContext
-      && generation !== lateContext.generation
-      && payload.semanticClassification === "structural"
-    ) {
-      this.updateAccumulatorFromMutation(lateContext, payload, at, state);
-      return;
+    if (payload.semanticClassification === "structural") {
+      const lateContext = this.findLateContextAccumulator(payload, at);
+      if (lateContext) {
+        this.updateAccumulatorFromMutation(lateContext, payload, at, state, { late: true });
+        return;
+      }
+      if (state.phase === "idle") {
+        const observation = this.ensureStructuralObservation(at);
+        this.updateStructuralObservation(observation, payload, at, state);
+        return;
+      }
     }
-    const hasStructuralContext = generation !== null && (
-      state.phase !== "idle" || payload.semanticClassification === "structural"
-    );
-    const accumulator = hasStructuralContext
-      ? this.ensureTransaction(generation, state.kind, at)
-      : null;
-    if (accumulator) this.updateAccumulatorFromMutation(accumulator, payload, at, state);
-    else if (payload.semanticClassification === "representation") {
+
+    const generation = activeGenerationOf(payload);
+    const accumulator = generation === null
+      ? null
+      : this.ensureTransaction(generation, state.kind, at);
+    if (accumulator) {
+      this.updateAccumulatorFromMutation(accumulator, payload, at, state);
+    } else if (payload.semanticClassification === "representation") {
       this.markBackspaceRepresentation();
       this.markImeRepresentation();
-    } else if (payload.semanticClassification === "structural") {
-      const observation = this.ensureTransaction(generation, state.kind, at);
-      if (observation) this.updateAccumulatorFromMutation(observation, payload, at, state);
     }
   }
 
   handleSelectionChange(payload, at) {
     const state = structuralStateOf(payload);
     if (state.phase === "idle") return;
-    const accumulator = this.ensureTransaction(generationOf(payload), state.kind, at);
+    const accumulator = this.ensureTransaction(activeGenerationOf(payload), state.kind, at);
     if (!accumulator) return;
     accumulator.selectionChanges += 1;
     accumulator.lastActivityAt = at;
+  }
+
+  noteBackspaceTransaction(generation, kind = null, at = this.lastObservedAt ?? 0) {
+    if (!this.pendingBackspace || generation === null) return null;
+    let detail = this.pendingBackspace.structuralTransactions.get(generation);
+    if (!detail) {
+      detail = {
+        generation,
+        kind: null,
+        structuralMutationCount: 0,
+        semanticStructural: false,
+        blockIds: new Set(),
+      };
+      this.pendingBackspace.structuralTransactions.set(generation, detail);
+    }
+    this.pendingBackspace.structuralGenerations.add(generation);
+    const accumulator = this.transactions.get(generation);
+    const resolvedKind = kind ?? accumulator?.kind ?? null;
+    if (resolvedKind && (!detail.kind || detail.kind === "unknown")) detail.kind = resolvedKind;
+    if (accumulator && accumulator.kind && accumulator.kind !== "unknown") {
+      detail.kind = accumulator.kind;
+      detail.structuralMutationCount = Math.max(
+        detail.structuralMutationCount,
+        accumulator.structuralMutationCount,
+      );
+    } else if (accumulator) {
+      detail.structuralMutationCount = Math.max(
+        detail.structuralMutationCount,
+        accumulator.structuralMutationCount,
+      );
+    }
+    this.pendingBackspace.lastAt = at;
+    return detail;
   }
 
   handleKeydown(payload, at) {
@@ -510,9 +632,10 @@ export class DebugSummarySession {
       inputSeen: false,
       representationMutation: false,
       structuralGenerations: new Set(),
+      structuralTransactions: new Map(),
       structuralMutationCount: 0,
       blockId: typeof payload.currentBlockId === "string" ? payload.currentBlockId : null,
-      generationAtKeydown: state.generation,
+      generationAtKeydown: tokenGenerationOf(payload),
     };
   }
 
@@ -527,9 +650,10 @@ export class DebugSummarySession {
         inputSeen: true,
         representationMutation: false,
         structuralGenerations: new Set(),
+        structuralTransactions: new Map(),
         structuralMutationCount: 0,
         blockId: typeof payload.currentBlockId === "string" ? payload.currentBlockId : null,
-        generationAtKeydown: state.generation,
+        generationAtKeydown: tokenGenerationOf(payload),
       };
     } else {
       this.pendingBackspace.inputAt = at;
@@ -539,8 +663,9 @@ export class DebugSummarySession {
         this.pendingBackspace.blockId = payload.currentBlockId;
       }
     }
-    if (state.generation > 0 && state.phase !== "idle") {
-      this.pendingBackspace.structuralGenerations.add(state.generation);
+    const generation = activeGenerationOf(payload);
+    if (generation !== null) {
+      this.noteBackspaceTransaction(generation, state.kind, at);
     }
   }
 
@@ -583,7 +708,16 @@ export class DebugSummarySession {
 
   markBackspaceStructural(generation, blockIds) {
     if (!this.pendingBackspace || generation === null) return;
-    this.pendingBackspace.structuralGenerations.add(generation);
+    const detail = this.noteBackspaceTransaction(
+      generation,
+      this.transactions.get(generation)?.kind ?? null,
+      this.lastObservedAt ?? 0,
+    );
+    if (!detail) return;
+    detail.semanticStructural = true;
+    for (const id of blockIds) {
+      if (detail.blockIds.size < MAX_IDS) detail.blockIds.add(id);
+    }
     this.pendingBackspace.structuralMutationCount += 1;
     this.pendingBackspace.lastAt = this.lastObservedAt ?? this.pendingBackspace.lastAt;
     if (!this.pendingBackspace.blockId) this.pendingBackspace.blockId = blockIds[0] ?? null;
@@ -608,10 +742,31 @@ export class DebugSummarySession {
     if (!operation) return;
     this.pendingBackspace = null;
     if (!operation.inputSeen) return;
-    const anomalies = [];
-    const structural = operation.structuralGenerations.size > 0;
-    if (structural) anomalies.push("CHAR_BACKSPACE_STRUCTURAL_FALSE_POSITIVE");
-    const anomalyDetails = structural
+    const transactions = [...operation.structuralTransactions.values()].map((transaction) => ({
+      generation: transaction.generation,
+      kind: transaction.kind ?? "unknown",
+      structuralMutationCount: transaction.structuralMutationCount,
+      semanticStructural: transaction.semanticStructural,
+      blockIds: [...transaction.blockIds],
+    }));
+    const hasStructuralTransaction = transactions.length > 0;
+    const hasSemanticStructuralMutation = transactions.some(
+      (transaction) => transaction.semanticStructural,
+    );
+    const hasBlockStructuralBackspace = transactions.some(
+      (transaction) => transaction.kind === "backspace" && transaction.semanticStructural,
+    );
+    const hasBackspaceTransaction = transactions.some((transaction) => transaction.kind === "backspace");
+    const falsePositive = hasBackspaceTransaction && !hasSemanticStructuralMutation;
+    const classification = hasBlockStructuralBackspace
+      ? "block-structural"
+      : hasSemanticStructuralMutation
+        ? "ambiguous"
+        : "character";
+    const anomalies = falsePositive
+      ? ["CHAR_BACKSPACE_STRUCTURAL_FALSE_POSITIVE"]
+      : [];
+    const anomalyDetails = falsePositive
       ? [{
         code: "CHAR_BACKSPACE_STRUCTURAL_FALSE_POSITIVE",
         at: operation.inputAt ?? operation.lastAt,
@@ -620,14 +775,21 @@ export class DebugSummarySession {
       : [];
     this.queueFinalized({
       sessionId: this.sessionId,
-      operation: "character-backspace",
-      structural,
-      expectedStructural: false,
-      semanticMutation: operation.representationMutation ? "representation" : "none",
+      operation: "backspace",
+      classification,
+      structural: hasStructuralTransaction || hasSemanticStructuralMutation,
+      expectedStructural: classification === "block-structural"
+        ? true
+        : classification === "ambiguous" ? null : false,
+      semanticMutation: hasSemanticStructuralMutation
+        ? "structural"
+        : operation.representationMutation ? "representation" : "none",
       keydownAt: operation.keydownAt,
       inputAt: operation.inputAt,
       blockId: operation.blockId,
       structuralGenerations: [...operation.structuralGenerations],
+      structuralTransactions: transactions,
+      structuralMutationCount: operation.structuralMutationCount,
       anomalies,
       anomalyDetails,
       forensicRecommended: anomalies.length > 0,
@@ -654,11 +816,43 @@ export class DebugSummarySession {
     });
   }
 
+  finalizeObservation(observation) {
+    if (observation.emitted) return;
+    observation.emitted = true;
+    observation.pendingFinalizationAt = null;
+    const record = {
+      sessionId: this.sessionId,
+      operation: "structural-observation",
+      observationId: observation.observationId,
+      status: "observed",
+      generation: null,
+      semanticClassification: "structural",
+      finalizeAt: observation.finalizeAt,
+      firstObservedAt: observation.firstObservedAt,
+      lastActivityAt: observation.lastActivityAt,
+      mutationBatches: observation.mutationBatches,
+      childListRecords: observation.childListRecords,
+      structuralMutationCount: observation.structuralMutationCount,
+      blockIds: [...observation.blockIds],
+      addedBlockIds: [...observation.addedBlockIds],
+      removedBlockIds: [...observation.removedBlockIds],
+      parentChanges: observation.parentChanges,
+      contextBlockIds: [...observation.contextBlockIds],
+      anomalies: [...observation.anomalies],
+      anomalyDetails: observation.anomalyDetails.map((detail) => ({
+        code: detail.code,
+        at: detail.at,
+        blockIds: [...detail.blockIds],
+      })),
+      forensicRecommended: observation.anomalies.length > 0,
+    };
+    this.queueFinalized(record);
+  }
+
   finalizeTransaction(accumulator, status = accumulator.status, at = null) {
     if (accumulator.emitted) return;
     accumulator.emitted = true;
     accumulator.pendingFinalizationAt = null;
-    accumulator.observationFinalizationAt = null;
     accumulator.status = status;
     const finishedAt = accumulator.finishedAt ?? at;
     const record = {

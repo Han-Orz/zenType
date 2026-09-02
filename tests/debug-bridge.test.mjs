@@ -83,3 +83,54 @@ test("Bridge keeps raw evidence and writes summary/report outputs", async () => 
     rmSync(outputDir, { recursive: true, force: true });
   }
 });
+
+test("Bridge persists standalone structural observations separately from transactions", async () => {
+  const outputDir = mkdtempSync(path.join(process.cwd(), ".tmp-debug-bridge-observation-"));
+  const bridge = createDebugBridge({ port: 0, outputDir });
+  try {
+    await bridge.start();
+    const address = bridge.server.address();
+    assert.ok(address && typeof address === "object");
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    const events = [
+      event("observation-session", 1, "structural-edit-finish", 0, {
+        generation: 7,
+        kind: "enter",
+        stable: true,
+        transactionStartedAt: 0,
+        lastActivityAt: 0,
+        finishedAt: 0,
+        currentBlockId: "block-a",
+      }),
+      event("observation-session", 2, "mutation", 200, {
+        structural: { generation: 7, phase: "idle", kind: "enter" },
+        semanticClassification: "structural",
+        currentBlockId: "block-z",
+        addedBlockIds: ["block-z"],
+      }),
+    ];
+    const response = await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ schema: "zentype-debug/v1", events }),
+    });
+    assert.equal(response.status, 202);
+
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    const summary = readFileSync(path.join(outputDir, "siyuan-hook.summary.ndjson"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const report = JSON.parse(readFileSync(path.join(outputDir, "siyuan-hook.report.json"), "utf8"));
+    assert.equal(summary.length, 2);
+    assert.equal(summary[0].operation, "structural");
+    assert.equal(summary[1].operation, "structural-observation");
+    assert.equal(summary[1].generation, null);
+    assert.deepEqual(summary[1].anomalies, ["IDLE_SEMANTIC_MUTATION"]);
+    assert.equal(report.transactions, 1);
+    assert.equal(report.structuralObservations, 1);
+  } finally {
+    await bridge.stop();
+    rmSync(outputDir, { recursive: true, force: true });
+  }
+});

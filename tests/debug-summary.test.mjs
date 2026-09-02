@@ -71,6 +71,12 @@ test("idle semantic mutation is emitted as an anomaly observation", () => {
   }));
 
   const [record] = session.flush(110);
+  assert.equal(record.operation, "structural-observation");
+  assert.equal(record.observationId, "idle-1");
+  assert.equal(record.generation, null);
+  assert.equal(record.semanticClassification, "structural");
+  assert.deepEqual(record.blockIds, ["nested-block"]);
+  assert.equal(record.finalizeAt, 110);
   assert.equal(record.status, "observed");
   assert.deepEqual(record.anomalies, ["IDLE_SEMANTIC_MUTATION"]);
   assert.equal(record.forensicRecommended, true);
@@ -97,25 +103,28 @@ test("character Backspace representation replacement is an ordinary edit", () =>
   }));
 
   const [record] = session.flush(114);
-  assert.equal(record.operation, "character-backspace");
+  assert.equal(record.operation, "backspace");
+  assert.equal(record.classification, "character");
   assert.equal(record.structural, false);
   assert.equal(record.semanticMutation, "representation");
   assert.deepEqual(record.anomalies, []);
 });
 
-test("ordinary character Backspace followed by a structural generation is flagged", () => {
+test("genuine block Backspace with deleteContentBackward is block-structural", () => {
   const session = createDebugSummary("test-session");
-  session.accept(envelope("keydown", 10, { key: "Backspace", currentBlockId: "block-a" }));
+  session.accept(envelope("keydown", 10, { key: "Backspace", currentBlockId: "block-b" }));
   session.accept(envelope("input", 12, {
     inputType: "deleteContentBackward",
-    currentBlockId: "block-a",
+    currentBlockId: "block-b",
   }));
   session.accept(envelope("mutation", 20, {
-    structural: structuralState(8),
+    structural: structuralState(8, "mutating", "backspace"),
     structuralGeneration: 8,
     structuralPhase: "mutating",
+    structuralKind: "backspace",
     semanticClassification: "structural",
-    addedBlockIds: ["block-b"],
+    removedBlockIds: ["block-b"],
+    currentBlockId: "block-b",
   }));
   session.accept(envelope("structural-edit-finish", 60, {
     generation: 8,
@@ -127,10 +136,50 @@ test("ordinary character Backspace followed by a structural generation is flagge
   }));
 
   const records = session.flush(160);
-  const record = records.find((candidate) => candidate.operation === "character-backspace");
+  const record = records.find((candidate) => candidate.operation === "backspace");
   assert.ok(record);
+  assert.equal(record.classification, "block-structural");
+  assert.equal(record.structural, true);
+  assert.equal(record.expectedStructural, true);
+  assert.equal(record.semanticMutation, "structural");
+  assert.equal(record.structuralMutationCount, 1);
+  assert.equal(record.structuralTransactions[0].generation, 8);
+  assert.equal(record.structuralTransactions[0].kind, "backspace");
+  assert.equal(record.structuralTransactions[0].structuralMutationCount, 1);
+  assert.deepEqual(record.anomalies, []);
+});
+
+test("Backspace transaction with representation-only mutation is a true false positive", () => {
+  const session = createDebugSummary("test-session");
+  session.accept(envelope("keydown", 10, { key: "Backspace", currentBlockId: "block-a" }));
+  session.accept(envelope("input", 12, {
+    inputType: "deleteContentBackward",
+    currentBlockId: "block-a",
+  }));
+  session.accept(envelope("mutation", 20, {
+    structural: structuralState(9, "mutating", null),
+    semanticClassification: "representation",
+    currentBlockId: "block-a",
+  }));
+  session.accept(envelope("structural-edit-finish", 60, {
+    generation: 9,
+    kind: "backspace",
+    stable: true,
+    transactionStartedAt: 20,
+    lastActivityAt: 20,
+    finishedAt: 60,
+  }));
+
+  const record = session.flush(160).find((candidate) => candidate.operation === "backspace");
+  assert.ok(record);
+  assert.equal(record.classification, "character");
+  assert.equal(record.structural, true);
+  assert.equal(record.semanticMutation, "representation");
   assert.deepEqual(record.anomalies, ["CHAR_BACKSPACE_STRUCTURAL_FALSE_POSITIVE"]);
-  assert.equal(record.forensicRecommended, true);
+  assert.deepEqual(record.structuralGenerations, [9]);
+  assert.equal(record.structuralTransactions[0].generation, 9);
+  assert.equal(record.structuralTransactions[0].kind, "backspace");
+  assert.equal(record.structuralTransactions[0].structuralMutationCount, 0);
 });
 
 test("semantic mutation within the late window is flagged on the transaction", () => {
@@ -142,18 +191,172 @@ test("semantic mutation within the late window is flagged on the transaction", (
     transactionStartedAt: 0,
     lastActivityAt: 0,
     finishedAt: 50,
+    currentBlockId: "block-a",
   }));
   session.accept(envelope("mutation", 90, {
     structural: structuralState(3, "idle", "enter"),
     structuralGeneration: 3,
     structuralPhase: "idle",
     semanticClassification: "structural",
+    currentBlockId: "block-a",
     removedBlockIds: ["late-block"],
   }));
 
   const [record] = session.flush(150);
   assert.ok(record.anomalies.includes("LATE_SEMANTIC_MUTATION"));
-  assert.ok(record.anomalies.includes("IDLE_SEMANTIC_MUTATION"));
+  assert.equal(record.anomalies.includes("IDLE_SEMANTIC_MUTATION"), false);
+  assert.equal(session.getReport().structuralObservations, 0);
+});
+
+test("real-style Single Enter discovers the transaction without begin/activity events", () => {
+  const session = createDebugSummary("test-session");
+  session.accept(envelope("keydown", 0, {
+    key: "Enter",
+    structural: structuralState(0, "idle", null),
+  }));
+  session.accept(envelope("mutation", 10, {
+    structural: structuralState(1, "mutating", "enter"),
+    semanticClassification: "structural",
+    currentBlockId: "block-a",
+    addedBlockIds: ["block-b"],
+  }));
+  session.accept(envelope("selectionchange", 20, {
+    structural: structuralState(1, "stabilizing", "enter"),
+    selection: { anchorBlockId: "block-b", focusBlockId: "block-b" },
+  }));
+  session.accept(envelope("structural-edit-finish", 50, {
+    generation: 1,
+    kind: "enter",
+    stable: true,
+    transactionStartedAt: 10,
+    lastActivityAt: 20,
+    finishedAt: 50,
+    currentBlockId: "block-b",
+  }));
+
+  const records = session.flush(150);
+  const transactions = records.filter((record) => record.operation === "structural");
+  assert.equal(transactions.length, 1);
+  assert.equal(transactions[0].generation, 1);
+  assert.equal(transactions[0].status, "completed");
+  assert.equal(session.getReport().structuralObservations, 0);
+});
+
+test("real-style rapid Enter overlap discovers and supersedes generations", () => {
+  const session = createDebugSummary("test-session");
+  const records = [];
+  records.push(...session.accept(envelope("keydown", 0, { key: "Enter" })));
+  records.push(...session.accept(envelope("keydown", 8, {
+    key: "Enter",
+    structural: structuralState(1, "mutating", "enter"),
+  })));
+  records.push(...session.accept(envelope("mutation", 12, {
+    structural: structuralState(2, "mutating", "enter"),
+    semanticClassification: "structural",
+    addedBlockIds: ["block-c"],
+  })));
+  records.push(...session.accept(envelope("structural-edit-finish", 40, {
+    generation: 2,
+    kind: "enter",
+    stable: true,
+    transactionStartedAt: 12,
+    lastActivityAt: 12,
+    finishedAt: 40,
+  })));
+
+  records.push(...session.flush(140));
+  const transactions = records.filter((record) => record.operation === "structural");
+  assert.deepEqual(
+    transactions.map((record) => [record.generation, record.status]),
+    [[1, "superseded"], [2, "completed"]],
+  );
+});
+
+test("idle stale generation becomes a standalone observation after the transaction is emitted", () => {
+  const session = createDebugSummary("test-session");
+  session.accept(envelope("structural-edit-finish", 50, {
+    generation: 7,
+    kind: "enter",
+    stable: true,
+    transactionStartedAt: 0,
+    lastActivityAt: 0,
+    finishedAt: 50,
+    currentBlockId: "block-a",
+  }));
+  const completed = session.flush(150);
+  assert.equal(completed.filter((record) => record.operation === "structural").length, 1);
+
+  session.accept(envelope("mutation", 500, {
+    structural: structuralState(7, "idle", "enter"),
+    semanticClassification: "structural",
+    currentBlockId: "block-z",
+    removedBlockIds: ["block-z"],
+  }));
+  const records = session.flush(600);
+  const observation = records.find((record) => record.operation === "structural-observation");
+  assert.ok(observation);
+  assert.equal(observation.generation, null);
+  assert.equal(observation.observationId, "idle-1");
+  assert.deepEqual(observation.anomalies, ["IDLE_SEMANTIC_MUTATION"]);
+  assert.deepEqual(observation.removedBlockIds, ["block-z"]);
+  assert.equal(session.getReport().transactions, 1);
+  assert.equal(session.getReport().structuralObservations, 1);
+  assert.deepEqual(session.getReport().anomalies.map((detail) => detail.code), [
+    "IDLE_SEMANTIC_MUTATION",
+  ]);
+});
+
+test("idle late semantic mutation attaches only when block context overlaps", () => {
+  const session = createDebugSummary("test-session");
+  session.accept(envelope("structural-edit-finish", 50, {
+    generation: 7,
+    kind: "enter",
+    stable: true,
+    transactionStartedAt: 0,
+    lastActivityAt: 0,
+    finishedAt: 50,
+    currentBlockId: "block-a",
+  }));
+  session.accept(envelope("mutation", 100, {
+    structural: structuralState(7, "idle", "enter"),
+    semanticClassification: "structural",
+    currentBlockId: "block-a",
+    parentChanges: [{ blockId: "block-a", fromParentId: "old", toParentId: "new" }],
+  }));
+
+  const records = session.flush(150);
+  const transaction = records.find((record) => record.operation === "structural");
+  assert.ok(transaction);
+  assert.deepEqual(transaction.anomalies, ["LATE_SEMANTIC_MUTATION"]);
+  assert.equal(records.some((record) => record.operation === "structural-observation"), false);
+});
+
+test("idle same-generation semantic mutation with unrelated context is standalone", () => {
+  const session = createDebugSummary("test-session");
+  session.accept(envelope("structural-edit-finish", 50, {
+    generation: 7,
+    kind: "enter",
+    stable: true,
+    transactionStartedAt: 0,
+    lastActivityAt: 0,
+    finishedAt: 50,
+    currentBlockId: "block-a",
+  }));
+  session.accept(envelope("mutation", 90, {
+    structural: structuralState(7, "idle", "enter"),
+    semanticClassification: "structural",
+    currentBlockId: "block-z",
+    addedBlockIds: ["block-z"],
+  }));
+
+  const records = session.flush(190);
+  const transaction = records.find((record) => record.operation === "structural");
+  const observation = records.find((record) => record.operation === "structural-observation");
+  assert.ok(transaction);
+  assert.ok(observation);
+  assert.deepEqual(transaction.anomalies, []);
+  assert.deepEqual(observation.anomalies, ["IDLE_SEMANTIC_MUTATION"]);
+  assert.equal(observation.generation, null);
 });
 
 test("a newer structural generation makes the previous one superseded", () => {
