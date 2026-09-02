@@ -6,10 +6,7 @@ import {
   type InlineStyleValue,
   type OwnedInlineStyle,
 } from "../../utils/inlineStyleOwnership";
-import type {
-  RippleTargetPlan,
-  RippleTargetRole,
-} from "./semanticPlanner";
+import type { RippleTargetPlan } from "./semanticPlanner";
 import { releaseAfterOpacityTransition } from "./transitionRelease";
 
 const RIPPLE_BLOCK_CLASS = "zentype-ripple-block";
@@ -24,7 +21,6 @@ interface ActiveTarget {
   owned: OwnedInlineStyle;
   classAdded: boolean;
   blocked: boolean;
-  role: RippleTargetRole;
   pendingExit: ReturnType<typeof setTimeout> | null;
 }
 
@@ -33,7 +29,7 @@ export interface RippleStyleApplier {
     plan: RippleTargetPlan,
     bindings: ReadonlyMap<string, HTMLElement>,
   ): void;
-  clear(): void;
+  clear(animate?: boolean): void;
 }
 
 function sameStyleValue(a: InlineStyleValue, b: InlineStyleValue): boolean {
@@ -100,23 +96,31 @@ export function createRippleStyleApplier(): RippleStyleApplier {
     removeRippleClass(element, target);
   }
 
-  function shouldAnimateExit(
+  function hasNestedOwnershipTransfer(
     element: HTMLElement,
-    target: ActiveTarget,
     nextTargets: Set<HTMLElement>,
   ): boolean {
-    if (target.role !== "branch-root") return false;
     for (const nextElement of nextTargets) {
-      if (element.contains(nextElement)) return true;
+      if (element.contains(nextElement) || nextElement.contains(element)) return true;
     }
     return false;
   }
 
-  function releaseBranchRootAfterTransition(
+  function releaseTargetAfterTransition(
     element: HTMLElement,
     target: ActiveTarget,
   ): void {
     if (target.pendingExit !== null) return;
+
+    const appliedOpacity = target.owned.applied[RIPPLE_OPACITY_PROPERTY];
+    if (
+      appliedOpacity?.value === "1" &&
+      sameStyleValue(currentStyleValue(element.style, RIPPLE_OPACITY_PROPERTY), appliedOpacity)
+    ) {
+      releaseTarget(element, target);
+      activeTargets.delete(element);
+      return;
+    }
 
     target.pendingExit = releaseAfterOpacityTransition(
       RIPPLE_CONFIG.TRANSITION_SEC,
@@ -153,13 +157,11 @@ export function createRippleStyleApplier(): RippleStyleApplier {
           owned: claimInlineStyle(element.style, RIPPLE_STYLE_PROPERTIES),
           classAdded: false,
           blocked: false,
-          role: target.role,
           pendingExit: null,
         };
         activeTargets.set(element, activeTarget);
       } else {
         cancelPendingExit(activeTarget);
-        activeTarget.role = target.role;
       }
 
       if (activeTarget.blocked) continue;
@@ -189,20 +191,25 @@ export function createRippleStyleApplier(): RippleStyleApplier {
 
     for (const [element, activeTarget] of activeTargets) {
       if (nextTargets.has(element)) continue;
-      if (shouldAnimateExit(element, activeTarget, nextTargets)) {
-        releaseBranchRootAfterTransition(element, activeTarget);
-      } else {
+      if (hasNestedOwnershipTransfer(element, nextTargets)) {
+        // An ancestor or descendant target is taking over this element's
+        // visual subtree. Do not stage the old layer through natural opacity
+        // first: that would create a dim -> full -> dim handoff under CSS
+        // opacity multiplication.
         releaseTarget(element, activeTarget);
         activeTargets.delete(element);
+      } else {
+        releaseTargetAfterTransition(element, activeTarget);
       }
     }
   }
 
-  function clear(): void {
+  function clear(animate = true): void {
     for (const [element, activeTarget] of activeTargets) {
-      releaseTarget(element, activeTarget);
+      if (animate) releaseTargetAfterTransition(element, activeTarget);
+      else releaseTarget(element, activeTarget);
     }
-    activeTargets.clear();
+    if (!animate) activeTargets.clear();
   }
 
   return { apply, clear };

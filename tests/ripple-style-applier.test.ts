@@ -17,6 +17,7 @@ const RIPPLE_CLASS = "zentype-ripple-block";
 class FakeStyle {
   private readonly values = new Map<string, { value: string; priority: string }>();
   setPropertyCount = 0;
+  readonly writes: Array<{ property: string; value: string; priority: string }> = [];
 
   getPropertyValue(property: string): string {
     return this.values.get(property)?.value ?? "";
@@ -28,6 +29,7 @@ class FakeStyle {
 
   setProperty(property: string, value: string, priority = ""): void {
     this.setPropertyCount++;
+    this.writes.push({ property, value, priority });
     if (value === "") {
       this.values.delete(property);
       return;
@@ -183,70 +185,80 @@ test("maps semantic distance to configured opacity and clamps only at apply time
   }
 });
 
-test("restores stale targets when a new plan drops them", () => {
-  const stale = new FakeElement();
-  stale.style.setProperty(OPACITY_PROPERTY, "0.73", "important");
-  stale.style.setProperty(DURATION_PROPERTY, "1.2s", "important");
-  const retained = new FakeElement();
-  const applier = createRippleStyleApplier();
-
-  applier.apply(
-    plan(target("stale", 1), target("retained", 2)),
-    binding(["stale", stale], ["retained", retained]),
-  );
-  applier.apply(
-    plan(target("retained", 0)),
-    binding(["retained", retained]),
-  );
-
-  assert.equal(stale.style.getPropertyValue(OPACITY_PROPERTY), "0.73");
-  assert.equal(stale.style.getPropertyPriority(OPACITY_PROPERTY), "important");
-  assert.equal(stale.style.getPropertyValue(DURATION_PROPERTY), "1.2s");
-  assert.equal(stale.style.getPropertyPriority(DURATION_PROPERTY), "important");
-  assert.equal(stale.classList.contains(RIPPLE_CLASS), false);
-  assert.equal(retained.style.getPropertyValue(OPACITY_PROPERTY), "1");
-  assert.equal(retained.classList.contains(RIPPLE_CLASS), true);
-});
-
-test("animates a stale branch root until its new descendant targets take over", () => {
+test("transitions a stale target to natural opacity before restoring it", () => {
   withFakeTimers((timers) => {
-    const branchRoot = new FakeElement();
-    const descendant = new FakeElement();
-    branchRoot.descendants.add(asHTMLElement(descendant));
-    branchRoot.style.setProperty(OPACITY_PROPERTY, "0.73", "important");
-    branchRoot.style.setProperty(DURATION_PROPERTY, "1.2s", "important");
+    const stale = new FakeElement();
+    stale.style.setProperty(OPACITY_PROPERTY, "0.73", "important");
+    stale.style.setProperty(DURATION_PROPERTY, "1.2s", "important");
+    const retained = new FakeElement();
     const applier = createRippleStyleApplier();
 
     applier.apply(
-      plan(targetWithRole("branch", "branch-root", 2)),
-      binding(["branch", branchRoot]),
+      plan(target("stale", 1), target("retained", 2)),
+      binding(["stale", stale], ["retained", retained]),
     );
     applier.apply(
-      plan(target("content", 0)),
-      binding(["content", descendant]),
+      plan(target("retained", 0)),
+      binding(["retained", retained]),
     );
 
-    assert.equal(branchRoot.style.getPropertyValue(OPACITY_PROPERTY), "1");
-    assert.equal(
-      branchRoot.style.getPropertyValue(DURATION_PROPERTY),
-      `${RIPPLE_CONFIG.TRANSITION_SEC}s`,
-    );
-    assert.equal(branchRoot.classList.contains(RIPPLE_CLASS), true);
-    assert.equal(branchRoot.classList.removeCount, 0);
+    assert.equal(stale.style.getPropertyValue(OPACITY_PROPERTY), "1");
+    assert.equal(stale.style.getPropertyPriority(OPACITY_PROPERTY), "");
+    assert.equal(stale.style.getPropertyValue(DURATION_PROPERTY), `${RIPPLE_CONFIG.TRANSITION_SEC}s`);
+    assert.equal(stale.classList.contains(RIPPLE_CLASS), true);
     assert.equal(timers.pending.size, 1);
-    assert.equal(
-      [...timers.delays.values()][0],
-      RIPPLE_CONFIG.TRANSITION_SEC * 1000,
-    );
+    assert.equal(retained.style.getPropertyValue(OPACITY_PROPERTY), "1");
+    assert.equal(retained.classList.contains(RIPPLE_CLASS), true);
 
     timers.flushAll();
 
-    assert.equal(branchRoot.style.getPropertyValue(OPACITY_PROPERTY), "0.73");
-    assert.equal(branchRoot.style.getPropertyPriority(OPACITY_PROPERTY), "important");
-    assert.equal(branchRoot.style.getPropertyValue(DURATION_PROPERTY), "1.2s");
-    assert.equal(branchRoot.style.getPropertyPriority(DURATION_PROPERTY), "important");
-    assert.equal(branchRoot.classList.contains(RIPPLE_CLASS), false);
+    assert.equal(stale.style.getPropertyValue(OPACITY_PROPERTY), "0.73");
+    assert.equal(stale.style.getPropertyPriority(OPACITY_PROPERTY), "important");
+    assert.equal(stale.style.getPropertyValue(DURATION_PROPERTY), "1.2s");
+    assert.equal(stale.style.getPropertyPriority(DURATION_PROPERTY), "important");
+    assert.equal(stale.classList.contains(RIPPLE_CLASS), false);
   });
+});
+
+test("retargets an existing element without staging natural opacity", () => {
+  const element = new FakeElement();
+  const applier = createRippleStyleApplier();
+
+  applier.apply(plan(target("content", 2)), binding(["content", element]));
+  element.style.writes.length = 0;
+  applier.apply(plan(target("content", 1)), binding(["content", element]));
+
+  assert.deepEqual(
+    element.style.writes
+      .filter((write) => write.property === OPACITY_PROPERTY)
+      .map((write) => write.value),
+    [String(RIPPLE_CONFIG.BLOCK_LEVELS[1])],
+  );
+  assert.equal(element.style.getPropertyValue(OPACITY_PROPERTY), String(RIPPLE_CONFIG.BLOCK_LEVELS[1]));
+});
+
+test("releases a stale branch root directly when descendants take over", () => {
+  const branchRoot = new FakeElement();
+  const descendant = new FakeElement();
+  branchRoot.descendants.add(asHTMLElement(descendant));
+  branchRoot.style.setProperty(OPACITY_PROPERTY, "0.73", "important");
+  branchRoot.style.setProperty(DURATION_PROPERTY, "1.2s", "important");
+  const applier = createRippleStyleApplier();
+
+  applier.apply(
+    plan(targetWithRole("branch", "branch-root", 2)),
+    binding(["branch", branchRoot]),
+  );
+  applier.apply(
+    plan(target("content", 1)),
+    binding(["content", descendant]),
+  );
+
+  assert.equal(branchRoot.style.getPropertyValue(OPACITY_PROPERTY), "0.73");
+  assert.equal(branchRoot.style.getPropertyPriority(OPACITY_PROPERTY), "important");
+  assert.equal(branchRoot.style.getPropertyValue(DURATION_PROPERTY), "1.2s");
+  assert.equal(branchRoot.classList.contains(RIPPLE_CLASS), false);
+  assert.equal(descendant.style.getPropertyValue(OPACITY_PROPERTY), String(RIPPLE_CONFIG.BLOCK_LEVELS[1]));
 });
 
 test("releases a stale descendant immediately when its ancestor becomes a branch root", () => {
@@ -272,30 +284,16 @@ test("releases a stale descendant immediately when its ancestor becomes a branch
   assert.equal(ancestor.classList.contains(RIPPLE_CLASS), true);
 });
 
-test("cancels a pending branch-root exit when the element is targeted again", () => {
+test("cancels a pending true exit when the element is targeted again", () => {
   withFakeTimers((timers) => {
     const branchRoot = new FakeElement();
-    const descendant = new FakeElement();
-    branchRoot.descendants.add(asHTMLElement(descendant));
     const applier = createRippleStyleApplier();
 
     applier.apply(
       plan(targetWithRole("branch", "branch-root", 2)),
       binding(["branch", branchRoot]),
     );
-    applier.apply(
-      plan(target("content", 0)),
-      binding(["content", descendant]),
-    );
-    assert.equal(timers.pending.size, 1);
-    applier.apply(
-      plan(target("content", 0)),
-      binding(["content", descendant]),
-    );
-    applier.apply(
-      plan(target("content", 0)),
-      binding(["content", descendant]),
-    );
+    applier.apply(plan(), binding());
     assert.equal(timers.pending.size, 1);
 
     applier.apply(
@@ -312,11 +310,9 @@ test("cancels a pending branch-root exit when the element is targeted again", ()
   });
 });
 
-test("clear cancels branch-root exit and restores styles immediately", () => {
+test("clear transitions active targets before restoring styles", () => {
   withFakeTimers((timers) => {
     const branchRoot = new FakeElement();
-    const descendant = new FakeElement();
-    branchRoot.descendants.add(asHTMLElement(descendant));
     branchRoot.style.setProperty(OPACITY_PROPERTY, "0.73", "important");
     branchRoot.style.setProperty(DURATION_PROPERTY, "1.2s", "important");
     const applier = createRippleStyleApplier();
@@ -325,39 +321,39 @@ test("clear cancels branch-root exit and restores styles immediately", () => {
       plan(targetWithRole("branch", "branch-root", 2)),
       binding(["branch", branchRoot]),
     );
-    applier.apply(
-      plan(target("content", 0)),
-      binding(["content", descendant]),
-    );
-    assert.equal(timers.pending.size, 1);
 
     applier.clear();
 
-    assert.equal(timers.pending.size, 0);
+    assert.equal(timers.pending.size, 1);
+    assert.equal(branchRoot.style.getPropertyValue(OPACITY_PROPERTY), "1");
+    assert.equal(branchRoot.style.getPropertyValue(DURATION_PROPERTY), `${RIPPLE_CONFIG.TRANSITION_SEC}s`);
+    assert.equal(branchRoot.classList.contains(RIPPLE_CLASS), true);
+    timers.flushAll();
     assert.equal(branchRoot.style.getPropertyValue(OPACITY_PROPERTY), "0.73");
     assert.equal(branchRoot.style.getPropertyValue(DURATION_PROPERTY), "1.2s");
-    assert.equal(branchRoot.classList.contains(RIPPLE_CLASS), false);
-    timers.flushAll();
     assert.equal(branchRoot.classList.contains(RIPPLE_CLASS), false);
   });
 });
 
 test("clear restores private properties without touching ordinary styles", () => {
-  const element = new FakeElement();
-  element.style.setProperty(OPACITY_PROPERTY, "0.81");
-  element.style.setProperty(DURATION_PROPERTY, "2s");
-  element.style.setProperty("opacity", "0.42");
-  element.style.setProperty("transition", "color 1s");
-  const applier = createRippleStyleApplier();
+  withFakeTimers((timers) => {
+    const element = new FakeElement();
+    element.style.setProperty(OPACITY_PROPERTY, "0.81");
+    element.style.setProperty(DURATION_PROPERTY, "2s");
+    element.style.setProperty("opacity", "0.42");
+    element.style.setProperty("transition", "color 1s");
+    const applier = createRippleStyleApplier();
 
-  applier.apply(plan(target("content", 1)), binding(["content", element]));
-  applier.clear();
+    applier.apply(plan(target("content", 1)), binding(["content", element]));
+    applier.clear();
+    timers.flushAll();
 
-  assert.equal(element.style.getPropertyValue(OPACITY_PROPERTY), "0.81");
-  assert.equal(element.style.getPropertyValue(DURATION_PROPERTY), "2s");
-  assert.equal(element.style.getPropertyValue("opacity"), "0.42");
-  assert.equal(element.style.getPropertyValue("transition"), "color 1s");
-  assert.equal(element.classList.contains(RIPPLE_CLASS), false);
+    assert.equal(element.style.getPropertyValue(OPACITY_PROPERTY), "0.81");
+    assert.equal(element.style.getPropertyValue(DURATION_PROPERTY), "2s");
+    assert.equal(element.style.getPropertyValue("opacity"), "0.42");
+    assert.equal(element.style.getPropertyValue("transition"), "color 1s");
+    assert.equal(element.classList.contains(RIPPLE_CLASS), false);
+  });
 });
 
 test("reapplying an identical plan performs no inline style or class writes", () => {

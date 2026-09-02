@@ -1563,6 +1563,7 @@ test("Cursor, Typewriter, and Ripple keep one input session across shared events
     assert.equal(runtime.window.listenerCount("resize"), 0);
     assert.equal(runtime.document.getElementById("zentype-cursor"), null);
     assert.equal(runtime.raf.pending.size, 0);
+    runtime.clock.advance(1000);
     assert.equal(runtime.clock.pending.size, 0);
     assert.equal(fixture.block.style.getPropertyValue("--zt-ripple-opacity"), "");
 
@@ -1772,6 +1773,7 @@ test("module lifecycle releases owned resources and reinitializes cleanly", () =
     assert.equal(fixture.content.listenerCount("wheel"), 0);
     assert.equal(runtime.resizeObservers.every((observer) => observer.disconnected), true);
     assert.equal(runtime.mutationObservers.every((observer) => observer.disconnected), true);
+    runtime.clock.advance(1000);
     assert.equal(runtime.clock.pending.size, 0);
     assert.equal(runtime.highlights.size, 0);
     assert.equal(fixture.block.classList.contains("zentype-ripple-block"), false);
@@ -2431,33 +2433,38 @@ test("ripple transitions a legacy block handoff before releasing ownership", () 
 
     assert.equal(
       fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"),
-      "1",
-      "a stale block first transitions toward natural opacity",
+      "",
+      "nested takeover releases the legacy parent without a natural-opacity stage",
     );
     assert.equal(
       fixture.rootList.classList.contains("zentype-ripple-block"),
-      true,
-      "the Ripple class remains while the handoff transition is active",
+      false,
+      "the legacy class is removed when nested ownership takes over",
     );
-    assert.deepEqual(runtime.clock.delays(), [400]);
+    assert.equal(runtime.clock.delays().length, 0);
 
-    runtime.clock.advance(399);
-    assert.equal(fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"), "1");
-    assert.equal(fixture.rootList.classList.contains("zentype-ripple-block"), true);
-
-    runtime.clock.advance(1);
-    assert.equal(fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"), "");
-    assert.equal(fixture.rootList.classList.contains("zentype-ripple-block"), false);
-
-    // A later handoff may have a pending CSS transition, but OFF must still
-    // release the host immediately instead of waiting for that timer.
+    // A nested-to-legacy handoff is immediate because the nested layer is
+    // being replaced by the legacy parent layer.
     runtime.setCaret(topSiblingText, 1, rect(20, 400));
     runtime.document.dispatch("selectionchange");
     runtime.raf.flushNext(runtime.clock.now);
     runtime.setCaret(fixture.alternateText, 1, rect(20, 400));
     runtime.document.dispatch("selectionchange");
     runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"), "");
+    assert.equal(fixture.rootList.classList.contains("zentype-ripple-block"), false);
+
+    // Focus exit keeps a dim legacy target alive at natural opacity until the
+    // configured transition has completed.
+    runtime.setCaret(topSiblingText, 1, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"), "0.4");
+    inputMode.setBothOff();
+    assert.equal(fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"), "1");
     assert.equal(fixture.rootList.classList.contains("zentype-ripple-block"), true);
+    assert.equal(runtime.clock.delays().includes(400), true);
+    runtime.clock.advance(400);
     inputMode.setBothOff();
     assert.equal(fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"), "");
     assert.equal(fixture.rootList.classList.contains("zentype-ripple-block"), false);

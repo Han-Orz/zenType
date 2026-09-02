@@ -129,6 +129,16 @@ function releaseBlockAfterTransition(block: HTMLElement): void {
   const owned = ownedBlockStyles.get(block);
   if (!owned) return;
 
+  const appliedOpacity = owned.applied[RIPPLE_OPACITY_PROPERTY];
+  if (
+    appliedOpacity?.value === "1" &&
+    block.style.getPropertyValue(RIPPLE_OPACITY_PROPERTY) === appliedOpacity.value &&
+    block.style.getPropertyPriority(RIPPLE_OPACITY_PROPERTY) === appliedOpacity.priority
+  ) {
+    releaseOwnedBlock(block);
+    return;
+  }
+
   const timer = releaseAfterOpacityTransition(
     TRANSITION_SEC,
     () => setOwnedInlineStyle(
@@ -790,12 +800,16 @@ function applyBlockOpacity(
     visualStateDirty = true;
   });
 
-  // 不在新列表里的旧块：先过渡到自然 opacity，再释放 ownership，避免
-  // current block handoff 直接跳回 1。OFF/destroy 仍由 clearLegacyBlockOpacity
-  // 立即释放。
+  // 不在新列表里的旧块：真正离开 legacy ownership 时先过渡到自然
+  // opacity；如果 nested engine 正在接管当前顶层块，则直接释放父层，
+  // 避免 parent -> 1 -> child opacity 的 staged handoff。
   modifiedBlocks.forEach((block) => {
     if (!newBlocks.has(block)) {
-      releaseBlockAfterTransition(block);
+      if (skipCurrentTopBlock && block === topBlock) {
+        releaseOwnedBlock(block);
+      } else {
+        releaseBlockAfterTransition(block);
+      }
     }
   });
 
@@ -804,12 +818,7 @@ function applyBlockOpacity(
 }
 
 function clearLegacyBlockOpacity(): void {
-  for (const timer of pendingBlockReleases.values()) clearTimeout(timer);
-  pendingBlockReleases.clear();
-  for (const block of Array.from(ownedBlocks)) {
-    releaseOwnedBlock(block);
-  }
-  ownedBlocks.clear();
+  for (const block of Array.from(ownedBlocks)) releaseBlockAfterTransition(block);
   modifiedBlocks.clear();
   lastBlockOpacityBlockId = null;
   lastBlockOpacityContainer = null;
