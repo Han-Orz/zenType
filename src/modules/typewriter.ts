@@ -7,6 +7,7 @@ import * as inputModeTriggers from "./inputModeTriggers";
 import * as structuralEdit from "./structuralEdit";
 import * as flip from "./typewriter/flip";
 import * as scroll from "./typewriter/scroll";
+import { resolveScrollTarget } from "./typewriter/targetResolver";
 import { isInAllowElements } from "../utils/boundary";
 import {
   isCurrentSelectionEditable,
@@ -15,7 +16,7 @@ import {
   isReadonlyEditorTarget,
 } from "../utils/editorScope";
 
-const { COMFORT_ZONE, TYPING_GAP_MS, CLICK_CENTER_LOW, CLICK_CENTER_HIGH } = TYPEWRITER_CONFIG;
+const { TYPING_GAP_MS, CLICK_CENTER_LOW, CLICK_CENTER_HIGH } = TYPEWRITER_CONFIG;
 
 let eventListeners: Array<[string, EventListener, AddEventListenerOptions?]> = [];
 let windowEventListeners: Array<[string, EventListener, AddEventListenerOptions?]> = [];
@@ -249,30 +250,22 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
   }
   if (!container) return;
 
-  // 使用 editorRect（protyle-content 的 bounding rect）作为滚动锚点
-  // 而非 container.getBoundingClientRect()（可能是更大的祖先元素）
-  // 注：AllowResult.editorRect 只有 top/bottom/left/right，无 height 字段（不像 DOMRect）
-  const editorHeight = result.editorRect.bottom - result.editorRect.top;
-  const cursorPct = (rect.y - result.editorRect.top) / editorHeight;
+  // The resolver receives the already-trusted caret/editor geometry and
+  // returns an absolute endpoint. The existing scroll controller still
+  // consumes a delta adapter so its motion timeline remains unchanged.
+  const resolution = resolveScrollTarget({
+    cursorY: rect.y,
+    editorTop: result.editorRect.top,
+    editorBottom: result.editorRect.bottom,
+    currentScrollTop: container.scrollTop,
+    maxScrollTop: container.scrollHeight - container.clientHeight,
+  });
 
-  // v2.3.0：舒适区间 [COMFORT_ZONE[0], COMFORT_ZONE[1]]，区间内不滚
-  // 符号约定：scroll controller 中 deltaY > 0 = scrollTop 增加 = 页面/视口向下滚
-  // 因此要让 cursor 在视口里"下移"（cursor 在顶部时），需要 deltaY < 0（向上滚）
-  let deltaY = 0;
-  if (cursorPct < COMFORT_ZONE[0]) {
-    // 光标在舒适区上方 → deltaY 负（向上滚）→ cursor 在视口里下移到 COMFORT_ZONE[0]
-    deltaY = (cursorPct - COMFORT_ZONE[0]) * editorHeight;
-  } else if (cursorPct > COMFORT_ZONE[1]) {
-    // 光标在舒适区下方 → deltaY 正（向下滚）→ cursor 在视口里上移到 COMFORT_ZONE[1]
-    deltaY = (cursorPct - COMFORT_ZONE[1]) * editorHeight;
-  }
-  // else: 舒适区内，deltaY = 0，不滚
-
-  if (Math.abs(deltaY) >= 1) {
-    scroll.scrollTo(container, { deltaY }, scheduleScrollResync);
+  if (resolution.action === "move") {
+    scroll.scrollTo(container, { deltaY: resolution.deltaY }, scheduleScrollResync);
   } else if (scroll.isScrolling()) {
-    // Keep the active motion alive through a temporary comfort-zone result.
-    // Its completion will schedule one fresh geometry check when requested.
+    // Keep the active motion alive through a temporary hold result. Its
+    // completion will schedule one fresh geometry check when requested.
     scroll.requestResync(scheduleScrollResync);
   }
 }

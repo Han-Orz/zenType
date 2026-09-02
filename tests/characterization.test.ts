@@ -1161,6 +1161,76 @@ test("typewriter coalesces continuous typing and scrolls when its debounce expir
   }
 });
 
+test("typewriter uses the outer trigger band and inner settle target", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  runtime.clock.now = 25_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+
+    runtime.setCaret(fixture.text, 1, rect(20, 520));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "insertText",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 0, "caret inside the trigger band must hold");
+    assert.equal(fixture.content.scrollTop, 0);
+
+    runtime.clock.advance(401);
+    runtime.setCaret(fixture.text, 1, rect(20, 550));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 1, "caret below the trigger band must start one scroll");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 1);
+
+    const scrollFrame = [...runtime.raf.pending.keys()][0];
+    runtime.clock.advance(1000);
+    runtime.raf.flush(scrollFrame, runtime.clock.now);
+    assert.equal(
+      Math.round(fixture.content.scrollTop),
+      70,
+      "ordinary following settles at 48% instead of the old 50% boundary",
+    );
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("typewriter click relocation keeps its existing 50% center target", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  runtime.clock.now = 26_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+    runtime.setCaret(fixture.text, 1, rect(20, 800));
+    runtime.document.dispatch("click", eventFor(fixture.block));
+    runtime.raf.flushNext(runtime.clock.now);
+
+    assert.equal(runtime.raf.pending.size, 1, "an explicit far click starts its own motion");
+    const scrollFrame = [...runtime.raf.pending.keys()][0];
+    runtime.clock.advance(1000);
+    runtime.raf.flush(scrollFrame, runtime.clock.now);
+    assert.equal(Math.round(fixture.content.scrollTop), 300);
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
 test("typewriter hard-pauses during IME composition and debounces compositionend", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
@@ -1237,7 +1307,7 @@ test("typewriter defers transient caret changes until active scroll settles", ()
 
     runtime.clock.advance(600);
     runtime.raf.flush(firstScrollFrame, runtime.clock.now);
-    assert.equal(Math.round(fixture.content.scrollTop), 300, "the current motion finishes naturally");
+    assert.equal(Math.round(fixture.content.scrollTop), 320, "the current motion finishes naturally");
     assert.equal(runtime.raf.pending.size, 1, "completion schedules one final geometry resync");
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(runtime.raf.pending.size, 1, "the resync starts one follow-up loop at the safe point");
@@ -2154,7 +2224,7 @@ test("Tab list intent stays authoritative through nested-list reparent and stabl
     inputMode.reset();
     inputMode.setBothOn();
     initTypewriter();
-    runtime.setCaret(fixture.alternateText, 1, rect(20, 400));
+    runtime.setCaret(fixture.alternateText, 1, rect(20, 550));
     runtime.document.dispatch("keydown", eventFor(fixture.alternateContent, {
       key: "Tab",
       isComposing: false,
@@ -2218,6 +2288,13 @@ test("Tab list intent stays authoritative through nested-list reparent and stabl
       [{ generation, kind: "list-change", stable: true }],
     );
     assert.equal(isStructuralEditPending(), false);
+    assert.equal(runtime.raf.pending.size, 0, "list-change keeps the existing typing debounce");
+    runtime.clock.advance(401);
+    assert.equal(runtime.raf.pending.size, 1, "debounced list-change starts one scroll");
+    const scrollFrame = [...runtime.raf.pending.keys()][0];
+    runtime.clock.advance(1000);
+    runtime.raf.flush(scrollFrame, runtime.clock.now);
+    assert.equal(Math.round(fixture.content.scrollTop), 70);
   } finally {
     unsubscribe();
     destroyTypewriter();
@@ -2660,6 +2737,46 @@ test("FLIP skips invalid local sampling without scanning the full editor", () =>
   }
 });
 
+test("stable Enter structural authority uses the inner lower settle target", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime, "enter");
+  runtime.clock.now = 39_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+    runtime.setCaret(fixture.text, 1, rect(20, 550));
+    runtime.document.dispatch("keydown", eventFor(fixture.block, {
+      key: "Enter",
+      isComposing: false,
+      defaultPrevented: false,
+    }));
+
+    let settleFrames = 0;
+    while (isStructuralEditPending()) {
+      assert.ok(settleFrames++ < 10, "the coordinator must settle in a bounded number of frames");
+      runtime.clock.advance(16);
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+
+    assert.equal(runtime.raf.pending.size, 1, "stable structural authority starts one scroll");
+    const scrollFrame = [...runtime.raf.pending.keys()][0];
+    runtime.clock.advance(1000);
+    runtime.raf.flush(scrollFrame, runtime.clock.now);
+    assert.equal(
+      Math.round(fixture.content.scrollTop),
+      70,
+      "Enter uses the shared 48% lower settle edge",
+    );
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
 test("Enter on an empty block waits for a stable structural commit", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
@@ -2757,6 +2874,51 @@ test("Backspace character deletion and block merge retain separate characterizat
     assert.match(secondBlock.style.transition, /transform 250ms/);
     runtime.clock.advance(300);
     assert.equal(secondBlock.style.transition, "");
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("stable block Backspace uses the shared inner lower settle target", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime, "ab");
+  const secondBlock = new FakeElement({
+    dataNodeId: "block-next",
+    contentEditable: true,
+  });
+  const secondText = new FakeText("next");
+  append(secondBlock, secondText);
+  append(fixture.wysiwyg, secondBlock);
+  runtime.clock.now = 42_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+    runtime.setCaret(fixture.text, 0, rect(20, 550));
+    runtime.selection.range?.setEnd(secondText, 0);
+    runtime.document.dispatch("keydown", eventFor(fixture.block, {
+      key: "Backspace",
+      isComposing: false,
+      defaultPrevented: false,
+    }));
+
+    assert.equal(isStructuralEditPending(), true);
+    let settleFrames = 0;
+    while (isStructuralEditPending()) {
+      assert.ok(settleFrames++ < 10, "the coordinator must settle in a bounded number of frames");
+      runtime.clock.advance(16);
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+
+    assert.equal(runtime.raf.pending.size, 1, "stable Backspace starts one scroll");
+    const scrollFrame = [...runtime.raf.pending.keys()][0];
+    runtime.clock.advance(1000);
+    runtime.raf.flush(scrollFrame, runtime.clock.now);
+    assert.equal(Math.round(fixture.content.scrollTop), 70);
   } finally {
     destroyTypewriter();
     inputMode.reset();
