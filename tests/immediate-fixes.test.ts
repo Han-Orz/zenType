@@ -25,6 +25,7 @@ import { RIPPLE_CONFIG } from "../src/config";
 import { bindCursorDocumentEvents, destroyCursorDocumentEvents } from "../src/modules/cursor/events";
 import {
   shouldCancelPendingScrollForReducedMotion,
+  shouldHandleListStructuralIntentKey,
   shouldHandleTypewriterEditKey,
 } from "../src/modules/typewriter";
 import {
@@ -498,6 +499,27 @@ test("typewriter edit guard rejects IME and already-prevented Enter/Backspace", 
     isComposing: false,
     defaultPrevented: false,
   }), true);
+});
+
+test("list structural intent guard accepts only unmodified Tab outside composition", () => {
+  const base = {
+    key: "Tab",
+    isComposing: false,
+    defaultPrevented: false,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    metaKey: false,
+  };
+
+  assert.equal(shouldHandleListStructuralIntentKey(base), true);
+  assert.equal(shouldHandleListStructuralIntentKey({ ...base, shiftKey: true }), true);
+  assert.equal(shouldHandleListStructuralIntentKey({ ...base, ctrlKey: true }), false);
+  assert.equal(shouldHandleListStructuralIntentKey({ ...base, altKey: true }), false);
+  assert.equal(shouldHandleListStructuralIntentKey({ ...base, metaKey: true }), false);
+  assert.equal(shouldHandleListStructuralIntentKey({ ...base, isComposing: true }), false);
+  assert.equal(shouldHandleListStructuralIntentKey({ ...base, defaultPrevented: true }), false);
+  assert.equal(shouldHandleListStructuralIntentKey({ ...base, key: "Enter" }), false);
 });
 
 test("reduced-motion scroll guard identifies an in-flight animation to cancel", () => {

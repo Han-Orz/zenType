@@ -27,6 +27,7 @@ import {
   destroyStructuralEditCoordinator,
   getStructuralEditSnapshot,
   isStructuralEditPending,
+  subscribeStructuralEditFinish,
 } from "../src/modules/structuralEdit";
 import {
   isSwitchHiddenActive,
@@ -2076,6 +2077,151 @@ test("ordinary Backspace and IME same-block rerenders do not start transactions"
   } finally {
     destroyTypewriter();
     destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("typewriter captures plain and Shift+Tab only inside a semantic list item", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+  const topSiblingText = fixture.topSibling.childNodes[0];
+  assert.ok(topSiblingText instanceof FakeText);
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initTypewriter();
+
+    const dispatchTab = (target: FakeElement, extra: Record<string, unknown> = {}) => {
+      runtime.document.dispatch("keydown", eventFor(target, {
+        key: "Tab",
+        isComposing: false,
+        defaultPrevented: false,
+        ctrlKey: false,
+        altKey: false,
+        shiftKey: false,
+        metaKey: false,
+        ...extra,
+      }));
+    };
+
+    runtime.setCaret(topSiblingText, 1, rect(20, 400));
+    dispatchTab(fixture.topSibling);
+    assert.equal(isStructuralEditPending(), false, "Tab outside a list item is not structural");
+
+    runtime.setCaret(fixture.alternateText, 1, rect(20, 400));
+    for (const extra of [
+      { ctrlKey: true },
+      { altKey: true },
+      { metaKey: true },
+      { isComposing: true },
+      { defaultPrevented: true },
+    ]) {
+      dispatchTab(fixture.alternateContent, extra);
+      assert.equal(isStructuralEditPending(), false, "modified or composing Tab is ignored");
+    }
+
+    dispatchTab(fixture.alternateContent);
+    const plainTab = getStructuralEditSnapshot();
+    assert.equal(plainTab.phase, "mutating");
+    assert.equal(plainTab.kind, "list-change");
+
+    dispatchTab(fixture.alternateContent, { shiftKey: true });
+    const shiftTab = getStructuralEditSnapshot();
+    assert.equal(shiftTab.phase, "mutating");
+    assert.equal(shiftTab.kind, "list-change");
+    assert.equal(shiftTab.generation > plainTab.generation, true, "a new list action supersedes the old generation");
+  } finally {
+    destroyTypewriter();
+    destroyStructuralEditCoordinator();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("Tab list intent stays authoritative through nested-list reparent and stable finish", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+  const finishes: Array<{ generation: number; kind: string; stable: boolean }> = [];
+  const unsubscribe = subscribeStructuralEditFinish((finish) => finishes.push(finish));
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initTypewriter();
+    runtime.setCaret(fixture.alternateText, 1, rect(20, 400));
+    runtime.document.dispatch("keydown", eventFor(fixture.alternateContent, {
+      key: "Tab",
+      isComposing: false,
+      defaultPrevented: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      metaKey: false,
+    }));
+
+    const started = getStructuralEditSnapshot();
+    assert.equal(started.phase, "mutating");
+    assert.equal(started.kind, "list-change");
+    const generation = started.generation;
+
+    const oldList = fixture.alternateItem.parentElement;
+    assert.ok(oldList);
+    const newList = new FakeElement({ dataType: "NodeList" });
+    append(fixture.focusItem, newList);
+    oldList.removeChild(fixture.alternateItem);
+    append(newList, fixture.alternateItem);
+
+    const observer = runtime.mutationObservers.find((candidate) =>
+      candidate.observed.includes(fixture.wysiwyg));
+    assert.ok(observer);
+    observer.callback([
+      {
+        type: "childList",
+        target: oldList,
+        addedNodes: [],
+        removedNodes: [fixture.alternateItem],
+      },
+      {
+        type: "childList",
+        target: newList,
+        addedNodes: [fixture.alternateItem],
+        removedNodes: [],
+      },
+    ] as unknown as MutationRecord[]);
+    runtime.document.dispatch("selectionchange");
+
+    const afterReparent = getStructuralEditSnapshot();
+    assert.equal(afterReparent.generation, generation);
+    assert.equal(afterReparent.phase, "mutating", "the semantic mutation has no idle gap");
+    assert.equal(afterReparent.activityVersion > started.activityVersion, true);
+
+    runtime.clock.now = 16;
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.clock.now = 32;
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.clock.now = 48;
+    runtime.raf.flushNext(runtime.clock.now);
+
+    assert.deepEqual(
+      finishes.map(({ generation: finishedGeneration, kind, stable }) => ({
+        generation: finishedGeneration,
+        kind,
+        stable,
+      })),
+      [{ generation, kind: "list-change", stable: true }],
+    );
+    assert.equal(isStructuralEditPending(), false);
+  } finally {
+    unsubscribe();
+    destroyTypewriter();
+    destroyStructuralEditCoordinator();
     inputMode.reset();
     setActiveEditor(null);
     runtime.restore();

@@ -68,8 +68,9 @@ class FakeSemanticElement {
   parentElement: FakeSemanticElement | null = null;
   private readonly attributes = new Map<string, string>();
 
-  constructor(options: { id?: string; classes?: string[] } = {}) {
+  constructor(options: { id?: string; dataType?: string; classes?: string[] } = {}) {
     if (options.id) this.attributes.set("data-node-id", options.id);
+    if (options.dataType) this.attributes.set("data-type", options.dataType);
     options.classes?.forEach((name) => this.classes.add(name));
   }
 
@@ -262,6 +263,37 @@ test("semantic classifier detects block additions, removals, and reparenting", (
     ], editor as unknown as HTMLElement),
     true,
     "moving a semantic block to another parent changes topology",
+  );
+});
+
+test("semantic classifier detects nested-list item reparenting", () => {
+  const editor = new FakeSemanticElement();
+  const rootList = new FakeSemanticElement({ id: "root-list", dataType: "NodeList" });
+  const sourceItem = new FakeSemanticElement({ id: "item-a", dataType: "NodeListItem" });
+  const sourceParagraph = new FakeSemanticElement({ id: "paragraph-a", dataType: "NodeParagraph" });
+  const sourceList = new FakeSemanticElement({ id: "source-list", dataType: "NodeList" });
+  const movedItem = new FakeSemanticElement({ id: "item-b", dataType: "NodeListItem" });
+  const destinationItem = new FakeSemanticElement({ id: "item-c", dataType: "NodeListItem" });
+  const destinationList = new FakeSemanticElement({ id: "destination-list", dataType: "NodeList" });
+
+  editor.appendChild(rootList);
+  rootList.appendChild(sourceItem);
+  rootList.appendChild(destinationItem);
+  sourceItem.appendChild(sourceParagraph);
+  sourceItem.appendChild(sourceList);
+  sourceList.appendChild(movedItem);
+  destinationItem.appendChild(destinationList);
+
+  sourceList.removeChild(movedItem);
+  destinationList.appendChild(movedItem);
+
+  assert.equal(
+    classifySemanticMutations([
+      childListRecord(sourceList, [], [movedItem]),
+      childListRecord(destinationList, [movedItem]),
+    ], editor as unknown as HTMLElement),
+    "structural",
+    "moving a NodeListItem between nested NodeList parents changes topology",
   );
 });
 

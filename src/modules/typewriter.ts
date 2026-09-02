@@ -38,6 +38,20 @@ export function shouldHandleTypewriterEditKey(
     (event.key === "Enter" || event.key === "Backspace");
 }
 
+export function shouldHandleListStructuralIntentKey(
+  event: Pick<
+    KeyboardEvent,
+    "key" | "isComposing" | "defaultPrevented" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey"
+  >,
+): boolean {
+  return event.key === "Tab"
+    && !event.isComposing
+    && !event.defaultPrevented
+    && !event.ctrlKey
+    && !event.altKey
+    && !event.metaKey;
+}
+
 export { shouldCancelPendingScrollForReducedMotion } from "./typewriter/scroll";
 
 let pendingCheck: number | null = null;
@@ -336,6 +350,19 @@ function shouldAnimateBlockShiftForKey(key: string): boolean {
   return beforeCaret.toString().replace(/[\u200B\uFEFF\u00A0]/g, '') === '';
 }
 
+function listStructuralIntentEditorForKey(event: KeyboardEvent): HTMLElement | null {
+  if (!shouldHandleListStructuralIntentKey(event) || composing) return null;
+
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return null;
+
+  const anchorNode = selection.anchorNode;
+  if (!anchorNode) return null;
+  const selectionElement = elementFromNode(anchorNode);
+  const listItem = selectionElement?.closest('[data-type="NodeListItem"]');
+  return listItem?.closest(".protyle-wysiwyg") as HTMLElement | null;
+}
+
 function onStructuralEditFinish(finish: structuralEdit.StructuralEditFinish): void {
   if (!initialized) return;
 
@@ -458,6 +485,11 @@ export function initTypewriter(): void {
           return;
         }
         const ke = e as KeyboardEvent;
+        const listEditor = listStructuralIntentEditorForKey(ke);
+        if (listEditor) {
+          structuralEdit.beginStructuralEdit("list-change", listEditor);
+          return;
+        }
         if (!shouldHandleTypewriterEditKey(ke)) return;
         const shouldAnimateBlockShift = shouldAnimateBlockShiftForKey(ke.key);
         // Enter/Backspace 后 SiYuan 可能 preventDefault → 不触发 input 事件 → typewriterActive 不被重置
