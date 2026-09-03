@@ -42,6 +42,15 @@ import * as inputModeTriggers from "./inputModeTriggers";
 import * as structuralEdit from "./structuralEdit";
 import { createNestedRippleEngine } from "./ripple/nestedEngine";
 import {
+  claimRippleOwnership,
+  clearStructuralCarryovers,
+  hasStructuralCarryovers,
+  installStructuralCarryover,
+  RIPPLE_BLOCK_CLASS,
+  RIPPLE_OPACITY_PROPERTY,
+  RIPPLE_TRANSITION_DURATION_PROPERTY,
+} from "./ripple/structuralCarryover";
+import {
   releaseAfterOpacityTransition,
   type TransitionReleaseTimer,
 } from "./ripple/transitionRelease";
@@ -54,9 +63,6 @@ const SENTENCE_OUTGOING_DIM_HIGHLIGHT = "zt-sentence-outgoing-dim";
 const SENTENCE_FADE_IN_HIGHLIGHT = "zt-sentence-fade-in";
 const SENTENCE_FADE_OUT_HIGHLIGHT = "zt-sentence-fade-out";
 const SENTENCE_FADE_MS = Math.round(TRANSITION_SEC * 1000);
-const RIPPLE_BLOCK_CLASS = "zentype-ripple-block";
-const RIPPLE_OPACITY_PROPERTY = "--zt-ripple-opacity";
-const RIPPLE_TRANSITION_DURATION_PROPERTY = "--zt-ripple-transition-duration";
 const NESTED_RIPPLE_ENABLED = true;
 const nestedRippleEngine = createNestedRippleEngine();
 
@@ -78,16 +84,7 @@ interface StructuralVisualSnapshot {
   hadSentenceDim: boolean;
 }
 
-interface StructuralCarryover {
-  opacity: string;
-  duration: string;
-  originalOpacity: InlineStyleValue;
-  originalDuration: InlineStyleValue;
-  classAdded: boolean;
-}
-
 const pendingStructuralSnapshots = new Map<string, StructuralVisualSnapshot>();
-const structuralCarryovers = new Map<HTMLElement, StructuralCarryover>();
 let unsubInputMode: (() => void) | null = null;
 let unsubStructuralEditFinish: (() => void) | null = null;
 let visualStateDirty = false;
@@ -189,72 +186,16 @@ function captureStructuralVisualSnapshot(element: HTMLElement): StructuralVisual
   };
 }
 
-function releaseStructuralCarryover(
-  element: HTMLElement,
-  carryover: StructuralCarryover,
-): void {
-  const opacity = readInlineStyleValue(element.style, RIPPLE_OPACITY_PROPERTY);
-  if (sameInlineStyleValue(opacity, { value: carryover.opacity, priority: "" })) {
-    element.style.setProperty(
-      RIPPLE_OPACITY_PROPERTY,
-      carryover.originalOpacity.value,
-      carryover.originalOpacity.priority,
-    );
-  }
-
-  const duration = readInlineStyleValue(element.style, RIPPLE_TRANSITION_DURATION_PROPERTY);
-  if (sameInlineStyleValue(duration, { value: carryover.duration, priority: "" })) {
-    element.style.setProperty(
-      RIPPLE_TRANSITION_DURATION_PROPERTY,
-      carryover.originalDuration.value,
-      carryover.originalDuration.priority,
-    );
-  }
-
-  if (carryover.classAdded && element.classList.contains(RIPPLE_BLOCK_CLASS)) {
-    element.classList.remove(RIPPLE_BLOCK_CLASS);
-  }
-}
-
-function clearStructuralCarryovers(): void {
-  for (const [element, carryover] of structuralCarryovers) {
-    releaseStructuralCarryover(element, carryover);
-  }
-  structuralCarryovers.clear();
-  pendingStructuralSnapshots.clear();
-}
-
-function applyStructuralCarryover(
+function installSnapshotCarryover(
   element: HTMLElement,
   snapshot: StructuralVisualSnapshot,
 ): void {
-  if (!element.isConnected || structuralCarryovers.has(element)) return;
-
-  const provisionalOpacity =
+  const opacity =
     snapshot.wasFocused &&
     snapshot.hadSentenceDim
       ? String(BLOCK_LEVELS[1])
       : snapshot.opacity;
-
-  // SiYuan may clone the old DOM node together with zenType's private class
-  // and custom properties. Those values belonged to the removed HTMLElement;
-  // on the replacement they are stale visual residue, not valid ownership.
-  // Treat the replacement as clean so the provisional baseline can override a
-  // copied opacity=1 / transition=0.4s instead of bailing out and flashing.
-  const originalOpacity: InlineStyleValue = { value: "", priority: "" };
-  const originalDuration: InlineStyleValue = { value: "", priority: "" };
-  const duration = "0s";
-
-  element.style.setProperty(RIPPLE_TRANSITION_DURATION_PROPERTY, duration);
-  element.style.setProperty(RIPPLE_OPACITY_PROPERTY, provisionalOpacity);
-  element.classList.add(RIPPLE_BLOCK_CLASS);
-  structuralCarryovers.set(element, {
-    opacity: provisionalOpacity,
-    duration,
-    originalOpacity,
-    originalDuration,
-    classAdded: true,
-  });
+  installStructuralCarryover(element, opacity);
 }
 
 function carryStructuralReplacementVisualState(
@@ -292,7 +233,7 @@ function carryStructuralReplacementVisualState(
       if (replacement) {
         matchedAdded.add(replacement);
         pendingStructuralSnapshots.delete(id);
-        if (snapshot) applyStructuralCarryover(replacement, snapshot);
+        if (snapshot) installSnapshotCarryover(replacement, snapshot);
         continue;
       }
 
@@ -309,7 +250,7 @@ function carryStructuralReplacementVisualState(
         pendingStructuralSnapshots.delete(id);
         break;
       }
-      applyStructuralCarryover(added, snapshot);
+      installSnapshotCarryover(added, snapshot);
       pendingStructuralSnapshots.delete(id);
       break;
     }
@@ -916,41 +857,6 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
   }
 }
 
-function claimBlockOpacityOwnership(
-  block: HTMLElement,
-): { owned: OwnedInlineStyle; adoptedCarryover: boolean } {
-  const carryover = structuralCarryovers.get(block);
-  if (!carryover) {
-    return {
-      owned: claimInlineStyle(block.style, [
-        RIPPLE_OPACITY_PROPERTY,
-        RIPPLE_TRANSITION_DURATION_PROPERTY,
-      ]),
-      adoptedCarryover: false,
-    };
-  }
-
-  const owned: OwnedInlineStyle = {
-    original: {
-      [RIPPLE_OPACITY_PROPERTY]: carryover.originalOpacity,
-      [RIPPLE_TRANSITION_DURATION_PROPERTY]: carryover.originalDuration,
-    },
-    applied: {
-      [RIPPLE_OPACITY_PROPERTY]: readInlineStyleValue(
-        block.style,
-        RIPPLE_OPACITY_PROPERTY,
-      ),
-      [RIPPLE_TRANSITION_DURATION_PROPERTY]: readInlineStyleValue(
-        block.style,
-        RIPPLE_TRANSITION_DURATION_PROPERTY,
-      ),
-    },
-    blocked: new Set<string>(),
-  };
-  structuralCarryovers.delete(block);
-  return { owned, adoptedCarryover: true };
-}
-
 // --- Block-level opacity ---
 
 function applyBlockOpacity(
@@ -971,7 +877,7 @@ function applyBlockOpacity(
 
   // P0-3: 同一顶层块 + 无滚动 + 无块增删 → distance/weight/opacity 与上一帧完全相同，跳过。
   if (
-    structuralCarryovers.size === 0 &&
+    !hasStructuralCarryovers() &&
     isSameBlockOpacityCacheTarget({
       container: lastBlockOpacityContainer,
       blockId: lastBlockOpacityBlockId,
@@ -1014,9 +920,9 @@ function applyBlockOpacity(
     let owned = ownedBlockStyles.get(block);
     let adoptedCarryover = false;
     if (!owned) {
-      const ownership = claimBlockOpacityOwnership(block);
+      const ownership = claimRippleOwnership(block);
       owned = ownership.owned;
-      adoptedCarryover = ownership.adoptedCarryover;
+      adoptedCarryover = ownership.adoptedStructuralCarryover;
       ownedBlockStyles.set(block, owned);
       ownedBlocks.add(block);
     }
