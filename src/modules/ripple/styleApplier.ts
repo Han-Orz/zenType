@@ -1,21 +1,18 @@
 import { RIPPLE_CONFIG } from "../../config";
 import {
-  claimInlineStyle,
   restoreOwnedInlineStyle,
   setOwnedInlineStyle,
   type InlineStyleValue,
   type OwnedInlineStyle,
 } from "../../utils/inlineStyleOwnership";
 import type { RippleTargetPlan } from "./semanticPlanner";
-import { releaseAfterOpacityTransition } from "./transitionRelease";
-
-const RIPPLE_BLOCK_CLASS = "zentype-ripple-block";
-const RIPPLE_OPACITY_PROPERTY = "--zt-ripple-opacity";
-const RIPPLE_TRANSITION_DURATION_PROPERTY = "--zt-ripple-transition-duration";
-const RIPPLE_STYLE_PROPERTIES = [
+import {
+  claimRippleOwnership,
+  RIPPLE_BLOCK_CLASS,
   RIPPLE_OPACITY_PROPERTY,
   RIPPLE_TRANSITION_DURATION_PROPERTY,
-] as const;
+} from "./structuralCarryover";
+import { releaseAfterOpacityTransition } from "./transitionRelease";
 
 interface ActiveTarget {
   owned: OwnedInlineStyle;
@@ -250,11 +247,14 @@ export function createRippleStyleApplier(): RippleStyleApplier {
 
       let activeTarget = activeTargets.get(element);
       const handoffSource = activeTarget ? undefined : handoffSources.get(element);
+      let adoptedStructuralCarryover = false;
 
       if (!activeTarget) {
+        const ownership = claimRippleOwnership(element);
+        adoptedStructuralCarryover = ownership.adoptedStructuralCarryover;
         activeTarget = {
-          owned: claimInlineStyle(element.style, RIPPLE_STYLE_PROPERTIES),
-          classAdded: false,
+          owned: ownership.owned,
+          classAdded: ownership.classAdded,
           blocked: false,
           pendingExit: null,
         };
@@ -266,6 +266,34 @@ export function createRippleStyleApplier(): RippleStyleApplier {
       if (activeTarget.blocked) continue;
 
       const finalOpacity = opacityForDistance(target.distance);
+      if (adoptedStructuralCarryover) {
+        const durationApplied = applyPrivateProperty(
+          element,
+          activeTarget.owned,
+          RIPPLE_TRANSITION_DURATION_PROPERTY,
+          `${RIPPLE_CONFIG.TRANSITION_SEC}s`,
+        );
+        const appliedOpacity = activeTarget.owned.applied[RIPPLE_OPACITY_PROPERTY];
+        const opacityAlreadyFinal = appliedOpacity?.value === finalOpacity &&
+          sameStyleValue(currentStyleValue(element.style, RIPPLE_OPACITY_PROPERTY), appliedOpacity);
+        const opacityApplied = durationApplied && (
+          opacityAlreadyFinal || applyPrivateProperty(
+            element,
+            activeTarget.owned,
+            RIPPLE_OPACITY_PROPERTY,
+            finalOpacity,
+          )
+        );
+        if (!durationApplied || !opacityApplied) {
+          activeTarget.blocked = true;
+          releaseTarget(element, activeTarget);
+          activeTargets.delete(element);
+          continue;
+        }
+        addRippleClass(element, activeTarget);
+        continue;
+      }
+
       if (handoffSource) {
         // Establish the new layer at the old layer's visual baseline while
         // transitions are suppressed. The baseline is flushed before the old
