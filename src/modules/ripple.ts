@@ -644,6 +644,22 @@ function applyStableSentenceHighlight(block: HTMLElement): void {
   lastDimTextNodes = snapshotTextNodeMap(textNodeMap);
 }
 
+function rebindStructuralSentenceHighlight(block: HTMLElement): void {
+  if (!sentenceHighlightSupported()) return;
+
+  const blockId = nodeIdOf(block);
+  if (
+    blockId === null ||
+    lastDimBlockId === null ||
+    blockId === lastDimBlockId ||
+    !lastHadDimRanges
+  ) {
+    return;
+  }
+
+  applyStableSentenceHighlight(block);
+}
+
 function refreshSentenceFadeRanges(
   textNodeMap: TextNodeEntry[],
   sentenceRanges: SentenceRange[],
@@ -1235,6 +1251,7 @@ function onDomMutation(records: MutationRecord[]): void {
       // Once a real transaction is pending, even a same-block rerender is
       // host follow-up activity and must extend its quiet window.
       carryStructuralReplacementVisualState(childListRecords);
+      rebindStructuralSentenceHighlight(currentBlock);
       structuralEdit.noteStructuralActivity(container);
       nestedRippleEngine.invalidateStructure();
       return;
