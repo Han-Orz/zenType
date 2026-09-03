@@ -62,6 +62,12 @@ class FakeElement {
   readonly style = new FakeStyle();
   readonly classList = new FakeClassList();
   readonly descendants = new Set<HTMLElement>();
+  layoutFlushes = 0;
+
+  get offsetHeight(): number {
+    this.layoutFlushes++;
+    return 0;
+  }
 
   contains(node: Node): boolean {
     return this.descendants.has(node as unknown as HTMLElement);
@@ -284,47 +290,45 @@ test("retargets an existing element without staging natural opacity", () => {
 });
 
 test("hands ancestor ownership to a descendant at the old visual baseline", () => {
-  withFakeAnimationFrames((frames) => {
-    const branchRoot = new FakeElement();
-    const descendant = new FakeElement();
-    branchRoot.descendants.add(asHTMLElement(descendant));
-    branchRoot.style.setProperty(OPACITY_PROPERTY, "0.73", "important");
-    branchRoot.style.setProperty(DURATION_PROPERTY, "1.2s", "important");
-    const applier = createRippleStyleApplier();
+  const branchRoot = new FakeElement();
+  const descendant = new FakeElement();
+  branchRoot.descendants.add(asHTMLElement(descendant));
+  branchRoot.style.setProperty(OPACITY_PROPERTY, "0.73", "important");
+  branchRoot.style.setProperty(DURATION_PROPERTY, "1.2s", "important");
+  const applier = createRippleStyleApplier();
 
-    applier.apply(
-      plan(targetWithRole("branch", "branch-root", 1)),
-      binding(["branch", branchRoot]),
-    );
-    descendant.style.writes.length = 0;
-    applier.apply(
-      plan(target("content", 1)),
-      binding(["content", descendant]),
-    );
+  applier.apply(
+    plan(targetWithRole("branch", "branch-root", 1)),
+    binding(["branch", branchRoot]),
+  );
+  descendant.style.writes.length = 0;
+  applier.apply(
+    plan(target("content", 1)),
+    binding(["content", descendant]),
+  );
 
-    assert.equal(branchRoot.style.getPropertyValue(OPACITY_PROPERTY), "0.73");
-    assert.equal(branchRoot.style.getPropertyPriority(OPACITY_PROPERTY), "important");
-    assert.equal(branchRoot.style.getPropertyValue(DURATION_PROPERTY), "1.2s");
-    assert.equal(branchRoot.classList.contains(RIPPLE_CLASS), false);
-    assert.equal(descendant.style.getPropertyValue(OPACITY_PROPERTY), "0.4");
-    assert.equal(
-      descendant.style.getPropertyValue(DURATION_PROPERTY),
-      `${RIPPLE_CONFIG.TRANSITION_SEC}s`,
-    );
-    assert.equal(descendant.classList.contains(RIPPLE_CLASS), true);
-    assert.deepEqual(
-      descendant.style.writes
-        .filter((write) => write.property === OPACITY_PROPERTY)
-        .map((write) => write.value),
-      ["0.4"],
-    );
-    assert.equal(descendant.style.getPropertyValue(OPACITY_PROPERTY), "0.4");
-    assert.equal(
-      descendant.style.getPropertyValue(DURATION_PROPERTY),
-      `${RIPPLE_CONFIG.TRANSITION_SEC}s`,
-    );
-    assert.equal(frames.pending.size, 0);
-  });
+  assert.equal(branchRoot.style.getPropertyValue(OPACITY_PROPERTY), "0.73");
+  assert.equal(branchRoot.style.getPropertyPriority(OPACITY_PROPERTY), "important");
+  assert.equal(branchRoot.style.getPropertyValue(DURATION_PROPERTY), "1.2s");
+  assert.equal(branchRoot.classList.contains(RIPPLE_CLASS), false);
+  assert.equal(descendant.style.getPropertyValue(OPACITY_PROPERTY), "0.4");
+  assert.equal(
+    descendant.style.getPropertyValue(DURATION_PROPERTY),
+    `${RIPPLE_CONFIG.TRANSITION_SEC}s`,
+  );
+  assert.equal(descendant.classList.contains(RIPPLE_CLASS), true);
+  assert.equal(descendant.layoutFlushes, 1);
+  assert.deepEqual(
+    descendant.style.writes
+      .filter((write) => write.property === OPACITY_PROPERTY)
+      .map((write) => write.value),
+    ["0.4"],
+  );
+  assert.equal(descendant.style.getPropertyValue(OPACITY_PROPERTY), "0.4");
+  assert.equal(
+    descendant.style.getPropertyValue(DURATION_PROPERTY),
+    `${RIPPLE_CONFIG.TRANSITION_SEC}s`,
+  );
 });
 
 test("retargets a transferred descendant from the old baseline without natural opacity", () => {
@@ -346,6 +350,7 @@ test("retargets a transferred descendant from the old baseline without natural o
 
     assert.equal(descendant.style.getPropertyValue(OPACITY_PROPERTY), "0.4");
     assert.equal(descendant.style.getPropertyValue(DURATION_PROPERTY), "0s");
+    assert.equal(descendant.layoutFlushes, 1);
     assert.deepEqual(
       descendant.style.writes
         .filter((write) => write.property === OPACITY_PROPERTY)
@@ -391,6 +396,7 @@ test("hands descendant ownership to an ancestor without a double-dim paint", () 
     assert.equal(ancestor.style.getPropertyValue(OPACITY_PROPERTY), "0.4");
     assert.equal(ancestor.style.getPropertyValue(DURATION_PROPERTY), "0s");
     assert.equal(ancestor.classList.contains(RIPPLE_CLASS), true);
+    assert.equal(ancestor.layoutFlushes, 1);
 
     frames.flushNext();
     assert.equal(ancestor.style.getPropertyValue(OPACITY_PROPERTY), "1");

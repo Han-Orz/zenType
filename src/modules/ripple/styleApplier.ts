@@ -86,6 +86,13 @@ function removeRippleClass(element: HTMLElement, target: ActiveTarget): void {
   target.classAdded = false;
 }
 
+function commitHandoffBaseline(element: HTMLElement): void {
+  // A rAF callback still runs before paint. Force the browser to commit the
+  // zero-duration baseline before the old owner is released or the transition
+  // duration is restored.
+  void element.offsetHeight;
+}
+
 function opacityForDistance(distance: number): string {
   const levels = RIPPLE_CONFIG.BLOCK_LEVELS;
   return String(levels[Math.min(distance, levels.length - 1)]);
@@ -260,8 +267,8 @@ export function createRippleStyleApplier(): RippleStyleApplier {
       const finalOpacity = opacityForDistance(target.distance);
       if (handoffSource) {
         // Establish the new layer at the old layer's visual baseline while
-        // transitions are suppressed. The old layer is released below in the
-        // same task; the next frame restores the transition and retargets.
+        // transitions are suppressed. The baseline is flushed before the old
+        // layer is released; the next frame only retargets when needed.
         const durationApplied = applyPrivateProperty(
           element,
           activeTarget.owned,
@@ -283,6 +290,7 @@ export function createRippleStyleApplier(): RippleStyleApplier {
         }
 
         addRippleClass(element, activeTarget);
+        commitHandoffBaseline(element);
         if (baselineOpacity === finalOpacity) {
           const normalDurationApplied = applyPrivateProperty(
             element,
