@@ -501,7 +501,12 @@ function preserveOutgoingSentenceHighlight(): void {
     clearOutgoingSentenceHighlight();
     return;
   }
-  if (lastDimHighlightRanges.length === 0) {
+  const connectedRanges = lastDimHighlightRanges.filter(
+    (range) =>
+      range.startContainer.isConnected &&
+      range.endContainer.isConnected,
+  );
+  if (connectedRanges.length === 0) {
     return;
   }
 
@@ -512,7 +517,7 @@ function preserveOutgoingSentenceHighlight(): void {
 
   outgoingSentenceRanges = [
     ...outgoingSentenceRanges,
-    ...lastDimHighlightRanges,
+    ...connectedRanges,
   ];
   CSS.highlights.set(
     SENTENCE_OUTGOING_DIM_HIGHLIGHT,
@@ -1055,15 +1060,6 @@ function applyRippleNow(): void {
     lastThemeMode = themeMode;
   }
 
-  const nestedApplied = NESTED_RIPPLE_ENABLED
-    ? nestedRippleEngine.apply(container, currentBlock, {
-      preserveOnInvalid: false,
-    })
-    : false;
-
-  applyBlockOpacity(container, currentBlock, nestedApplied);
-  clearStructuralVisualState();
-
   const textNodeMap = buildTextNodeMap(currentBlock);
   const caretOffset = getCaretOffset(currentBlock, textNodeMap);
   if (caretOffset !== null) {
@@ -1073,6 +1069,15 @@ function applyRippleNow(): void {
     setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, []);
     resetSentenceCache();
   }
+
+  const nestedApplied = NESTED_RIPPLE_ENABLED
+    ? nestedRippleEngine.apply(container, currentBlock, {
+      preserveOnInvalid: false,
+    })
+    : false;
+
+  applyBlockOpacity(container, currentBlock, nestedApplied);
+  clearStructuralVisualState();
 
   lastAppliedFocusBlockId = nodeIdOf(currentBlock);
 
