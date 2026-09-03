@@ -85,6 +85,12 @@ interface StructuralVisualSnapshot {
 }
 
 const pendingStructuralSnapshots = new Map<string, StructuralVisualSnapshot>();
+
+function clearStructuralVisualState(): void {
+  clearStructuralCarryovers();
+  pendingStructuralSnapshots.clear();
+}
+
 let unsubInputMode: (() => void) | null = null;
 let unsubStructuralEditFinish: (() => void) | null = null;
 let visualStateDirty = false;
@@ -1056,7 +1062,7 @@ function applyRippleNow(): void {
     : false;
 
   applyBlockOpacity(container, currentBlock, nestedApplied);
-  clearStructuralCarryovers();
+  clearStructuralVisualState();
 
   const textNodeMap = buildTextNodeMap(currentBlock);
   const caretOffset = getCaretOffset(currentBlock, textNodeMap);
@@ -1263,7 +1269,7 @@ function setOwnedRootStyle(property: string, value: string): void {
 
 function clearAll(): void {
   disconnectMutationObserver();
-  clearStructuralCarryovers();
+  clearStructuralVisualState();
   nestedRippleEngine.clear();
   clearLegacyBlockOpacity();
   if (
