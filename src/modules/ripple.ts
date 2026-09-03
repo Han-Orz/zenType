@@ -229,12 +229,7 @@ function applyStructuralCarryover(
   snapshot: StructuralVisualSnapshot,
   currentBlockId: string | null,
 ): void {
-  if (!element.isConnected) return;
-  if (element.classList.contains(RIPPLE_BLOCK_CLASS)) return;
-  if (
-    element.style.getPropertyValue(RIPPLE_OPACITY_PROPERTY) !== "" ||
-    element.style.getPropertyValue(RIPPLE_TRANSITION_DURATION_PROPERTY) !== ""
-  ) return;
+  if (!element.isConnected || structuralCarryovers.has(element)) return;
 
   const provisionalOpacity =
     snapshot.wasFocused &&
@@ -242,13 +237,16 @@ function applyStructuralCarryover(
     currentBlockId !== nodeIdOf(element)
       ? String(BLOCK_LEVELS[1])
       : snapshot.opacity;
-  const originalOpacity = readInlineStyleValue(element.style, RIPPLE_OPACITY_PROPERTY);
-  const originalDuration = readInlineStyleValue(element.style, RIPPLE_TRANSITION_DURATION_PROPERTY);
+
+  // SiYuan may clone the old DOM node together with zenType's private class
+  // and custom properties. Those values belonged to the removed HTMLElement;
+  // on the replacement they are stale visual residue, not valid ownership.
+  // Treat the replacement as clean so the provisional baseline can override a
+  // copied opacity=1 / transition=0.4s instead of bailing out and flashing.
+  const originalOpacity: InlineStyleValue = { value: "", priority: "" };
+  const originalDuration: InlineStyleValue = { value: "", priority: "" };
   const duration = "0s";
 
-  // The replacement is connected by the host before MutationObserver runs.
-  // Install a zero-duration baseline before the next paint, then let the
-  // normal Ripple apply replace it after the structural transaction settles.
   element.style.setProperty(RIPPLE_TRANSITION_DURATION_PROPERTY, duration);
   element.style.setProperty(RIPPLE_OPACITY_PROPERTY, provisionalOpacity);
   element.classList.add(RIPPLE_BLOCK_CLASS);
