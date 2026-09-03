@@ -24,6 +24,16 @@ interface ActiveTarget {
   pendingExit: ReturnType<typeof setTimeout> | null;
 }
 
+interface OwnershipHandoffSource {
+  element: HTMLElement;
+  target: ActiveTarget;
+}
+
+interface PendingHandoff {
+  target: ActiveTarget;
+  finalOpacity: string;
+}
+
 export interface RippleStyleApplier {
   apply(
     plan: RippleTargetPlan,
@@ -83,6 +93,8 @@ function opacityForDistance(distance: number): string {
 
 export function createRippleStyleApplier(): RippleStyleApplier {
   const activeTargets = new Map<HTMLElement, ActiveTarget>();
+  const pendingHandoffs = new Map<HTMLElement, PendingHandoff>();
+  let pendingHandoffFrame: number | null = null;
 
   function cancelPendingExit(target: ActiveTarget): void {
     if (target.pendingExit === null) return;
@@ -96,14 +108,69 @@ export function createRippleStyleApplier(): RippleStyleApplier {
     removeRippleClass(element, target);
   }
 
-  function hasNestedOwnershipTransfer(
-    element: HTMLElement,
-    nextTargets: Set<HTMLElement>,
-  ): boolean {
-    for (const nextElement of nextTargets) {
-      if (element.contains(nextElement) || nextElement.contains(element)) return true;
+  function cancelPendingHandoffFrame(): void {
+    if (pendingHandoffFrame === null) return;
+    if (typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(pendingHandoffFrame);
     }
-    return false;
+    pendingHandoffFrame = null;
+  }
+
+  function flushPendingHandoffs(): void {
+    const handoffs = [...pendingHandoffs.entries()];
+    pendingHandoffs.clear();
+
+    for (const [element, handoff] of handoffs) {
+      if (activeTargets.get(element) !== handoff.target || handoff.target.blocked) continue;
+
+      const durationApplied = applyPrivateProperty(
+        element,
+        handoff.target.owned,
+        RIPPLE_TRANSITION_DURATION_PROPERTY,
+        `${RIPPLE_CONFIG.TRANSITION_SEC}s`,
+      );
+      const opacityApplied = durationApplied && applyPrivateProperty(
+        element,
+        handoff.target.owned,
+        RIPPLE_OPACITY_PROPERTY,
+        handoff.finalOpacity,
+      );
+      if (durationApplied && opacityApplied) continue;
+
+      handoff.target.blocked = true;
+      releaseTarget(element, handoff.target);
+      activeTargets.delete(element);
+    }
+  }
+
+  function schedulePendingHandoffFlush(): void {
+    if (pendingHandoffs.size === 0 || pendingHandoffFrame !== null) return;
+    if (typeof requestAnimationFrame !== "function") {
+      flushPendingHandoffs();
+      return;
+    }
+    pendingHandoffFrame = requestAnimationFrame(() => {
+      pendingHandoffFrame = null;
+      flushPendingHandoffs();
+    });
+  }
+
+  function settlePendingHandoffsBeforeApply(): void {
+    cancelPendingHandoffFrame();
+    if (pendingHandoffs.size > 0) flushPendingHandoffs();
+  }
+
+  function findHandoffSource(
+    element: HTMLElement,
+    target: ActiveTarget,
+    nextTargets: Set<HTMLElement>,
+  ): OwnershipHandoffSource | null {
+    for (const nextElement of nextTargets) {
+      if (element.contains(nextElement) || nextElement.contains(element)) {
+        return { element, target };
+      }
+    }
+    return null;
   }
 
   function releaseTargetAfterTransition(
@@ -144,14 +211,38 @@ export function createRippleStyleApplier(): RippleStyleApplier {
   }
 
   function apply(plan: RippleTargetPlan, bindings: ReadonlyMap<string, HTMLElement>): void {
+    settlePendingHandoffsBeforeApply();
     const nextTargets = new Set<HTMLElement>();
 
     for (const target of plan.targets) {
       const element = bindings.get(target.semanticId);
       if (!element || nextTargets.has(element)) continue;
       nextTargets.add(element);
+    }
+
+    const handoffSources = new Map<HTMLElement, OwnershipHandoffSource>();
+    const handoffSourceElements = new Set<HTMLElement>();
+    for (const [element, activeTarget] of activeTargets) {
+      if (nextTargets.has(element)) continue;
+      const source = findHandoffSource(element, activeTarget, nextTargets);
+      if (!source) continue;
+      handoffSourceElements.add(element);
+      for (const nextElement of nextTargets) {
+        if (
+          (element.contains(nextElement) || nextElement.contains(element)) &&
+          !handoffSources.has(nextElement)
+        ) {
+          handoffSources.set(nextElement, source);
+        }
+      }
+    }
+
+    for (const target of plan.targets) {
+      const element = bindings.get(target.semanticId);
+      if (!element || !nextTargets.has(element)) continue;
 
       let activeTarget = activeTargets.get(element);
+      const handoffSource = activeTarget ? undefined : handoffSources.get(element);
       if (!activeTarget) {
         activeTarget = {
           owned: claimInlineStyle(element.style, RIPPLE_STYLE_PROPERTIES),
@@ -166,11 +257,55 @@ export function createRippleStyleApplier(): RippleStyleApplier {
 
       if (activeTarget.blocked) continue;
 
+      const finalOpacity = opacityForDistance(target.distance);
+      if (handoffSource) {
+        // Establish the new layer at the old layer's visual baseline while
+        // transitions are suppressed. The old layer is released below in the
+        // same task; the next frame restores the transition and retargets.
+        const durationApplied = applyPrivateProperty(
+          element,
+          activeTarget.owned,
+          RIPPLE_TRANSITION_DURATION_PROPERTY,
+          "0s",
+        );
+        const baselineOpacity = handoffSource.target.owned.applied[RIPPLE_OPACITY_PROPERTY]?.value ?? "1";
+        const baselineApplied = durationApplied && applyPrivateProperty(
+          element,
+          activeTarget.owned,
+          RIPPLE_OPACITY_PROPERTY,
+          baselineOpacity,
+        );
+        if (!durationApplied || !baselineApplied) {
+          activeTarget.blocked = true;
+          restoreOwnedInlineStyle(element.style, activeTarget.owned);
+          removeRippleClass(element, activeTarget);
+          continue;
+        }
+
+        addRippleClass(element, activeTarget);
+        if (baselineOpacity === finalOpacity) {
+          const normalDurationApplied = applyPrivateProperty(
+            element,
+            activeTarget.owned,
+            RIPPLE_TRANSITION_DURATION_PROPERTY,
+            `${RIPPLE_CONFIG.TRANSITION_SEC}s`,
+          );
+          if (!normalDurationApplied) {
+            activeTarget.blocked = true;
+            releaseTarget(element, activeTarget);
+            activeTargets.delete(element);
+          }
+        } else {
+          pendingHandoffs.set(element, { target: activeTarget, finalOpacity });
+        }
+        continue;
+      }
+
       const opacityApplied = applyPrivateProperty(
         element,
         activeTarget.owned,
         RIPPLE_OPACITY_PROPERTY,
-        opacityForDistance(target.distance),
+        finalOpacity,
       );
       const durationApplied = opacityApplied && applyPrivateProperty(
         element,
@@ -191,7 +326,7 @@ export function createRippleStyleApplier(): RippleStyleApplier {
 
     for (const [element, activeTarget] of activeTargets) {
       if (nextTargets.has(element)) continue;
-      if (hasNestedOwnershipTransfer(element, nextTargets)) {
+      if (handoffSourceElements.has(element)) {
         // An ancestor or descendant target is taking over this element's
         // visual subtree. Do not stage the old layer through natural opacity
         // first: that would create a dim -> full -> dim handoff under CSS
@@ -202,9 +337,24 @@ export function createRippleStyleApplier(): RippleStyleApplier {
         releaseTargetAfterTransition(element, activeTarget);
       }
     }
+
+    schedulePendingHandoffFlush();
   }
 
   function clear(animate = true): void {
+    cancelPendingHandoffFrame();
+    if (animate) {
+      for (const [element, handoff] of pendingHandoffs) {
+        if (activeTargets.get(element) !== handoff.target || handoff.target.blocked) continue;
+        applyPrivateProperty(
+          element,
+          handoff.target.owned,
+          RIPPLE_TRANSITION_DURATION_PROPERTY,
+          `${RIPPLE_CONFIG.TRANSITION_SEC}s`,
+        );
+      }
+    }
+    pendingHandoffs.clear();
     for (const [element, activeTarget] of activeTargets) {
       if (animate) releaseTargetAfterTransition(element, activeTarget);
       else releaseTarget(element, activeTarget);

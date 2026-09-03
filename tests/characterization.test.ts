@@ -2069,6 +2069,8 @@ test("ripple preserves valid nested opacity until the coordinator commits a stru
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(newContent.style.getPropertyValue("--zt-ripple-opacity"), "1");
     assert.equal(fixture.focusContent.style.getPropertyValue("--zt-ripple-opacity"), "");
+    assert.equal(runtime.raf.pending.size, 1, "a changed nested handoff retargets on the next frame");
+    runtime.raf.flushNext(runtime.clock.now);
     assert.equal(runtime.raf.pending.size, 0);
 
     inputMode.setBothOff();
