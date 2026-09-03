@@ -26,6 +26,7 @@ import {
   claimInlineStyle,
   restoreOwnedInlineStyle,
   setOwnedInlineStyle,
+  type InlineStyleValue,
   type OwnedInlineStyle,
 } from "../utils/inlineStyleOwnership";
 import { resolveRangeTextPoint } from "../utils/rangeTextPoint";
@@ -70,6 +71,23 @@ const ownedBlockStyles = new WeakMap<HTMLElement, OwnedInlineStyle>();
 const ownedBlocks = new Set<HTMLElement>();
 const pendingBlockReleases = new Map<HTMLElement, TransitionReleaseTimer>();
 const ownedRootStyles = new Map<string, OwnedInlineStyle>();
+interface StructuralVisualSnapshot {
+  source: HTMLElement;
+  opacity: string;
+  wasFocused: boolean;
+  hadSentenceDim: boolean;
+}
+
+interface StructuralCarryover {
+  opacity: string;
+  duration: string;
+  originalOpacity: InlineStyleValue;
+  originalDuration: InlineStyleValue;
+  classAdded: boolean;
+}
+
+const pendingStructuralSnapshots = new Map<string, StructuralVisualSnapshot>();
+const structuralCarryovers = new Map<HTMLElement, StructuralCarryover>();
 let unsubInputMode: (() => void) | null = null;
 let unsubStructuralEditFinish: (() => void) | null = null;
 let visualStateDirty = false;
@@ -86,6 +104,7 @@ let lastBlockOpacityContainerTop: number | null = null;
 let lastBlockOpacityScrollTop: number | null = null;
 let lastBlockOpacityChildCount: number | null = null;
 let lastBlockOpacitySkipCurrentTopBlock = false;
+let lastAppliedFocusBlockId: string | null = null;
 
 // P1-2: 句级 dim 色 CSS 变量仅在 OFF→ON 或主题切换时设置，避免每帧重写。
 let rippleColorActive = false;
@@ -106,6 +125,201 @@ function getTopLevelBlock(currentBlock: HTMLElement, container: HTMLElement): HT
     parent = parent.parentElement;
   }
   return topBlock;
+}
+
+function readInlineStyleValue(style: CSSStyleDeclaration, property: string): InlineStyleValue {
+  return {
+    value: style.getPropertyValue(property),
+    priority: style.getPropertyPriority(property),
+  };
+}
+
+function sameInlineStyleValue(a: InlineStyleValue, b: InlineStyleValue): boolean {
+  return a.value === b.value && a.priority === b.priority;
+}
+
+function nodeIdOf(element: HTMLElement | null): string | null {
+  if (!element) return null;
+  const value = typeof element.getAttribute === "function"
+    ? element.getAttribute("data-node-id")
+    : element.dataset?.nodeId ?? null;
+  return value && value.length > 0 ? value : null;
+}
+
+function isStructuralVisualBlock(element: HTMLElement): boolean {
+  const id = nodeIdOf(element);
+  if (!id) return false;
+  if (
+    element.classList?.contains("protyle-action") ||
+    element.classList?.contains("protyle-attr")
+  ) return false;
+  const tagName = typeof element.tagName === "string" ? element.tagName.toLowerCase() : "";
+  return tagName !== "svg" && tagName !== "use";
+}
+
+function structuralVisualRoots(node: Node, result: HTMLElement[] = []): HTMLElement[] {
+  if (!node || node.nodeType !== Node.ELEMENT_NODE) return result;
+  const element = node as HTMLElement;
+  if (isStructuralVisualBlock(element)) {
+    result.push(element);
+    return result;
+  }
+  if (!element.children) return result;
+  for (const child of Array.from(element.children) as HTMLElement[]) {
+    structuralVisualRoots(child, result);
+  }
+  return result;
+}
+
+function captureStructuralVisualSnapshot(element: HTMLElement): StructuralVisualSnapshot | null {
+  const id = nodeIdOf(element);
+  if (!id) return null;
+
+  const hasRippleClass = element.classList?.contains(RIPPLE_BLOCK_CLASS) === true;
+  const opacity = element.style.getPropertyValue(RIPPLE_OPACITY_PROPERTY).trim();
+  const wasFocused = lastAppliedFocusBlockId === id;
+  const hadSentenceDim = wasFocused && lastDimBlockId === id && lastHadDimRanges;
+  if (!hasRippleClass && opacity === "" && !hadSentenceDim) return null;
+
+  return {
+    source: element,
+    opacity: opacity || "1",
+    wasFocused,
+    hadSentenceDim,
+  };
+}
+
+function releaseStructuralCarryover(
+  element: HTMLElement,
+  carryover: StructuralCarryover,
+): void {
+  const opacity = readInlineStyleValue(element.style, RIPPLE_OPACITY_PROPERTY);
+  if (sameInlineStyleValue(opacity, { value: carryover.opacity, priority: "" })) {
+    element.style.setProperty(
+      RIPPLE_OPACITY_PROPERTY,
+      carryover.originalOpacity.value,
+      carryover.originalOpacity.priority,
+    );
+  }
+
+  const duration = readInlineStyleValue(element.style, RIPPLE_TRANSITION_DURATION_PROPERTY);
+  if (sameInlineStyleValue(duration, { value: carryover.duration, priority: "" })) {
+    element.style.setProperty(
+      RIPPLE_TRANSITION_DURATION_PROPERTY,
+      carryover.originalDuration.value,
+      carryover.originalDuration.priority,
+    );
+  }
+
+  if (carryover.classAdded && element.classList.contains(RIPPLE_BLOCK_CLASS)) {
+    element.classList.remove(RIPPLE_BLOCK_CLASS);
+  }
+}
+
+function clearStructuralCarryovers(): void {
+  for (const [element, carryover] of structuralCarryovers) {
+    releaseStructuralCarryover(element, carryover);
+  }
+  structuralCarryovers.clear();
+  pendingStructuralSnapshots.clear();
+}
+
+function applyStructuralCarryover(
+  element: HTMLElement,
+  snapshot: StructuralVisualSnapshot,
+  currentBlockId: string | null,
+): void {
+  if (!element.isConnected) return;
+  if (element.classList.contains(RIPPLE_BLOCK_CLASS)) return;
+  if (
+    element.style.getPropertyValue(RIPPLE_OPACITY_PROPERTY) !== "" ||
+    element.style.getPropertyValue(RIPPLE_TRANSITION_DURATION_PROPERTY) !== ""
+  ) return;
+
+  const provisionalOpacity =
+    snapshot.wasFocused &&
+    snapshot.hadSentenceDim &&
+    currentBlockId !== nodeIdOf(element)
+      ? String(BLOCK_LEVELS[1])
+      : snapshot.opacity;
+  const originalOpacity = readInlineStyleValue(element.style, RIPPLE_OPACITY_PROPERTY);
+  const originalDuration = readInlineStyleValue(element.style, RIPPLE_TRANSITION_DURATION_PROPERTY);
+  const duration = "0s";
+
+  // The replacement is connected by the host before MutationObserver runs.
+  // Install a zero-duration baseline before the next paint, then let the
+  // normal Ripple apply replace it after the structural transaction settles.
+  element.style.setProperty(RIPPLE_TRANSITION_DURATION_PROPERTY, duration);
+  element.style.setProperty(RIPPLE_OPACITY_PROPERTY, provisionalOpacity);
+  element.classList.add(RIPPLE_BLOCK_CLASS);
+  structuralCarryovers.set(element, {
+    opacity: provisionalOpacity,
+    duration,
+    originalOpacity,
+    originalDuration,
+    classAdded: true,
+  });
+}
+
+function carryStructuralReplacementVisualState(
+  records: readonly MutationRecord[],
+  currentBlock: HTMLElement | null,
+): void {
+  const removedById = new Map<string, HTMLElement[]>();
+  const addedById = new Map<string, HTMLElement[]>();
+
+  for (const record of records) {
+    if (record.type !== "childList") continue;
+    for (const element of Array.from(record.removedNodes).flatMap((node) => structuralVisualRoots(node))) {
+      const id = nodeIdOf(element);
+      if (!id) continue;
+      const elements = removedById.get(id) ?? [];
+      elements.push(element);
+      removedById.set(id, elements);
+    }
+    for (const element of Array.from(record.addedNodes).flatMap((node) => structuralVisualRoots(node))) {
+      const id = nodeIdOf(element);
+      if (!id) continue;
+      const elements = addedById.get(id) ?? [];
+      elements.push(element);
+      addedById.set(id, elements);
+    }
+  }
+
+  const currentBlockId = nodeIdOf(currentBlock);
+  const matchedAdded = new Set<HTMLElement>();
+  for (const [id, removedElements] of removedById) {
+    const addedElements = addedById.get(id) ?? [];
+    for (const removed of removedElements) {
+      const replacement = addedElements.find((candidate) => (
+        candidate !== removed && !matchedAdded.has(candidate)
+      ));
+      const snapshot = captureStructuralVisualSnapshot(removed);
+      if (replacement) {
+        matchedAdded.add(replacement);
+        pendingStructuralSnapshots.delete(id);
+        if (snapshot) applyStructuralCarryover(replacement, snapshot, currentBlockId);
+        continue;
+      }
+
+      if (snapshot) pendingStructuralSnapshots.set(id, snapshot);
+    }
+  }
+
+  for (const [id, addedElements] of addedById) {
+    const snapshot = pendingStructuralSnapshots.get(id);
+    if (!snapshot) continue;
+    for (const added of addedElements) {
+      if (matchedAdded.has(added)) continue;
+      if (added === snapshot.source) {
+        pendingStructuralSnapshots.delete(id);
+        break;
+      }
+      applyStructuralCarryover(added, snapshot, currentBlockId);
+      pendingStructuralSnapshots.delete(id);
+      break;
+    }
+  }
 }
 
 function cancelPendingBlockRelease(block: HTMLElement): void {
@@ -836,6 +1050,8 @@ function applyRippleNow(): void {
   // place until the coordinator publishes that commit.
   if (structuralEdit.isStructuralEditPending()) return;
 
+  clearStructuralCarryovers();
+
   if (!inputMode.isFocusActive() || shouldPauseFocusAndTypewriter()) {
     clearAll();
     return;
@@ -887,6 +1103,8 @@ function applyRippleNow(): void {
     setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, []);
     resetSentenceCache();
   }
+
+  lastAppliedFocusBlockId = nodeIdOf(currentBlock);
 
 }
 
@@ -1020,6 +1238,7 @@ function onDomMutation(records: MutationRecord[]): void {
   const currentBlock = getCurrentBlock();
   if (!currentBlock) {
     if (structuralEdit.isStructuralEditPending()) {
+      carryStructuralReplacementVisualState(records, null);
       structuralEdit.noteStructuralActivity();
       nestedRippleEngine.invalidateStructure();
     }
@@ -1028,6 +1247,7 @@ function onDomMutation(records: MutationRecord[]): void {
   const container = currentBlock.closest(".protyle-wysiwyg") as HTMLElement | null;
   if (!container) {
     if (structuralEdit.isStructuralEditPending()) {
+      carryStructuralReplacementVisualState(records, currentBlock);
       structuralEdit.noteStructuralActivity();
       nestedRippleEngine.invalidateStructure();
     }
@@ -1044,6 +1264,7 @@ function onDomMutation(records: MutationRecord[]): void {
     if (structuralEdit.isStructuralEditPending()) {
       // Once a real transaction is pending, even a same-block rerender is
       // host follow-up activity and must extend its quiet window.
+      carryStructuralReplacementVisualState(childListRecords, currentBlock);
       structuralEdit.noteStructuralActivity(container);
       nestedRippleEngine.invalidateStructure();
       return;
@@ -1078,6 +1299,7 @@ function setOwnedRootStyle(property: string, value: string): void {
 
 function clearAll(): void {
   disconnectMutationObserver();
+  clearStructuralCarryovers();
   nestedRippleEngine.clear();
   clearLegacyBlockOpacity();
   if (
@@ -1096,6 +1318,7 @@ function clearAll(): void {
     ownedRootStyles.delete(property);
   }
   resetSentenceCache();
+  lastAppliedFocusBlockId = null;
   rippleColorActive = false;
   visualStateDirty = false;
 }

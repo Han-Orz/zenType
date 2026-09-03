@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setActiveEditor } from "siyuan";
+import { RIPPLE_CONFIG } from "../src/config";
 import * as inputMode from "../src/modules/inputMode";
 import * as inputModeTriggers from "../src/modules/inputModeTriggers";
 import {
@@ -2361,6 +2362,103 @@ test("pending structural transactions extend their quiet window for same-block r
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(isStructuralEditPending(), false);
     assert.equal(replacement.style.getPropertyValue("--zt-ripple-opacity"), "1");
+  } finally {
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("structural replacement carries dim visual state until normal Ripple ownership resumes", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(fixture.alternateContent.style.getPropertyValue("--zt-ripple-opacity"), "1");
+    assert.equal(runtime.highlights.has("zt-sentence-dim"), true);
+
+    runtime.document.dispatch("input", eventFor(fixture.alternateContent, {
+      inputType: "insertParagraph",
+      isComposing: false,
+    }));
+    assert.equal(isStructuralEditPending(), true);
+
+    const replacement = new FakeElement({
+      dataType: "NodeParagraph",
+      dataNodeId: "block:alternate",
+      contentEditable: true,
+    });
+    const replacementText = new FakeText("alternate. branch!");
+    append(replacement, replacementText);
+
+    const newItem = new FakeElement({
+      dataType: "NodeListItem",
+      dataNodeId: "item:after-enter",
+    });
+    const newMarker = new FakeElement({ classes: ["protyle-action"] });
+    const newContent = new FakeElement({
+      dataType: "NodeParagraph",
+      dataNodeId: "block:after-enter",
+      contentEditable: true,
+    });
+    const newText = new FakeText("new block");
+    const newAttr = new FakeElement({ classes: ["protyle-attr"] });
+    append(newContent, newText);
+    append(newItem, newMarker, newContent, newAttr);
+
+    const parentList = fixture.alternateItem.parentElement;
+    assert.ok(parentList);
+    fixture.alternateItem.replaceChild(replacement, fixture.alternateContent);
+    append(parentList, newItem);
+    runtime.setCaret(newText, 1, rect(20, 400));
+
+    const mutationObserver = runtime.mutationObservers.find((observer) =>
+      observer.observed.includes(fixture.rootList));
+    assert.ok(mutationObserver);
+    mutationObserver.callback([
+      {
+        type: "childList",
+        target: fixture.alternateItem,
+        addedNodes: [replacement],
+        removedNodes: [fixture.alternateContent],
+      },
+      {
+        type: "childList",
+        target: parentList,
+        addedNodes: [newItem],
+        removedNodes: [],
+      },
+    ] as unknown as MutationRecord[]);
+
+    assert.equal(
+      replacement.style.getPropertyValue("--zt-ripple-opacity"),
+      String(RIPPLE_CONFIG.BLOCK_LEVELS[1]),
+      "the replacement avoids the natural full-brightness window",
+    );
+    assert.equal(
+      replacement.style.getPropertyValue("--zt-ripple-transition-duration"),
+      "0s",
+    );
+    assert.equal(replacement.classList.contains("zentype-ripple-block"), true);
+    assert.equal(newContent.style.getPropertyValue("--zt-ripple-opacity"), "");
+
+    let settleFrames = 0;
+    while (isStructuralEditPending()) {
+      assert.ok(settleFrames++ < 8, "structural replacement settles in a bounded window");
+      runtime.clock.advance(16);
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+    while (runtime.raf.pending.size > 0) runtime.raf.flushNext(runtime.clock.now);
+
+    assert.equal(newContent.style.getPropertyValue("--zt-ripple-opacity"), "1");
+    assert.equal(replacement.style.getPropertyValue("--zt-ripple-opacity"), "");
+    assert.equal(replacement.classList.contains("zentype-ripple-block"), false);
   } finally {
     destroyRipple();
     inputMode.reset();
