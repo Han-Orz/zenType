@@ -44,6 +44,7 @@ import { createNestedRippleEngine } from "./ripple/nestedEngine";
 import {
   claimRippleOwnership,
   clearStructuralCarryovers,
+  hasStructuralCarryover,
   hasStructuralCarryovers,
   installStructuralCarryover,
   RIPPLE_BLOCK_CLASS,
@@ -1013,6 +1014,44 @@ function clearLegacyBlockOpacity(): void {
   lastBlockOpacitySkipCurrentTopBlock = false;
 }
 
+function applyBlockVisualState(
+  container: HTMLElement,
+  currentBlock: HTMLElement,
+): void {
+  const nestedApplied = NESTED_RIPPLE_ENABLED
+    ? nestedRippleEngine.apply(container, currentBlock, {
+      preserveOnInvalid: false,
+    })
+    : false;
+
+  applyBlockOpacity(container, currentBlock, nestedApplied);
+  clearStructuralVisualState();
+}
+
+function applyBlockVisualStateAfterSentencePaint(
+  container: HTMLElement,
+  currentBlock: HTMLElement,
+): void {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (!active || structuralEdit.isStructuralEditPending()) return;
+
+      if (
+        !container.isConnected ||
+        !currentBlock.isConnected ||
+        getCurrentBlock() !== currentBlock
+      ) {
+        applyRipple();
+        return;
+      }
+
+      if (!hasStructuralCarryover(currentBlock)) return;
+
+      applyBlockVisualState(container, currentBlock);
+    });
+  });
+}
+
 // --- Main apply ---
 
 function applyRippleNow(): void {
@@ -1055,15 +1094,6 @@ function applyRippleNow(): void {
     lastThemeMode = themeMode;
   }
 
-  const nestedApplied = NESTED_RIPPLE_ENABLED
-    ? nestedRippleEngine.apply(container, currentBlock, {
-      preserveOnInvalid: false,
-    })
-    : false;
-
-  applyBlockOpacity(container, currentBlock, nestedApplied);
-  clearStructuralVisualState();
-
   const textNodeMap = buildTextNodeMap(currentBlock);
   const caretOffset = getCaretOffset(currentBlock, textNodeMap);
   if (caretOffset !== null) {
@@ -1073,6 +1103,20 @@ function applyRippleNow(): void {
     setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, []);
     resetSentenceCache();
   }
+
+  const topBlock = getTopLevelBlock(currentBlock, container);
+  const needsSentencePaintBridge =
+    currentBlock === topBlock &&
+    hasStructuralCarryover(currentBlock) &&
+    lastHadDimRanges;
+
+  if (needsSentencePaintBridge) {
+    applyBlockVisualStateAfterSentencePaint(container, currentBlock);
+    lastAppliedFocusBlockId = nodeIdOf(currentBlock);
+    return;
+  }
+
+  applyBlockVisualState(container, currentBlock);
 
   lastAppliedFocusBlockId = nodeIdOf(currentBlock);
 

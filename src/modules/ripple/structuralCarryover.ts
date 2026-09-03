@@ -30,6 +30,10 @@ export function hasStructuralCarryovers(): boolean {
   return structuralCarryovers.size > 0;
 }
 
+export function hasStructuralCarryover(element: HTMLElement): boolean {
+  return structuralCarryovers.has(element);
+}
+
 /**
  * Install the last valid block opacity on a host-created replacement until the
  * normal Ripple owner can rebuild against the stable DOM. Only clean
