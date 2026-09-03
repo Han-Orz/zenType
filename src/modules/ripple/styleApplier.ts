@@ -6,7 +6,7 @@ import {
   type InlineStyleValue,
   type OwnedInlineStyle,
 } from "../../utils/inlineStyleOwnership";
-import type { RippleTargetPlan, RippleTargetRole } from "./semanticPlanner";
+import type { RippleTargetPlan } from "./semanticPlanner";
 import { releaseAfterOpacityTransition } from "./transitionRelease";
 
 const RIPPLE_BLOCK_CLASS = "zentype-ripple-block";
@@ -22,7 +22,6 @@ interface ActiveTarget {
   classAdded: boolean;
   blocked: boolean;
   pendingExit: ReturnType<typeof setTimeout> | null;
-  visualKey: string | null;
 }
 
 interface OwnershipHandoffSource {
@@ -92,22 +91,6 @@ function commitHandoffBaseline(element: HTMLElement): void {
   // zero-duration baseline before the old owner is released or the transition
   // duration is restored.
   void element.offsetHeight;
-}
-
-function nodeIdOf(element: Element | null): string | null {
-  const value = element?.getAttribute("data-node-id") ?? null;
-  return value && value.length > 0 ? value : null;
-}
-
-function visualKeyForTarget(element: HTMLElement, role: RippleTargetRole): string | null {
-  if (role === "marker") {
-    const item = element.closest('[data-type="NodeListItem"][data-node-id]');
-    const itemId = nodeIdOf(item);
-    return itemId ? `marker:${itemId}` : null;
-  }
-
-  const nodeId = nodeIdOf(element);
-  return nodeId ? `${role}:${nodeId}` : null;
 }
 
 function opacityForDistance(distance: number): string {
@@ -245,15 +228,9 @@ export function createRippleStyleApplier(): RippleStyleApplier {
     }
 
     const handoffSources = new Map<HTMLElement, OwnershipHandoffSource>();
-    const stableHandoffSources = new Map<string, OwnershipHandoffSource>();
     const handoffSourceElements = new Set<HTMLElement>();
     for (const [element, activeTarget] of activeTargets) {
       if (nextTargets.has(element)) continue;
-
-      if (activeTarget.visualKey && !stableHandoffSources.has(activeTarget.visualKey)) {
-        stableHandoffSources.set(activeTarget.visualKey, { element, target: activeTarget });
-      }
-
       const source = findHandoffSource(element, activeTarget, nextTargets);
       if (!source) continue;
       handoffSourceElements.add(element);
@@ -272,14 +249,7 @@ export function createRippleStyleApplier(): RippleStyleApplier {
       if (!element || !nextTargets.has(element)) continue;
 
       let activeTarget = activeTargets.get(element);
-      const visualKey = visualKeyForTarget(element, target.role);
-      const stableSource = !activeTarget && visualKey
-        ? stableHandoffSources.get(visualKey)
-        : undefined;
-      const handoffSource = activeTarget
-        ? undefined
-        : handoffSources.get(element) ?? stableSource;
-      if (stableSource) handoffSourceElements.add(stableSource.element);
+      const handoffSource = activeTarget ? undefined : handoffSources.get(element);
 
       if (!activeTarget) {
         activeTarget = {
@@ -287,12 +257,10 @@ export function createRippleStyleApplier(): RippleStyleApplier {
           classAdded: false,
           blocked: false,
           pendingExit: null,
-          visualKey,
         };
         activeTargets.set(element, activeTarget);
       } else {
         cancelPendingExit(activeTarget);
-        activeTarget.visualKey = visualKey;
       }
 
       if (activeTarget.blocked) continue;
@@ -368,8 +336,7 @@ export function createRippleStyleApplier(): RippleStyleApplier {
     for (const [element, activeTarget] of activeTargets) {
       if (nextTargets.has(element)) continue;
       if (handoffSourceElements.has(element)) {
-        // Another owner now represents the same visual object, either through
-        // an ancestor/descendant transfer or a host-side DOM replacement.
+        // An ancestor or descendant target is taking over this visual subtree.
         // Release the stale layer directly after the replacement baseline has
         // been committed; never stage it through natural opacity first.
         releaseTarget(element, activeTarget);
