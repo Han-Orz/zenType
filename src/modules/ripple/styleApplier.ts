@@ -112,6 +112,29 @@ export function createRippleStyleApplier(): RippleStyleApplier {
     removeRippleClass(element, target);
   }
 
+  function releaseHandoffSource(element: HTMLElement, target: ActiveTarget): void {
+    cancelPendingExit(target);
+    const durationApplied = applyPrivateProperty(
+      element,
+      target.owned,
+      RIPPLE_TRANSITION_DURATION_PROPERTY,
+      "0s",
+    );
+    const opacityApplied = durationApplied && applyPrivateProperty(
+      element,
+      target.owned,
+      RIPPLE_OPACITY_PROPERTY,
+      "1",
+    );
+    if (!durationApplied || !opacityApplied) {
+      releaseTarget(element, target);
+      return;
+    }
+
+    commitHandoffBaseline(element);
+    releaseTarget(element, target);
+  }
+
   function cancelPendingHandoffFrame(): void {
     if (pendingHandoffFrame === null) return;
     if (typeof cancelAnimationFrame === "function") {
@@ -365,9 +388,9 @@ export function createRippleStyleApplier(): RippleStyleApplier {
       if (nextTargets.has(element)) continue;
       if (handoffSourceElements.has(element)) {
         // An ancestor or descendant target is taking over this visual subtree.
-        // Release the stale layer directly after the replacement baseline has
-        // been committed; never stage it through natural opacity first.
-        releaseTarget(element, activeTarget);
+        // Neutralize the stale layer while Ripple still owns its transition,
+        // then release it after the neutral baseline has been committed.
+        releaseHandoffSource(element, activeTarget);
         activeTargets.delete(element);
       } else {
         releaseTargetAfterTransition(element, activeTarget);
