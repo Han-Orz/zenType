@@ -22,7 +22,10 @@ import * as inputMode from "./modules/inputMode";
 import * as inputModeTriggers from "./modules/inputModeTriggers";
 import type { ModuleEnabled, ModuleName } from "./types";
 import { initDebugHook } from "./modules/debugHook";
-import type { DebugHookController } from "./modules/debugHook";
+import type {
+  DebugHookController,
+  DebugStartOptions,
+} from "./modules/debugHook";
 import { runLifecycleSteps } from "./utils/lifecycle";
 import mainCss from "./styles/index.scss";
 
@@ -90,23 +93,44 @@ export default class ZenType extends Plugin {
     });
     if (__ZENTYPE_DEV__) {
       this.addCommand({
-        langKey: "toggle-debug-hook",
-        langText: "开始/停止 zenType Debug Session",
-        callback: () => { void this.debugHook?.toggle(); },
+        langKey: "start-debug-marker-capture",
+        langText: "zenType：开始 Marker 取证",
+        callback: () => {
+          void this.startDebugPreset(
+            "marker-tab",
+            { profile: "forensic" },
+            [
+              ['[data-type="NodeListItem"]', "list-item"],
+              [".protyle-action", "marker"],
+              [".protyle-action svg, .protyle-action use", "marker-svg"],
+            ],
+            "marker capture started",
+          );
+        },
+      });
+      this.addCommand({
+        langKey: "start-debug-forensic-capture",
+        langText: "zenType：开始通用取证",
+        callback: () => {
+          void this.startDebugPreset(
+            "forensic",
+            { profile: "forensic" },
+            [],
+            "forensic capture started",
+          );
+        },
+      });
+      this.addCommand({
+        langKey: "stop-debug-capture",
+        langText: "zenType：结束 Debug 取证",
+        callback: () => {
+          void this.stopDebugCapture();
+        },
       });
       this.addCommand({
         langKey: "capture-debug-hook",
-        langText: "捕获 zenType 调试快照",
+        langText: "zenType：捕获 Debug 快照",
         callback: () => this.debugHook?.capture("command"),
-      });
-      this.addCommand({
-        langKey: "toggle-debug-profile",
-        langText: "切换 Debug timing / forensic",
-        callback: () => {
-          const debug = this.debugHook;
-          if (!debug) return;
-          debug.setProfile(debug.getProfile() === "timing" ? "forensic" : "timing");
-        },
       });
     }
 
@@ -315,6 +339,31 @@ export default class ZenType extends Plugin {
   private isAllEnabled(): boolean {
     // v2.3.0：语义改为"typewriter + ripple 两者都开"，不再 include cursor
     return this.enabled.typewriter && this.enabled.ripple;
+  }
+
+  private async startDebugPreset(
+    label: string,
+    options: DebugStartOptions,
+    watches: Array<[string, string]>,
+    message: string,
+  ): Promise<void> {
+    const debug = this.debugHook;
+    if (!debug) return;
+    if (debug.getState().active) await debug.stop();
+    debug.clearWatches();
+    await debug.start(label, options);
+    for (const [selector, watchLabel] of watches) {
+      debug.watch(selector, watchLabel);
+    }
+    console.info(`[zenType DebugKit] ${message}`);
+  }
+
+  private async stopDebugCapture(): Promise<void> {
+    const debug = this.debugHook;
+    if (!debug) return;
+    await debug.stop();
+    debug.clearWatches();
+    console.info("[zenType DebugKit] capture stopped");
   }
 
   private saveEnabledState(): void {
