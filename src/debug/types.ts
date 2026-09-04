@@ -25,6 +25,7 @@ export interface DebugSessionState {
   sessionId: string | null;
   label: string | null;
   profile: DebugProfile;
+  buildSha: string | null;
   startedAt: string | null;
   stoppedAt: string | null;
 }

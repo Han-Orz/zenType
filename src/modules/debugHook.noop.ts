@@ -16,6 +16,7 @@ const INACTIVE_SESSION: DebugSessionState = {
   sessionId: null,
   label: null,
   profile: "timing",
+  buildSha: null,
   startedAt: null,
   stoppedAt: null,
 };

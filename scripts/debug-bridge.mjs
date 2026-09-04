@@ -112,11 +112,18 @@ function validProfile(value) {
   return value === "timing" || value === "forensic" ? value : "timing";
 }
 
+function buildShaFromPayload(payload) {
+  return typeof payload.buildSha === "string" && payload.buildSha.trim()
+    ? payload.buildSha.trim()
+    : null;
+}
+
 function sessionMetaFromEvent(sessionId, event) {
   const payload = payloadOf(event);
   const eventLabel = typeof payload.label === "string" ? payload.label : "";
   const label = eventLabel.trim() || `session-${sanitizeSegment(sessionId, "unknown")}`;
   const profile = validProfile(payload.profile);
+  const buildSha = buildShaFromPayload(payload);
   const startedAt = typeof payload.startedAt === "string"
     ? payload.startedAt
     : typeof event.timestamp === "string" ? event.timestamp : new Date().toISOString();
@@ -125,6 +132,7 @@ function sessionMetaFromEvent(sessionId, event) {
     label,
     directory: "",
     profile,
+    buildSha,
     startedAt,
     stoppedAt: null,
   };
@@ -140,6 +148,7 @@ async function writeLatestSession(outputDir, context) {
     label: context.meta.label,
     directory: context.meta.directory,
     profile: context.meta.profile,
+    buildSha: context.meta.buildSha ?? null,
     startedAt: context.meta.startedAt,
     stoppedAt: context.meta.stoppedAt,
   };
@@ -188,6 +197,7 @@ async function persistSummaryState(context, summaryRecords = context.summaryStat
       label: context.meta.label,
       directory: context.meta.directory,
       profile: context.meta.profile,
+      buildSha: context.meta.buildSha ?? null,
       startedAt: context.meta.startedAt,
       stoppedAt: context.meta.stoppedAt,
     },
@@ -207,6 +217,9 @@ function updateMetaFromEvent(context, event) {
     if (typeof payload.label === "string" && payload.label.trim()) context.meta.label = payload.label;
     context.meta.profile = validProfile(payload.profile);
     if (typeof payload.startedAt === "string") context.meta.startedAt = payload.startedAt;
+    if (Object.prototype.hasOwnProperty.call(payload, "buildSha")) {
+      context.meta.buildSha = buildShaFromPayload(payload);
+    }
   }
   if (eventName(event) === "profile-changed") {
     context.meta.profile = validProfile(payload.profile);

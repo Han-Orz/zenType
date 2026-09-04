@@ -15,6 +15,10 @@ import type {
 } from "./types";
 import type { DebugWatch } from "./types";
 
+const BUILD_SHA = typeof __ZENTYPE_BUILD_SHA__ === "string"
+  ? __ZENTYPE_BUILD_SHA__
+  : "unknown";
+
 const MAX_RECENT_EVENTS = 500;
 const MAX_LABEL_LENGTH = 160;
 const MAX_MARK_PAYLOAD_KEYS = 64;
@@ -142,6 +146,7 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
       sessionId,
       label,
       profile,
+      buildSha: BUILD_SHA,
       startedAt,
       stoppedAt,
     };
@@ -223,6 +228,7 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
       name: "session-start",
       label,
       profile,
+      buildSha: BUILD_SHA,
       startedAt,
       transportState: transport.getState().transportState,
     }, "session-start");
