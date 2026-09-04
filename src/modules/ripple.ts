@@ -1250,6 +1250,15 @@ function onDomMutation(records: MutationRecord[]): void {
       carryStructuralReplacementVisualState(childListRecords);
       structuralEdit.noteStructuralActivity(container);
       nestedRippleEngine.invalidateStructure();
+      const structuralSnapshot = structuralEdit.getStructuralEditSnapshot();
+      if (structuralSnapshot.kind === "list-change") {
+        // The host has already committed the reparent. Reconcile the nested
+        // visual ownership before the next paint, while preserving the prior
+        // state if this transient DOM snapshot is not yet usable.
+        nestedRippleEngine.apply(container, currentBlock, {
+          preserveOnInvalid: true,
+        });
+      }
       refreshSentenceHighlightOnly();
       return;
     }
