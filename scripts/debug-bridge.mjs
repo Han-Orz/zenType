@@ -16,8 +16,13 @@ const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
 const MAX_ROTATED_LOGS = 3;
 const DEFAULT_OUTPUT_DIR = path.join(process.cwd(), ".debug");
-const SUMMARY_FILE_NAME = "siyuan-hook.summary.ndjson";
-const REPORT_FILE_NAME = "siyuan-hook.report.json";
+const SESSIONS_DIR_NAME = "sessions";
+const EVENTS_FILE_NAME = "events.ndjson";
+const SUMMARY_FILE_NAME = "summary.ndjson";
+const REPORT_FILE_NAME = "report.json";
+const META_FILE_NAME = "meta.json";
+const LATEST_SNAPSHOT_FILE_NAME = "latest-snapshot.json";
+const LATEST_SESSION_FILE_NAME = "latest-session.json";
 
 function jsonResponse(response, statusCode, body) {
   response.statusCode = statusCode;
@@ -52,6 +57,19 @@ function readRequestBody(request) {
   });
 }
 
+function sanitizeSegment(value, fallback) {
+  const normalized = String(value ?? "")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 96);
+  return normalized || fallback;
+}
+
+function relativeDirectory(outputDir, directory) {
+  return path.relative(outputDir, directory).split(path.sep).join("/");
+}
+
 async function fileSize(filePath) {
   try {
     return (await stat(filePath)).size;
@@ -81,23 +99,127 @@ async function appendSummaryRecords(summaryPath, records) {
   return records.length;
 }
 
-async function persistSummaryState(
-  outputDir,
-  summaryState,
-  writeReport = true,
-  summaryRecords = summaryState.drainFinalized(),
-) {
-  await mkdir(outputDir, { recursive: true });
-  const summaryPath = path.join(outputDir, SUMMARY_FILE_NAME);
-  const reportPath = path.join(outputDir, REPORT_FILE_NAME);
-  const summaryAccepted = await appendSummaryRecords(summaryPath, summaryRecords);
-  if (writeReport) {
-    await writeFile(reportPath, `${JSON.stringify(summaryState.getReport(), null, 2)}\n`, "utf8");
-  }
-  return { summaryAccepted, summaryPath, reportPath };
+function payloadOf(event) {
+  return event?.payload && typeof event.payload === "object" ? event.payload : {};
 }
 
-export async function appendEvents(outputDir, events, summarySessions = new Map()) {
+function eventName(event) {
+  const payload = payloadOf(event);
+  return typeof payload.name === "string" ? payload.name : "";
+}
+
+function validProfile(value) {
+  return value === "timing" || value === "forensic" ? value : "timing";
+}
+
+function sessionMetaFromEvent(sessionId, event) {
+  const payload = payloadOf(event);
+  const eventLabel = typeof payload.label === "string" ? payload.label : "";
+  const label = eventLabel.trim() || `session-${sanitizeSegment(sessionId, "unknown")}`;
+  const profile = validProfile(payload.profile);
+  const startedAt = typeof payload.startedAt === "string"
+    ? payload.startedAt
+    : typeof event.timestamp === "string" ? event.timestamp : new Date().toISOString();
+  return {
+    sessionId,
+    label,
+    directory: "",
+    profile,
+    startedAt,
+    stoppedAt: null,
+  };
+}
+
+async function writeMeta(context) {
+  await writeFile(context.metaPath, `${JSON.stringify(context.meta, null, 2)}\n`, "utf8");
+}
+
+async function writeLatestSession(outputDir, context) {
+  const latest = {
+    sessionId: context.meta.sessionId,
+    label: context.meta.label,
+    directory: context.meta.directory,
+    profile: context.meta.profile,
+    startedAt: context.meta.startedAt,
+    stoppedAt: context.meta.stoppedAt,
+  };
+  await writeFile(
+    path.join(outputDir, LATEST_SESSION_FILE_NAME),
+    `${JSON.stringify(latest, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+async function createSessionContext(outputDir, sessionId, event) {
+  const meta = sessionMetaFromEvent(sessionId, event);
+  const directoryName = `${sanitizeSegment(meta.label, "session")}__${sanitizeSegment(sessionId, "unknown")}`;
+  const directory = path.join(outputDir, SESSIONS_DIR_NAME, directoryName);
+  meta.directory = relativeDirectory(outputDir, directory);
+  await mkdir(directory, { recursive: true });
+  const context = {
+    outputDir,
+    directory,
+    meta,
+    metaPath: path.join(directory, META_FILE_NAME),
+    eventsPath: path.join(directory, EVENTS_FILE_NAME),
+    summaryPath: path.join(directory, SUMMARY_FILE_NAME),
+    reportPath: path.join(directory, REPORT_FILE_NAME),
+    latestSnapshotPath: path.join(directory, LATEST_SNAPSHOT_FILE_NAME),
+    summaryState: createDebugSummary(sessionId),
+  };
+  await writeMeta(context);
+  return context;
+}
+
+async function appendRawEvents(context, events) {
+  const text = `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+  if ((await fileSize(context.eventsPath)) + Buffer.byteLength(text) > MAX_LOG_BYTES) {
+    await rotateLogs(context.eventsPath);
+    await writeFile(context.eventsPath, "", "utf8");
+  }
+  await appendFile(context.eventsPath, text, "utf8");
+}
+
+async function persistSummaryState(context, summaryRecords = context.summaryState.drainFinalized()) {
+  const summaryAccepted = await appendSummaryRecords(context.summaryPath, summaryRecords);
+  const report = {
+    ...context.summaryState.getReport(),
+    session: {
+      sessionId: context.meta.sessionId,
+      label: context.meta.label,
+      directory: context.meta.directory,
+      profile: context.meta.profile,
+      startedAt: context.meta.startedAt,
+      stoppedAt: context.meta.stoppedAt,
+    },
+  };
+  await writeFile(context.reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  return summaryAccepted;
+}
+
+function updateMetaFromEvent(context, event) {
+  const payload = payloadOf(event);
+  if (eventName(event) === "session-stop") {
+    context.meta.stoppedAt = typeof payload.stoppedAt === "string"
+      ? payload.stoppedAt
+      : typeof event.timestamp === "string" ? event.timestamp : context.meta.stoppedAt;
+  }
+  if (eventName(event) === "session-start") {
+    if (typeof payload.label === "string" && payload.label.trim()) context.meta.label = payload.label;
+    context.meta.profile = validProfile(payload.profile);
+    if (typeof payload.startedAt === "string") context.meta.startedAt = payload.startedAt;
+  }
+}
+
+function ensureSessionIds(events) {
+  return [...new Set(events.map((event) => (
+    typeof event?.sessionId === "string" && event.sessionId.length > 0
+      ? event.sessionId
+      : "unknown"
+  )))];
+}
+
+export async function appendEvents(outputDir, events, sessions = new Map()) {
   if (!Array.isArray(events) || events.length === 0) {
     throw new Error("payload.events must be a non-empty array");
   }
@@ -109,57 +231,41 @@ export async function appendEvents(outputDir, events, summarySessions = new Map(
   ));
   if (validEvents.length === 0) throw new Error("payload contains no valid debug events");
 
-  await mkdir(outputDir, { recursive: true });
-  const logPath = path.join(outputDir, "siyuan-hook.ndjson");
-  const latestPath = path.join(outputDir, "siyuan-hook.latest.json");
-  const text = `${validEvents.map((event) => JSON.stringify(event)).join("\n")}\n`;
-  if ((await fileSize(logPath)) + Buffer.byteLength(text) > MAX_LOG_BYTES) {
-    await rotateLogs(logPath);
-    await writeFile(logPath, "", "utf8");
-  }
-  await appendFile(logPath, text, "utf8");
-
-  const latestSnapshot = [...validEvents]
-    .reverse()
-    .find((event) => event.kind === "snapshot");
-  if (latestSnapshot) {
-    await writeFile(latestPath, `${JSON.stringify(latestSnapshot, null, 2)}\n`, "utf8");
-  }
-  let latestSessionId = null;
+  await mkdir(path.join(outputDir, SESSIONS_DIR_NAME), { recursive: true });
   let summaryAccepted = 0;
+  let latestSessionId = null;
   for (const event of validEvents) {
     const sessionId = typeof event.sessionId === "string" && event.sessionId.length > 0
       ? event.sessionId
       : "unknown";
-    let summaryState = summarySessions.get(sessionId);
-    if (!summaryState) {
-      summaryState = createDebugSummary(sessionId);
-      summarySessions.set(sessionId, summaryState);
+    let context = sessions.get(sessionId);
+    if (!context || !context.directory) {
+      context = await createSessionContext(outputDir, sessionId, event);
+      sessions.set(sessionId, context);
     }
-    const finalized = summaryState.accept(event);
-    const persisted = await persistSummaryState(
-      outputDir,
-      summaryState,
-      false,
-      finalized,
-    );
-    summaryAccepted += persisted.summaryAccepted;
+    updateMetaFromEvent(context, event);
+    await appendRawEvents(context, [event]);
+    if (event.kind === "snapshot") {
+      await writeFile(context.latestSnapshotPath, `${JSON.stringify(event, null, 2)}\n`, "utf8");
+    }
+    summaryAccepted += await persistSummaryState(context, context.summaryState.accept(event));
+    await writeMeta(context);
+    await writeLatestSession(outputDir, context);
     latestSessionId = sessionId;
   }
-  const latestSummaryState = latestSessionId ? summarySessions.get(latestSessionId) : null;
-  const summaryPath = path.join(outputDir, SUMMARY_FILE_NAME);
-  const reportPath = path.join(outputDir, REPORT_FILE_NAME);
-  if (latestSummaryState) {
-    await writeFile(reportPath, `${JSON.stringify(latestSummaryState.getReport(), null, 2)}\n`, "utf8");
-  }
+  const latest = latestSessionId ? sessions.get(latestSessionId) : null;
   return {
     accepted: validEvents.length,
-    logPath,
-    latestPath,
+    sessionDir: latest?.directory ?? null,
+    metaPath: latest?.metaPath ?? null,
+    eventsPath: latest?.eventsPath ?? null,
+    latestSnapshotPath: latest?.latestSnapshotPath ?? null,
     summaryAccepted,
-    summaryPath,
-    reportPath,
+    summaryPath: latest?.summaryPath ?? null,
+    reportPath: latest?.reportPath ?? null,
+    latestSessionPath: path.join(outputDir, LATEST_SESSION_FILE_NAME),
     latestSessionId,
+    sessionIds: ensureSessionIds(validEvents),
   };
 }
 
@@ -183,7 +289,7 @@ export function parseArgs(argv) {
     }
   }
   if (!Number.isInteger(options.port) || options.port < 1 || options.port > 65535) {
-    throw new Error(`invalid port: ${options.port}`);
+    if (options.port !== 0) throw new Error(`invalid port: ${options.port}`);
   }
   return options;
 }
@@ -191,16 +297,17 @@ export function parseArgs(argv) {
 export function createDebugBridge({ port = DEFAULT_PORT, outputDir = DEFAULT_OUTPUT_DIR } = {}) {
   let writeQueue = Promise.resolve();
   let latestSessionId = null;
-  const summarySessions = new Map();
+  const sessions = new Map();
   const summaryTimers = new Map();
 
   const enqueueSummaryFinalization = (sessionId) => {
     const existingTimer = summaryTimers.get(sessionId);
     if (existingTimer) clearTimeout(existingTimer);
-    const summaryState = summarySessions.get(sessionId);
+    const context = sessions.get(sessionId);
+    const summaryState = context?.summaryState;
     const dueAt = summaryState?.nextFinalizationAt();
     const delay = summaryState?.nextFinalizationDelayMs();
-    if (dueAt === null || delay === null) {
+    if (dueAt === null || dueAt === undefined || delay === null || delay === undefined) {
       summaryTimers.delete(sessionId);
       return;
     }
@@ -209,17 +316,13 @@ export function createDebugBridge({ port = DEFAULT_PORT, outputDir = DEFAULT_OUT
       writeQueue = writeQueue
         .catch(() => undefined)
         .then(async () => {
-          const current = summarySessions.get(sessionId);
+          const current = sessions.get(sessionId);
           if (!current) return;
-          const currentDueAt = current.nextFinalizationAt();
+          const currentDueAt = current.summaryState.nextFinalizationAt();
           if (currentDueAt !== null && currentDueAt <= dueAt) {
-            current.finalizeDue(dueAt);
+            current.summaryState.finalizeDue(dueAt);
           }
-          await persistSummaryState(
-            outputDir,
-            current,
-            sessionId === latestSessionId,
-          );
+          await persistSummaryState(current);
           enqueueSummaryFinalization(sessionId);
         });
     }, delay);
@@ -240,6 +343,7 @@ export function createDebugBridge({ port = DEFAULT_PORT, outputDir = DEFAULT_OUT
         port,
         outputDir,
         summaryEnabled: true,
+        sessionOriented: true,
       });
       return;
     }
@@ -255,14 +359,9 @@ export function createDebugBridge({ port = DEFAULT_PORT, outputDir = DEFAULT_OUT
         writeQueue = writeQueue
           .catch(() => undefined)
           .then(async () => {
-            const result = await appendEvents(outputDir, events, summarySessions);
+            const result = await appendEvents(outputDir, events, sessions);
             if (result.latestSessionId) latestSessionId = result.latestSessionId;
-            for (const event of events ?? []) {
-              const sessionId = typeof event?.sessionId === "string" && event.sessionId.length > 0
-                ? event.sessionId
-                : "unknown";
-              enqueueSummaryFinalization(sessionId);
-            }
+            for (const sessionId of result.sessionIds) enqueueSummaryFinalization(sessionId);
             return result;
           });
         return writeQueue;
@@ -291,14 +390,16 @@ export function createDebugBridge({ port = DEFAULT_PORT, outputDir = DEFAULT_OUT
         server.listen(port, "127.0.0.1");
       });
     },
-    stop() {
-      return new Promise((resolve, reject) => {
-        for (const timer of summaryTimers.values()) clearTimeout(timer);
-        summaryTimers.clear();
-        if (!server.listening) {
-          resolve();
-          return;
-        }
+    async stop() {
+      for (const timer of summaryTimers.values()) clearTimeout(timer);
+      summaryTimers.clear();
+      await writeQueue.catch(() => undefined);
+      for (const context of sessions.values()) {
+        await persistSummaryState(context, context.summaryState.flush());
+        await writeMeta(context);
+      }
+      if (!server.listening) return;
+      await new Promise((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       });
     },
@@ -307,7 +408,7 @@ export function createDebugBridge({ port = DEFAULT_PORT, outputDir = DEFAULT_OUT
 
 function printHelp() {
   console.log("Usage: pnpm run debug:bridge [--port 27369] [--dir .debug]");
-  console.log("Listens only on 127.0.0.1 and writes raw, summary, report, and latest snapshot files.");
+  console.log("Listens only on 127.0.0.1 and writes session-oriented raw, summary, report, and snapshot files.");
 }
 
 const isMain = process.argv[1]
@@ -343,3 +444,14 @@ if (isMain) {
     process.once("SIGTERM", shutdown);
   }
 }
+
+export {
+  EVENTS_FILE_NAME,
+  LATEST_SESSION_FILE_NAME,
+  LATEST_SNAPSHOT_FILE_NAME,
+  META_FILE_NAME,
+  REPORT_FILE_NAME,
+  SESSIONS_DIR_NAME,
+  SUMMARY_FILE_NAME,
+  sanitizeSegment,
+};
