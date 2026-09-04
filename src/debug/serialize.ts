@@ -1,6 +1,7 @@
 import type { IProtyle } from "siyuan";
 import * as structuralEdit from "../modules/structuralEdit";
 import type {
+  DebugAnimationSummary,
   DebugBlockDescription,
   DebugComputedStyle,
   DebugDomTreeNode,
@@ -25,6 +26,7 @@ const MAX_RANGE_RECTS = 8;
 const MAX_COMPOSED_PATH = 12;
 const MAX_MUTATION_TEXT_NODES = 32;
 const MAX_WATCH_ANCESTORS = 5;
+const MAX_ACTIVE_ANIMATIONS = 8;
 
 const ELEMENT_NODE = 1;
 const TEXT_NODE = 3;
@@ -253,6 +255,41 @@ function customStyleValue(style: CSSStyleDeclaration, property: string): string 
     return style.getPropertyValue(property).trim();
   } catch {
     return "";
+  }
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? round(value) : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function activeAnimationsOf(element: Element): DebugAnimationSummary[] {
+  const candidate = element as Element & {
+    getAnimations?: () => readonly Animation[];
+  };
+  if (typeof candidate.getAnimations !== "function") return [];
+
+  try {
+    return Array.from(candidate.getAnimations())
+      .slice(0, MAX_ACTIVE_ANIMATIONS)
+      .map((animation) => {
+        const value = animation as unknown as Record<string, unknown>;
+        const constructor = value.constructor as { name?: unknown } | undefined;
+        return {
+          type: stringValue(value.type) ?? stringValue(constructor?.name),
+          playState: stringValue(value.playState),
+          currentTime: numberValue(value.currentTime),
+          startTime: numberValue(value.startTime),
+          playbackRate: numberValue(value.playbackRate),
+          transitionProperty: stringValue(value.transitionProperty),
+          animationName: stringValue(value.animationName),
+        };
+      });
+  } catch {
+    return [];
   }
 }
 
@@ -763,6 +800,7 @@ export function createDebugSerializer(options: DebugSerializeOptions = {}): Debu
           ancestors,
           rect: rectOf(element),
           computed: computedStyleOf(element),
+          activeAnimations: activeAnimationsOf(element),
         });
       }
     }

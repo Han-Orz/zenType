@@ -213,6 +213,7 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     resetSessionCounters();
     transport.reset(sessionId, bridgeUrl);
     collector.setProfile(profile);
+    collector.setFrameBurst(options.frameBurst);
     collector.resetNodeIdentity();
 
     // Keep the session-start envelope first. The collector must not be able
@@ -381,7 +382,9 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
 }
 
 export type {
+  DebugAnimationSummary,
   DebugEnvelope,
+  DebugFrameBurstOptions,
   DebugHookController,
   DebugKitState,
   DebugProfile,

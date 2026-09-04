@@ -8,8 +8,14 @@ export type DebugProfile = "timing" | "forensic";
 export type DebugTransportState = "unknown" | "probing" | "online" | "offline";
 export type DebugEnvelopeKind = "event" | "snapshot" | "status";
 
+export interface DebugFrameBurstOptions {
+  enabled: boolean;
+  frames?: number;
+}
+
 export interface DebugStartOptions {
   profile?: DebugProfile;
+  frameBurst?: DebugFrameBurstOptions;
   /** Development-only override used by local bridge smoke tests. */
   bridgeUrl?: string;
 }
@@ -202,6 +208,16 @@ export interface DebugWatch {
   label: string;
 }
 
+export interface DebugAnimationSummary {
+  type: string | null;
+  playState: string | null;
+  currentTime: number | null;
+  startTime: number | null;
+  playbackRate: number | null;
+  transitionProperty: string | null;
+  animationName: string | null;
+}
+
 export interface DebugWatchSample {
   id: string;
   label: string;
@@ -216,6 +232,7 @@ export interface DebugWatchSample {
   ancestors: DebugNodeReference[];
   rect: DebugRect | null;
   computed: DebugComputedStyle | null;
+  activeAnimations: DebugAnimationSummary[];
 }
 
 export interface DebugMutationRecord {

@@ -10,11 +10,13 @@ export {
   summarizeWsData,
 } from "../debug/serialize";
 export type {
+  DebugAnimationSummary,
   DebugBlockDescription,
   DebugComputedStyle,
   DebugDomTreeNode,
   DebugElementDescription,
   DebugEnvelope,
+  DebugFrameBurstOptions,
   DebugHookController,
   DebugKitController,
   DebugKitCounters,

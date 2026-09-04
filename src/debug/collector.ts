@@ -10,6 +10,7 @@ import {
 } from "./serialize";
 import type {
   DebugDomTreeNode,
+  DebugFrameBurstOptions,
   DebugProfile,
   DebugSnapshot,
   DebugStructuralEditState,
@@ -19,6 +20,8 @@ import type {
 import type { DebugSerializer } from "./serialize";
 
 const MAX_MUTATION_RECORDS = 80;
+const DEFAULT_FRAME_BURST_FRAMES = 18;
+const MAX_FRAME_BURST_FRAMES = 30;
 const OBSERVED_ATTRIBUTES = [
   "class",
   "style",
@@ -78,6 +81,7 @@ export interface DebugCollectorOptions {
 
 export interface DebugCollector {
   setProfile(profile: DebugProfile): void;
+  setFrameBurst(options?: DebugFrameBurstOptions): void;
   resetNodeIdentity(): void;
   attach(): void;
   detach(): void;
@@ -92,6 +96,17 @@ interface ProtyleLike {
 
 interface BlockLike {
   id?: string;
+}
+
+interface FrameBurstRun {
+  token: number;
+  trigger: {
+    key: string;
+    shiftKey: boolean;
+  };
+  startedAt: number;
+  frameIndex: number;
+  frameCount: number;
 }
 
 function asNode(value: EventTarget | Node | null | undefined): Node | null {
@@ -236,6 +251,11 @@ function controlKey(event: Event): boolean {
   return ["Tab", "Enter", "Backspace", "Delete"].includes(key);
 }
 
+function frameCount(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_FRAME_BURST_FRAMES;
+  return Math.min(MAX_FRAME_BURST_FRAMES, Math.max(1, Math.floor(value)));
+}
+
 export function createDebugCollector(options: DebugCollectorOptions): DebugCollector {
   let profile = options.profile;
   let attached = false;
@@ -251,6 +271,11 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
   const eventBusOffs: Array<() => void> = [];
   const domEventListeners: Array<{ type: DomEventName; handler: EventListener }> = [];
   let unsubStructuralFinish: (() => void) | null = null;
+  let frameBurstEnabled = false;
+  let frameBurstFrameCount = DEFAULT_FRAME_BURST_FRAMES;
+  let frameBurstToken = 0;
+  let frameBurstRequest: number | null = null;
+  let frameBurstRun: FrameBurstRun | null = null;
 
   function sampleWatches(reason: string, root = currentRoot): ReturnType<DebugSerializer["watchSamples"]> {
     const samples = serializer.watchSamples(options.getWatches(), root, reason);
@@ -471,6 +496,87 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
     observedRoot = null;
   }
 
+  function cancelFrameBurst(): void {
+    frameBurstToken += 1;
+    if (frameBurstRequest !== null && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(frameBurstRequest);
+    }
+    frameBurstRequest = null;
+    frameBurstRun = null;
+  }
+
+  function scheduleFrameBurstFrame(run: FrameBurstRun): void {
+    if (typeof requestAnimationFrame !== "function") {
+      frameBurstRun = null;
+      return;
+    }
+
+    frameBurstRequest = requestAnimationFrame((timestamp) => {
+      frameBurstRequest = null;
+      if (
+        frameBurstRun !== run
+        || run.token !== frameBurstToken
+        || !attached
+        || profile !== "forensic"
+        || !frameBurstEnabled
+        || !currentRoot
+        || !currentRoot.isConnected
+        || options.getWatches().length === 0
+      ) {
+        if (frameBurstRun === run) frameBurstRun = null;
+        return;
+      }
+
+      const snapshot = structuralEdit.getStructuralEditSnapshot();
+      const frameTimestamp = Number.isFinite(timestamp) ? timestamp : monotonicNow();
+      options.onEvent({
+        source: "debugkit",
+        name: "watch-frame",
+        trigger: run.trigger,
+        frameIndex: run.frameIndex,
+        elapsedMs: round(Math.max(0, frameTimestamp - run.startedAt)),
+        structural: {
+          generation: snapshot.generation,
+          phase: snapshot.phase,
+          kind: snapshot.kind,
+        },
+        typewriterScrollActive: typewriterScroll.isScrolling(),
+        watchSamples: sampleWatches("watch-frame", currentRoot),
+      }, "watch-frame");
+
+      run.frameIndex += 1;
+      if (run.frameIndex >= run.frameCount) {
+        frameBurstRun = null;
+        return;
+      }
+      scheduleFrameBurstFrame(run);
+    });
+  }
+
+  function startFrameBurst(event: Event): void {
+    cancelFrameBurst();
+    if (
+      profile !== "forensic"
+      || !frameBurstEnabled
+      || options.getWatches().length === 0
+      || typeof requestAnimationFrame !== "function"
+    ) return;
+
+    const keyboard = event as KeyboardEvent;
+    const run: FrameBurstRun = {
+      token: frameBurstToken,
+      trigger: {
+        key: keyboard.key,
+        shiftKey: keyboard.shiftKey,
+      },
+      startedAt: monotonicNow(),
+      frameIndex: 0,
+      frameCount: frameBurstFrameCount,
+    };
+    frameBurstRun = run;
+    scheduleFrameBurstFrame(run);
+  }
+
   function observationTarget(root: HTMLElement | null): HTMLElement | null {
     if (!root) return null;
     return (root.querySelector(".protyle-wysiwyg") as HTMLElement | null) ?? root;
@@ -552,6 +658,7 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
       ? timingEventPayload(event, root)
       : forensicEventPayload(event, root);
     options.onEvent(payload, event.type);
+    if (controlKey(event)) startFrameBurst(event);
   }
 
   function onLoaded(
@@ -691,6 +798,7 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
   }
 
   function detach(): void {
+    cancelFrameBurst();
     if (typeof document !== "undefined") {
       for (const listener of domEventListeners) {
         document.removeEventListener(listener.type, listener.handler, true);
@@ -780,6 +888,11 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
         refreshRoot();
         unsubStructuralFinish = structuralEdit.subscribeStructuralEditFinish(onStructuralEditFinish);
       }
+    },
+    setFrameBurst(nextOptions) {
+      frameBurstEnabled = nextOptions?.enabled === true;
+      frameBurstFrameCount = frameCount(nextOptions?.frames);
+      if (!frameBurstEnabled) cancelFrameBurst();
     },
     resetNodeIdentity() {
       serializer.resetNodeIdentity();

@@ -44,6 +44,7 @@ class FakeElement {
   scrollWidth = 100;
   clientHeight = 100;
   clientWidth = 100;
+  animations: unknown[] = [];
   tagName: string;
   private ownText = "";
 
@@ -127,6 +128,10 @@ class FakeElement {
       left: 1,
       toJSON: () => ({}),
     } as DOMRect;
+  }
+
+  getAnimations(): unknown[] {
+    return this.animations;
   }
 }
 
@@ -213,9 +218,11 @@ class FakeRuntime {
   readonly document = new FakeDocument();
   readonly window = { getSelection: () => this.document.selection };
   readonly observers: FakeMutationObserver[] = [];
+  readonly animationFrames = new Map<number, FrameRequestCallback>();
   readonly fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
   healthOnline = true;
   private readonly originalGlobals = new Map<string, PropertyDescriptor | undefined>();
+  private nextAnimationFrameId = 1;
 
   install(): void {
     this.defineGlobal("document", this.document);
@@ -229,6 +236,14 @@ class FakeRuntime {
         super(callback);
         runtime.observers.push(this);
       }
+    });
+    this.defineGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const id = this.nextAnimationFrameId++;
+      this.animationFrames.set(id, callback);
+      return id;
+    });
+    this.defineGlobal("cancelAnimationFrame", (id: number) => {
+      this.animationFrames.delete(id);
     });
     this.defineGlobal("getComputedStyle", () => ({
       display: "block",
@@ -265,6 +280,13 @@ class FakeRuntime {
       }
       return Promise.resolve({ ok: true, status: 202 });
     });
+  }
+
+  flushAnimationFrame(timestamp = 0): void {
+    const entry = this.animationFrames.entries().next().value as [number, FrameRequestCallback] | undefined;
+    assert.ok(entry, "expected a pending animation frame");
+    this.animationFrames.delete(entry[0]);
+    entry[1](timestamp);
   }
 
   restore(): void {
@@ -479,6 +501,151 @@ test("scroll events stay lightweight in both profiles", async () => {
       assert.equal("scroll" in capture.payload, false);
       await controller.stop();
     }
+  } finally {
+    await controller.stop();
+    controller.destroy();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("forensic frame bursts are bounded and replace on a new control key", async () => {
+  const runtime = new FakeRuntime();
+  runtime.install();
+  const root = new FakeElement("DIV", { class: "protyle" });
+  const editor = new FakeElement("DIV", { class: "protyle-wysiwyg" });
+  const marker = new FakeElement("SPAN", { class: "protyle-action" });
+  marker.animations = [{
+    type: "CSSTransition",
+    playState: "running",
+    currentTime: 12.34,
+    startTime: 1,
+    playbackRate: 1,
+    transitionProperty: "opacity",
+    animationName: null,
+    getKeyframes: () => { throw new Error("must not read keyframes"); },
+  }];
+  root.appendChild(editor);
+  editor.appendChild(marker);
+  runtime.document.root = root;
+  runtime.document.selection.anchorNode = marker as unknown as FakeText;
+  setActiveEditor({ protyle: { element: root } });
+  const controller = initDebugHook(new FakeEventBus() as unknown as EventBus);
+  const watchId = controller.watch(".protyle-action", "marker");
+  const keyEvent = (key: string, shiftKey = false): Event => ({
+    type: "keydown",
+    target: marker,
+    key,
+    code: key,
+    repeat: false,
+    isComposing: false,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey,
+    metaKey: false,
+    composedPath: () => [marker, editor, root],
+    defaultPrevented: false,
+    cancelBubble: false,
+    eventPhase: 1,
+    timeStamp: 10,
+  } as unknown as Event);
+  try {
+    await controller.start("frame-burst", {
+      profile: "forensic",
+      frameBurst: { enabled: true, frames: 40 },
+    });
+    runtime.document.dispatch("keydown", keyEvent("Tab"));
+    assert.equal(runtime.animationFrames.size, 1);
+
+    runtime.flushAnimationFrame(16);
+    const firstFrame = controller.getRecentEvents().find((event) => event.payload.name === "watch-frame");
+    assert.ok(firstFrame);
+    assert.deepEqual(firstFrame.payload.trigger, { key: "Tab", shiftKey: false });
+    assert.equal(firstFrame.payload.frameIndex, 0);
+    const firstSample = (firstFrame.payload.watchSamples as Array<Record<string, unknown>>)[0];
+    assert.deepEqual(firstSample.activeAnimations, [{
+      type: "CSSTransition",
+      playState: "running",
+      currentTime: 12.34,
+      startTime: 1,
+      playbackRate: 1,
+      transitionProperty: "opacity",
+      animationName: null,
+    }]);
+
+    runtime.document.dispatch("keydown", keyEvent("Enter", true));
+    assert.equal(runtime.animationFrames.size, 1);
+    runtime.flushAnimationFrame(32);
+    runtime.flushAnimationFrame(48);
+    const frames = controller.getRecentEvents().filter((event) => event.payload.name === "watch-frame");
+    assert.equal(frames.length, 3);
+    assert.deepEqual(frames.map((event) => event.payload.frameIndex), [0, 0, 1]);
+    assert.deepEqual(frames.map((event) => event.payload.trigger), [
+      { key: "Tab", shiftKey: false },
+      { key: "Enter", shiftKey: true },
+      { key: "Enter", shiftKey: true },
+    ]);
+
+    for (let index = 0; index < 28; index++) runtime.flushAnimationFrame(64 + index * 16);
+    assert.equal(
+      controller.getRecentEvents().filter((event) => event.payload.name === "watch-frame").length,
+      31,
+    );
+    assert.equal(
+      controller.getRecentEvents().filter(
+        (event) => event.payload.name === "watch-frame"
+          && (event.payload.trigger as { key: string }).key === "Enter",
+      ).length,
+      30,
+    );
+    assert.equal(runtime.animationFrames.size, 0);
+  } finally {
+    await controller.stop();
+    controller.unwatch(watchId);
+    controller.destroy();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("frame bursts stay inactive without forensic watches and stop cancels pending frames", async () => {
+  const runtime = new FakeRuntime();
+  runtime.install();
+  const root = new FakeElement("DIV", { class: "protyle" });
+  const editor = new FakeElement("DIV", { class: "protyle-wysiwyg" });
+  root.appendChild(editor);
+  runtime.document.root = root;
+  setActiveEditor({ protyle: { element: root } });
+  const controller = initDebugHook(new FakeEventBus() as unknown as EventBus);
+  const event = {
+    type: "keydown",
+    target: editor,
+    key: "Tab",
+    shiftKey: false,
+    code: "Tab",
+    isComposing: false,
+    repeat: false,
+    composedPath: () => [editor, root],
+  } as unknown as Event;
+  try {
+    await controller.start("timing-no-burst", {
+      profile: "timing",
+      frameBurst: { enabled: true, frames: 3 },
+    });
+    runtime.document.dispatch("keydown", event);
+    assert.equal(runtime.animationFrames.size, 0);
+    await controller.stop();
+
+    controller.watch(".protyle-wysiwyg", "editor");
+    await controller.start("stop-cancel", {
+      profile: "forensic",
+      frameBurst: { enabled: true, frames: 3 },
+    });
+    runtime.document.dispatch("keydown", event);
+    assert.equal(runtime.animationFrames.size, 1);
+    await controller.stop();
+    assert.equal(runtime.animationFrames.size, 0);
+    assert.equal(controller.getRecentEvents().some((item) => item.payload.name === "watch-frame"), false);
   } finally {
     await controller.stop();
     controller.destroy();
