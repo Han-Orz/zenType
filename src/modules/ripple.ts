@@ -863,6 +863,19 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
   }
 }
 
+function refreshSentenceHighlightOnly(): void {
+  if (!active || !inputMode.isFocusActive() || shouldPauseFocusAndTypewriter()) return;
+
+  const currentBlock = getCurrentBlock();
+  if (!currentBlock || !currentBlock.isConnected) return;
+
+  const textNodeMap = buildTextNodeMap(currentBlock);
+  const caretOffset = getCaretOffset(currentBlock, textNodeMap);
+  if (caretOffset === null) return;
+
+  applySentenceHighlight(currentBlock, caretOffset, textNodeMap);
+}
+
 // --- Block-level opacity ---
 
 function applyBlockOpacity(
@@ -1237,6 +1250,7 @@ function onDomMutation(records: MutationRecord[]): void {
       carryStructuralReplacementVisualState(childListRecords);
       structuralEdit.noteStructuralActivity(container);
       nestedRippleEngine.invalidateStructure();
+      refreshSentenceHighlightOnly();
       return;
     }
 
@@ -1251,6 +1265,12 @@ function onDomMutation(records: MutationRecord[]): void {
     // establish a structural transaction or suppress the ordinary refresh.
     nestedRippleEngine.invalidateStructure();
     scheduleMutationRefresh();
+    return;
+  }
+
+  const characterDataRecords = relevantRecords.filter((record) => record.type === "characterData");
+  if (characterDataRecords.length > 0 && structuralEdit.isStructuralEditPending()) {
+    refreshSentenceHighlightOnly();
     return;
   }
 
