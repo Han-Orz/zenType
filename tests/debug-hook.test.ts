@@ -307,8 +307,37 @@ test("DebugKit is session-first and stays quiet while the bridge is offline", as
     await controller.stop();
     assert.equal(controller.getState().active, false);
     assert.equal(runtime.fetchCalls.some((call) => call.url.endsWith("/events")), false);
+    const lifecycle = controller.getRecentEvents();
+    assert.equal(lifecycle[0].payload.name, "session-start");
+    assert.equal(lifecycle.at(-1)?.payload.name, "session-stop");
   } finally {
     controller.destroy();
+    runtime.restore();
+  }
+});
+
+test("online flush preserves session-start and session-stop envelope boundaries", async () => {
+  const runtime = new FakeRuntime();
+  runtime.install();
+  const root = new FakeElement("DIV", { class: "protyle" });
+  const editor = new FakeElement("DIV", { class: "protyle-wysiwyg" });
+  root.appendChild(editor);
+  runtime.document.root = root;
+  setActiveEditor({ protyle: { element: root } });
+  const controller = initDebugHook(new FakeEventBus() as unknown as EventBus);
+  try {
+    await controller.start("online-order", { profile: "forensic" });
+    await controller.stop();
+    const post = runtime.fetchCalls.find((call) => call.url.endsWith("/events"));
+    assert.ok(post);
+    const body = JSON.parse(post.init?.body as string) as {
+      events: Array<{ payload: { name?: string } }>;
+    };
+    assert.equal(body.events[0].payload.name, "session-start");
+    assert.equal(body.events.at(-1)?.payload.name, "session-stop");
+  } finally {
+    controller.destroy();
+    setActiveEditor(null);
     runtime.restore();
   }
 });
@@ -338,7 +367,7 @@ test("forensic sessions capture identity, text, styles, watches, and bounded sna
     assert.equal(runtime.observers.length, 0);
     await controller.start("marker-tab", { profile: "forensic" });
     assert.equal(runtime.observers.length, 1);
-    assert.equal(runtime.observers[0].target, root);
+    assert.equal(runtime.observers[0].target, editor);
 
     const keyEvent = {
       type: "keydown",
@@ -404,12 +433,54 @@ test("forensic sessions capture identity, text, styles, watches, and bounded sna
     await controller.stop();
     const snapshots = controller.getRecentEvents().filter((event) => event.kind === "snapshot");
     assert.equal(snapshots.length, 2);
-    const snapshot = snapshots[0].payload as { dom: { nodeToken: string; children?: Array<{ nodeToken: string }> } };
+    const snapshot = snapshots[0].payload as {
+      dom: { nodeToken: string; classes?: string[]; children?: Array<{ nodeToken: string }> };
+    };
     assert.match(snapshot.dom.nodeToken, /^n\d+$/);
+    assert.deepEqual(snapshot.dom.classes, ["protyle-wysiwyg"]);
     assert.equal(controller.getState().computedStyleReads > 0, true);
     assert.equal(controller.getState().watchSamples >= 3, true);
     controller.unwatch(watchId);
   } finally {
+    controller.destroy();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("scroll events stay lightweight in both profiles", async () => {
+  const runtime = new FakeRuntime();
+  runtime.install();
+  const root = new FakeElement("DIV", { class: "protyle" });
+  const editor = new FakeElement("DIV", { class: "protyle-wysiwyg" });
+  root.appendChild(editor);
+  runtime.document.root = root;
+  editor.scrollTop = 42;
+  editor.scrollLeft = 7;
+  setActiveEditor({ protyle: { element: root } });
+  const controller = initDebugHook(new FakeEventBus() as unknown as EventBus);
+  try {
+    for (const profile of ["forensic", "timing"] as const) {
+      await controller.start(`scroll-${profile}`, { profile });
+      runtime.document.dispatch("scroll", {
+        type: "scroll",
+        target: editor,
+      } as unknown as Event);
+      const capture = controller.getRecentEvents().find((item) => item.payload.name === "scroll");
+      assert.ok(capture);
+      assert.equal(capture.payload.source, "dom");
+      assert.equal(capture.payload.scrollTop, 42);
+      assert.equal(capture.payload.scrollLeft, 7);
+      assert.equal((capture.payload.target as { path: string }).path, capture.payload.targetPath);
+      assert.equal("selection" in capture.payload, false);
+      assert.equal("currentBlock" in capture.payload, false);
+      assert.equal("computed" in capture.payload, false);
+      assert.equal("watchSamples" in capture.payload, false);
+      assert.equal("scroll" in capture.payload, false);
+      await controller.stop();
+    }
+  } finally {
+    await controller.stop();
     controller.destroy();
     setActiveEditor(null);
     runtime.restore();

@@ -167,7 +167,6 @@ async function createSessionContext(outputDir, sessionId, event) {
     latestSnapshotPath: path.join(directory, LATEST_SNAPSHOT_FILE_NAME),
     summaryState: createDebugSummary(sessionId),
   };
-  await writeMeta(context);
   return context;
 }
 
@@ -209,6 +208,9 @@ function updateMetaFromEvent(context, event) {
     context.meta.profile = validProfile(payload.profile);
     if (typeof payload.startedAt === "string") context.meta.startedAt = payload.startedAt;
   }
+  if (eventName(event) === "profile-changed") {
+    context.meta.profile = validProfile(payload.profile);
+  }
 }
 
 function ensureSessionIds(events) {
@@ -233,27 +235,43 @@ export async function appendEvents(outputDir, events, sessions = new Map()) {
 
   await mkdir(path.join(outputDir, SESSIONS_DIR_NAME), { recursive: true });
   let summaryAccepted = 0;
-  let latestSessionId = null;
+  const lastEvent = validEvents[validEvents.length - 1];
+  const latestSessionId = typeof lastEvent.sessionId === "string"
+    && lastEvent.sessionId.length > 0
+    ? lastEvent.sessionId
+    : "unknown";
+  const groups = new Map();
   for (const event of validEvents) {
     const sessionId = typeof event.sessionId === "string" && event.sessionId.length > 0
       ? event.sessionId
       : "unknown";
+    const group = groups.get(sessionId) ?? [];
+    group.push(event);
+    groups.set(sessionId, group);
+  }
+
+  for (const [sessionId, sessionEvents] of groups) {
     let context = sessions.get(sessionId);
     if (!context || !context.directory) {
-      context = await createSessionContext(outputDir, sessionId, event);
+      context = await createSessionContext(outputDir, sessionId, sessionEvents[0]);
       sessions.set(sessionId, context);
     }
-    updateMetaFromEvent(context, event);
-    await appendRawEvents(context, [event]);
-    if (event.kind === "snapshot") {
-      await writeFile(context.latestSnapshotPath, `${JSON.stringify(event, null, 2)}\n`, "utf8");
+    await appendRawEvents(context, sessionEvents);
+    const summaryRecords = [];
+    let latestSnapshot = null;
+    for (const event of sessionEvents) {
+      updateMetaFromEvent(context, event);
+      summaryRecords.push(...context.summaryState.accept(event));
+      if (event.kind === "snapshot") latestSnapshot = event;
     }
-    summaryAccepted += await persistSummaryState(context, context.summaryState.accept(event));
+    summaryAccepted += await persistSummaryState(context, summaryRecords);
     await writeMeta(context);
-    await writeLatestSession(outputDir, context);
-    latestSessionId = sessionId;
+    if (latestSnapshot) {
+      await writeFile(context.latestSnapshotPath, `${JSON.stringify(latestSnapshot, null, 2)}\n`, "utf8");
+    }
   }
   const latest = latestSessionId ? sessions.get(latestSessionId) : null;
+  if (latest) await writeLatestSession(outputDir, latest);
   return {
     accepted: validEvents.length,
     sessionDir: latest?.directory ?? null,

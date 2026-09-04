@@ -214,11 +214,9 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     transport.reset(sessionId, bridgeUrl);
     collector.setProfile(profile);
     collector.resetNodeIdentity();
-    collector.attach();
 
-    // This is the only automatic bridge request made at session start.
-    await transport.probe();
-
+    // Keep the session-start envelope first. The collector must not be able
+    // to publish anything before this marker establishes the new sequence.
     publish("status", {
       source: "debugkit",
       name: "session-start",
@@ -227,6 +225,11 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
       startedAt,
       transportState: transport.getState().transportState,
     }, "session-start");
+
+    collector.attach();
+
+    // This is the only automatic bridge request made at session start.
+    await transport.probe();
     if (profile === "forensic") captureInternal("session-start");
     return sessionState();
   }
@@ -243,9 +246,9 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
       startedAt,
       stoppedAt,
     }, "session-stop");
-    await transport.flush();
     collector.detach();
     active = false;
+    await transport.flush();
   }
 
   function captureInternal(reason = "manual"): void {

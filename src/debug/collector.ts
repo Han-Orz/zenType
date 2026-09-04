@@ -135,6 +135,16 @@ function round(value: number): number {
   return Number.isFinite(value) ? Math.round(value * 100) / 100 : 0;
 }
 
+function scrollValue(
+  value: EventTarget | null,
+  property: "scrollTop" | "scrollLeft",
+): number | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as unknown as Record<string, unknown>;
+  const number = candidate[property];
+  return typeof number === "number" && Number.isFinite(number) ? round(number) : null;
+}
+
 function monotonicNow(): number {
   if (typeof performance === "undefined" || typeof performance.now !== "function") return 0;
   try {
@@ -461,12 +471,16 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
     observedRoot = null;
   }
 
+  function observationTarget(root: HTMLElement | null): HTMLElement | null {
+    if (!root) return null;
+    return (root.querySelector(".protyle-wysiwyg") as HTMLElement | null) ?? root;
+  }
+
   function attachObserver(): void {
     disconnectObserver();
     if (!currentRoot || typeof MutationObserver === "undefined") return;
-    const target = profile === "timing"
-      ? (currentRoot.querySelector(".protyle-wysiwyg") as HTMLElement | null) ?? currentRoot
-      : currentRoot;
+    const target = observationTarget(currentRoot);
+    if (!target) return;
     observedRoot = target;
     observer = new MutationObserver((records) => onMutations(records));
     observer.observe(target, profile === "timing"
@@ -489,6 +503,7 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
     const nextRoot = rootOfProtyle(desired) ?? fallback;
     if (nextRoot === currentRoot) {
       currentProtyle = desired;
+      if (observationTarget(nextRoot) !== observedRoot) attachObserver();
       return;
     }
     currentProtyle = desired;
@@ -513,6 +528,26 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
     if (!attached) return;
     const root = rootForEvent(event);
     if (!root) return;
+    if (event.type === "scroll") {
+      const target = serializer.nodeReference(event.target, root, false);
+      const snapshot = structuralEdit.getStructuralEditSnapshot();
+      const scrolling = typewriterScroll.isScrolling();
+      options.onEvent({
+        source: "dom",
+        name: "scroll",
+        target,
+        targetPath: target.path,
+        scrollTop: scrollValue(event.target, "scrollTop"),
+        scrollLeft: scrollValue(event.target, "scrollLeft"),
+        typewriterScrollActive: scrolling,
+        structural: {
+          generation: snapshot.generation,
+          phase: snapshot.phase,
+          kind: snapshot.kind,
+        },
+      }, "scroll");
+      return;
+    }
     const payload = profile === "timing"
       ? timingEventPayload(event, root)
       : forensicEventPayload(event, root);
@@ -706,7 +741,7 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
         watches,
       };
     }
-    const treeRoot = root;
+    const treeRoot = (root?.querySelector(".protyle-wysiwyg") as HTMLElement | null) ?? root;
     const currentBlock = block ? serializer.describeElement(block, root, true) : null;
     const activeDescription = serializer.protyleDescription(active, root);
     const dom: DebugDomTreeNode | null = treeRoot
