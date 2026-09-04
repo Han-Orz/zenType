@@ -91,18 +91,22 @@ export default class ZenType extends Plugin {
     if (__ZENTYPE_DEV__) {
       this.addCommand({
         langKey: "toggle-debug-hook",
-        langText: "切换 zenType 调试钩子",
-        callback: () => this.debugHook?.toggle(),
+        langText: "开始/停止 zenType Debug Session",
+        callback: () => { void this.debugHook?.toggle(); },
       });
       this.addCommand({
         langKey: "capture-debug-hook",
         langText: "捕获 zenType 调试快照",
-        callback: () => this.debugHook?.captureNow("command"),
+        callback: () => this.debugHook?.capture("command"),
       });
       this.addCommand({
-        langKey: "toggle-debug-hook-text",
-        langText: "切换调试正文采集",
-        callback: () => this.debugHook?.toggleIncludeText(),
+        langKey: "toggle-debug-profile",
+        langText: "切换 Debug timing / forensic",
+        callback: () => {
+          const debug = this.debugHook;
+          if (!debug) return;
+          debug.setProfile(debug.getProfile() === "timing" ? "forensic" : "timing");
+        },
       });
     }
 
