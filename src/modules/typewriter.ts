@@ -261,6 +261,19 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
     maxScrollTop: container.scrollHeight - container.clientHeight,
   });
 
+  if (__ZENTYPE_DEV__) {
+    scroll.reportDebugEvent({
+      name: "typewriter-scroll-resolve",
+      target: container,
+      caretY: rect.y,
+      editorTop: result.editorRect.top,
+      editorBottom: result.editorRect.bottom,
+      currentScrollTop: container.scrollTop,
+      maxScrollTop: container.scrollHeight - container.clientHeight,
+      ...resolution,
+    });
+  }
+
   if (resolution.action === "move") {
     scroll.scrollTo(container, { deltaY: resolution.deltaY }, scheduleScrollResync);
   } else if (scroll.isScrolling()) {

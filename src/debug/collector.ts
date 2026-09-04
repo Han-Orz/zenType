@@ -20,6 +20,7 @@ import type {
   DebugWatchSample,
 } from "./types";
 import type { DebugSerializer } from "./serialize";
+import type { TypewriterScrollDebugEvent } from "../modules/typewriter/scroll";
 
 const MAX_MUTATION_RECORDS = 80;
 const DEFAULT_FRAME_BURST_FRAMES = 18;
@@ -321,6 +322,42 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
     const samples = serializer.watchSamples(options.getWatches(), root, reason);
     if (samples.length > 0) options.onWatchSamples(samples.length);
     return samples;
+  }
+
+  function onTypewriterScrollDebug(event: TypewriterScrollDebugEvent): void {
+    if (!attached) return;
+    const { target, ...details } = event;
+    const snapshot = structuralEdit.getStructuralEditSnapshot();
+    const container = target
+      ? {
+        nodeToken: serializer.nodeTokenFor(target),
+        tag: target.tagName.toLowerCase(),
+        id: target.getAttribute("id"),
+        nodeId: target.getAttribute("data-node-id"),
+        dataType: target.getAttribute("data-type"),
+        classes: Array.from(target.classList).slice(0, 12),
+        isConnected: target.isConnected,
+      }
+      : null;
+    const scrolling = typewriterScroll.isScrolling();
+    options.onEvent({
+      source: "typewriter-scroll",
+      ...details,
+      ...(container ? {
+        scrollContainer: container,
+        scrollContainerToken: container.nodeToken,
+      } : {
+        scrollContainer: null,
+        scrollContainerToken: null,
+      }),
+      structural: {
+        generation: snapshot.generation,
+        phase: snapshot.phase,
+        kind: snapshot.kind,
+      },
+      typewriterScrollActive: scrolling,
+      typewriterScroll: { active: scrolling },
+    }, event.name);
   }
 
   function currentContext(
@@ -911,6 +948,7 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
   }
 
   function detach(): void {
+    typewriterScroll.setDebugSink(null);
     cancelFrameBurst();
     if (typeof document !== "undefined") {
       for (const listener of domEventListeners) {
@@ -1021,6 +1059,7 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
     attach() {
       if (attached) return;
       attached = true;
+      typewriterScroll.setDebugSink(onTypewriterScrollDebug);
       attachEventBus();
       attachDomEvents();
       refreshRoot();

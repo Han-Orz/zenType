@@ -40,6 +40,9 @@ try {
           }));
         },
       }],
+      define: {
+        __ZENTYPE_DEV__: "false",
+      },
     });
   }
 
