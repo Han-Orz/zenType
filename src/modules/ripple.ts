@@ -1198,6 +1198,16 @@ function onDomMutation(records: MutationRecord[]): void {
   const childListRecords = relevantRecords.filter((record) => record.type === "childList");
   if (childListRecords.length > 0) {
     if (structuralEdit.isStructuralEditPending()) {
+      const structuralSnapshot = structuralEdit.getStructuralEditSnapshot();
+      if (
+        structuralSnapshot.kind === "list-change" &&
+        structuralEdit.hasSemanticBlockMutation(childListRecords, container)
+      ) {
+        // A list indent can turn a dimmed sibling into an ancestor of the
+        // focused block before the structural transaction reaches stable.
+        // Neutralize only that stale layer; ownership remains for reconciliation.
+        nestedRippleEngine.neutralizeFocusAncestors(currentBlock);
+      }
       // Once a real transaction is pending, even a same-block rerender is
       // host follow-up activity and must extend its quiet window.
       carryStructuralReplacementVisualState(childListRecords);

@@ -36,6 +36,7 @@ export interface RippleStyleApplier {
     plan: RippleTargetPlan,
     bindings: ReadonlyMap<string, HTMLElement>,
   ): void;
+  neutralizeFocusAncestors(focusElement: HTMLElement): void;
   clear(animate?: boolean): void;
 }
 
@@ -185,6 +186,61 @@ export function createRippleStyleApplier(): RippleStyleApplier {
   function settlePendingHandoffsBeforeApply(): void {
     cancelPendingHandoffFrame();
     if (pendingHandoffs.size > 0) flushPendingHandoffs();
+  }
+
+  function neutralizeFocusAncestors(focusElement: HTMLElement): void {
+    for (const [element, target] of activeTargets) {
+      if (
+        target.blocked ||
+        element === focusElement ||
+        !element.contains(focusElement)
+      ) continue;
+
+      const appliedOpacity = target.owned.applied[RIPPLE_OPACITY_PROPERTY];
+      const appliedDuration = target.owned.applied[RIPPLE_TRANSITION_DURATION_PROPERTY];
+      if (!appliedOpacity || appliedOpacity.value === "1" || !appliedDuration) continue;
+
+      // Only touch a target while both private properties still match our
+      // ownership record. An external change is left untouched for the normal
+      // fail-safe path in the next reconciliation.
+      if (
+        !sameStyleValue(
+          currentStyleValue(element.style, RIPPLE_OPACITY_PROPERTY),
+          appliedOpacity,
+        ) ||
+        !sameStyleValue(
+          currentStyleValue(element.style, RIPPLE_TRANSITION_DURATION_PROPERTY),
+          appliedDuration,
+        )
+      ) continue;
+
+      cancelPendingExit(target);
+      const previousDuration = appliedDuration.value;
+      const durationApplied = applyPrivateProperty(
+        element,
+        target.owned,
+        RIPPLE_TRANSITION_DURATION_PROPERTY,
+        "0s",
+      );
+      if (!durationApplied) continue;
+
+      const opacityApplied = applyPrivateProperty(
+        element,
+        target.owned,
+        RIPPLE_OPACITY_PROPERTY,
+        "1",
+      );
+      if (opacityApplied) continue;
+
+      // If an external owner wins between the two writes, restore only our
+      // just-written duration so the target remains in its prior owned state.
+      applyPrivateProperty(
+        element,
+        target.owned,
+        RIPPLE_TRANSITION_DURATION_PROPERTY,
+        previousDuration,
+      );
+    }
   }
 
   function findHandoffSource(
@@ -421,5 +477,5 @@ export function createRippleStyleApplier(): RippleStyleApplier {
     if (!animate) activeTargets.clear();
   }
 
-  return { apply, clear };
+  return { apply, neutralizeFocusAncestors, clear };
 }
