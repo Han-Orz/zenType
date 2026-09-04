@@ -1,5 +1,6 @@
 import { getActiveEditor } from "siyuan";
 import type { EventBus, IProtyle, IWebSocketData } from "siyuan";
+import * as cursor from "../modules/cursor";
 import * as structuralEdit from "../modules/structuralEdit";
 import * as typewriterScroll from "../modules/typewriter/scroll";
 import {
@@ -20,6 +21,7 @@ import type {
   DebugWatchSample,
 } from "./types";
 import type { DebugSerializer } from "./serialize";
+import type { CursorDebugEvent } from "../modules/cursor";
 import type { TypewriterScrollDebugEvent } from "../modules/typewriter/scroll";
 
 const MAX_MUTATION_RECORDS = 80;
@@ -358,6 +360,43 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
       typewriterScrollActive: scrolling,
       typewriterScroll: { active: scrolling },
     }, event.name);
+  }
+
+  function onCursorDebug(event: CursorDebugEvent): void {
+    if (!attached) return;
+    const {
+      name,
+      cursorElement,
+      caretElement,
+      scrollContainer,
+      ...details
+    } = event;
+    const snapshot = structuralEdit.getStructuralEditSnapshot();
+    const scroll = scrollContainer
+      ? serializer.scrollStateFor(scrollContainer, currentRoot)
+      : null;
+    options.onEvent({
+      source: "cursor",
+      ...details,
+      cursor: cursorElement
+        ? serializer.describeElement(cursorElement, currentRoot, false)
+        : null,
+      caret: caretElement
+        ? serializer.describeElement(caretElement, currentRoot, false)
+        : null,
+      scrollContainer: scrollContainer
+        ? serializer.nodeReference(scrollContainer, currentRoot, false)
+        : null,
+      scroll,
+      scrollTop: scroll?.metrics.scrollTop ?? null,
+      structural: {
+        generation: snapshot.generation,
+        phase: snapshot.phase,
+        kind: snapshot.kind,
+      },
+      typewriterScrollActive: typewriterScroll.isScrolling(),
+      typewriterScroll: { active: typewriterScroll.isScrolling() },
+    }, name);
   }
 
   function currentContext(
@@ -948,6 +987,7 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
   }
 
   function detach(): void {
+    cursor.setDebugSink(null);
     typewriterScroll.setDebugSink(null);
     cancelFrameBurst();
     if (typeof document !== "undefined") {
@@ -1059,6 +1099,7 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
     attach() {
       if (attached) return;
       attached = true;
+      cursor.setDebugSink(onCursorDebug);
       typewriterScroll.setDebugSink(onTypewriterScrollDebug);
       attachEventBus();
       attachDomEvents();

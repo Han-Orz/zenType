@@ -11,6 +11,7 @@ import {
 export interface CursorEventContext {
   clearKeyboardPending: () => void;
   markKeyboardPending: () => void;
+  onMouseClick?: () => void;
   onScrollOrWheel: () => void;
   queueUpdate: () => void;
 }
@@ -109,7 +110,10 @@ export function bindCursorDocumentEvents(context: CursorEventContext): void {
     // click queues a caret refresh; external inputs never activate work.
     inputModeTriggers.onMouseClick();
     context.clearKeyboardPending();
-    if (isInActiveEditor(event.target)) context.queueUpdate();
+    if (isInActiveEditor(event.target)) {
+      context.queueUpdate();
+      context.onMouseClick?.();
+    }
   };
 
   const onScroll: EventListener = (event) => {

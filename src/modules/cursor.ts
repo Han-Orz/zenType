@@ -33,6 +33,8 @@ import { isMobile } from "../utils/isMobile";
 import { getEffectiveZIndex } from "../utils/getEffectiveZIndex";
 import { getEdgeProximity } from "../utils/edgeProximity";
 import { prefersReducedMotion } from "../utils/reducedMotion";
+import { findClosestScrollableElement } from "../utils/scroll";
+import type { CursorRect } from "../types";
 import {
   activateNativeCaretOwner,
   restoreNativeCaretOwner,
@@ -74,6 +76,27 @@ import * as inputMode from "./inputMode";
 
 const CURSOR_ID = "zentype-cursor";
 
+export type CursorDebugEventName =
+  | "cursor-click"
+  | "cursor-update"
+  | "cursor-frame"
+  | "cursor-scroll-policy"
+  | "cursor-transition-restored";
+
+export interface CursorDebugEvent {
+  name: CursorDebugEventName;
+  cursorElement?: HTMLDivElement | null;
+  caretElement?: Element | null;
+  scrollContainer?: HTMLElement | null;
+  caretRect?: CursorRect | null;
+  [key: string]: unknown;
+}
+
+export type CursorDebugSink = (event: CursorDebugEvent) => void;
+
+const DEBUG_ENABLED = __ZENTYPE_DEV__;
+const DEBUG_CURSOR_FRAME_LIMIT = 72;
+
 let cursorEl: HTMLDivElement | null = null;
 let pendingFrame: number | null = null;
 let removeTransitionFrame: number | null = null;
@@ -87,6 +110,89 @@ let cachedZIndexElement: Element | null = null;
 let cachedEffectiveZIndex = 0;
 let cachedFullscreenElement: Element | null = null;
 let nativeCaretOwner: HTMLElement | null = null;
+let debugSink: CursorDebugSink | null = null;
+let debugFrameRequest: number | null = null;
+let debugFrameToken = 0;
+let debugCaretElement: Element | null = null;
+let debugCaretRect: CursorRect | null = null;
+
+function emitDebug(event: CursorDebugEvent): void {
+  if (!DEBUG_ENABLED) return;
+  debugSink?.(event);
+}
+
+function debugScrollContainer(): HTMLElement | null {
+  if (!DEBUG_ENABLED || !debugCaretElement) return null;
+  try {
+    return findClosestScrollableElement(debugCaretElement);
+  } catch {
+    return null;
+  }
+}
+
+function emitDebugState(
+  name: CursorDebugEventName,
+  details: Record<string, unknown> = {},
+): void {
+  if (!DEBUG_ENABLED || !debugSink) return;
+  emitDebug({
+    name,
+    ...details,
+    cursorElement: cursorEl,
+    caretElement: debugCaretElement,
+    scrollContainer: debugScrollContainer(),
+    caretRect: debugCaretRect,
+    caretViewportY: debugCaretRect?.y ?? null,
+  });
+}
+
+function stopDebugFrameBurst(): void {
+  debugFrameToken += 1;
+  if (debugFrameRequest !== null) {
+    cancelAnimationFrame(debugFrameRequest);
+    debugFrameRequest = null;
+  }
+}
+
+function startDebugFrameBurst(reason: string): void {
+  if (
+    !DEBUG_ENABLED
+    || !debugSink
+    || !cursorEl
+    || typeof requestAnimationFrame !== "function"
+  ) return;
+
+  stopDebugFrameBurst();
+  const token = debugFrameToken;
+  let frameIndex = 0;
+  const sample = (timestamp: number) => {
+    debugFrameRequest = null;
+    if (token !== debugFrameToken || !debugSink) return;
+
+    emitDebugState("cursor-frame", {
+      reason,
+      frameIndex,
+      frameTimestamp: timestamp,
+    });
+    frameIndex += 1;
+    if (frameIndex < DEBUG_CURSOR_FRAME_LIMIT && debugSink) {
+      debugFrameRequest = requestAnimationFrame(sample);
+    }
+  };
+  debugFrameRequest = requestAnimationFrame(sample);
+}
+
+function reportDebugClick(): void {
+  if (!DEBUG_ENABLED || !debugSink) return;
+  emitDebugState("cursor-click");
+  startDebugFrameBurst("click");
+}
+
+export function setDebugSink(next: CursorDebugSink | null): void {
+  if (!DEBUG_ENABLED) return;
+  debugSink = next;
+  if (!next) stopDebugFrameBurst();
+}
 
 /** Fail open whenever the custom caret cannot be positioned reliably. */
 function restoreNativeCaretAndHideCustom(): void {
@@ -184,9 +290,9 @@ export function flushCursorTransitionIfNeeded(el: HTMLDivElement): boolean {
 /** rAF 节流入口：每帧最多执行一次 doUpdateCursor() */
 function queueUpdate(): void {
   if (pendingFrame !== null) return;
-  pendingFrame = requestAnimationFrame(() => {
+  pendingFrame = requestAnimationFrame((timestamp) => {
     pendingFrame = null;
-    doUpdateCursor();
+    doUpdateCursor(timestamp);
   });
 }
 
@@ -223,6 +329,7 @@ const cursorEventContext: CursorEventContext = {
   clearKeyboardPending,
   markKeyboardPending,
   onScrollOrWheel,
+  onMouseClick: reportDebugClick,
   queueUpdate,
 };
 
@@ -249,7 +356,7 @@ const popoverDragContext: PopoverDragContext = {
  *   7. no-transition 生效时同步布局 → rAF 移除 no-transition
  *   8. scheduleBreathe() 延迟恢复呼吸（边缘附近不恢复，保持暂停）
  */
-function doUpdateCursor(): void {
+function doUpdateCursor(frameTimestamp?: number): void {
   if (!cursorEl) return;
 
   const reducedMotion = prefersReducedMotion();
@@ -313,6 +420,11 @@ function doUpdateCursor(): void {
   if (!allowed.cursorElement || !activateCustomCaret(allowed.cursorElement)) {
     pauseBreathe();
     return;
+  }
+
+  if (DEBUG_ENABLED) {
+    debugCaretElement = allowed.cursorElement;
+    debugCaretRect = rect;
   }
 
   updateEdgeArrow(edge, allowed.isOuterElement, allowed.allowed);
@@ -388,6 +500,7 @@ function doUpdateCursor(): void {
     removeTransitionFrame = requestAnimationFrame(() => {
       removeTransitionFrame = null;
       cursorEl?.classList.remove("no-transition");
+      if (DEBUG_ENABLED) emitDebugState("cursor-transition-restored");
     });
   }
 
@@ -403,6 +516,12 @@ function doUpdateCursor(): void {
   bindPopoverDrag(allowed.cursorElement, popoverDragContext);
   bindScrollContainerEvents(allowed.cursorElement, scrollBindingContext);
 
+  if (DEBUG_ENABLED) {
+    emitDebugState("cursor-update", {
+      frameTimestamp,
+    });
+  }
+
   // round 4 fix（capture + cooldown）：键盘标志由 markKeyboardPending 启动的 300ms 倒计时负责清零，
   // 不再在 doUpdateCursor 末尾同步清掉——倒计时窗口内 SiYuan 同步触发的 scroll/ResizeObserver
   // 仍能读到 pendingKeyboardUpdate=true，从而跳过 .no-transition 保留按距离分档的过渡动画
@@ -416,11 +535,23 @@ function scheduleResumeBreathe(): void {
 function onScrollOrWheel(): void {
   if (!cursorEl) return;
   pauseBreathe();
+  const noTransitionBefore = DEBUG_ENABLED && cursorEl.classList.contains("no-transition");
+  const noAnimationBefore = DEBUG_ENABLED && cursorEl.classList.contains("no-animation");
   // round 4 fix：Enter 触发的 SiYuan 自动滚动会同步到这里；
   // 此时 pendingKeyboardUpdate=true，跳过加 .no-transition 保留按距离分档的过渡动画
   if (!pendingKeyboardUpdate) {
     cursorEl.classList.add("no-transition");
     cursorEl.classList.add("no-animation");
+  }
+  if (DEBUG_ENABLED) {
+    emitDebugState("cursor-scroll-policy", {
+      policy: pendingKeyboardUpdate ? "keyboard-preserve-transition" : "manual-scroll-no-transition",
+      pendingKeyboardUpdate,
+      noTransitionBefore,
+      noTransitionAfter: cursorEl.classList.contains("no-transition"),
+      noAnimationBefore,
+      noAnimationAfter: cursorEl.classList.contains("no-animation"),
+    });
   }
   queueUpdate();
 }
@@ -509,6 +640,9 @@ export function destroyCursor(): void {
   prevCursorY = null;
   lastCursorDur = null;
   nativeCaretOwner = restoreNativeCaretOwner(nativeCaretOwner);
+  if (DEBUG_ENABLED) stopDebugFrameBurst();
+  debugCaretElement = null;
+  debugCaretRect = null;
 
   destroyEdgeArrow();
 }
