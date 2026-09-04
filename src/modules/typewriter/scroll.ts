@@ -32,7 +32,7 @@ let activeScrollFrame: number | null = null;
 let activeTarget: HTMLElement | null = null;
 let startScroll = 0;
 let endScroll = 0;
-let startTime = 0;
+let startTime: number | null = null;
 let duration = 0;
 let easing: (t: number) => number = easeOutCubic;
 let generation = 0;
@@ -92,7 +92,7 @@ function clearActiveScroll(): void {
   activeTarget = null;
   startScroll = 0;
   endScroll = 0;
-  startTime = 0;
+  startTime = null;
   duration = 0;
   resyncPending = false;
   retargetSettledCallback = null;
@@ -116,7 +116,7 @@ export function cancel(): void {
       startScroll,
       endScroll,
       currentScrollTop: activeTarget.scrollTop,
-      elapsedMs: performance.now() - startTime,
+      elapsedMs: startTime === null ? 0 : performance.now() - startTime,
       resyncPending,
     });
   }
@@ -205,7 +205,7 @@ export function scrollTo(
         duration,
         easing: easing.name || "anonymous",
         startTime,
-        elapsedMs: performance.now() - startTime,
+        elapsedMs: startTime === null ? 0 : performance.now() - startTime,
         currentScrollTop: target.scrollTop,
         resyncPending,
         hasCallback: Boolean(onRetargetSettled),
@@ -220,7 +220,7 @@ export function scrollTo(
   activeTarget = target;
   startScroll = target.scrollTop;
   endScroll = target.scrollTop + deltaY;
-  startTime = performance.now();
+  startTime = null;
   duration = nextDuration;
   easing = nextEasing;
   resyncPending = false;
@@ -237,6 +237,7 @@ export function scrollTo(
   const step = (now: number) => {
     if (token !== generation || activeScrollFrame === null || activeTarget === null) return;
 
+    if (startTime === null) startTime = now;
     const elapsed = now - startTime;
     const t = Math.min(elapsed / duration, 1);
     const eased = easing(t);

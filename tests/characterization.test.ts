@@ -1108,6 +1108,9 @@ test("typewriter gives an idle first character an immediate scroll opportunity",
     assert.equal(runtime.raf.pending.size, 1, "check must start scroll without waiting for debounce");
     assert.equal(fixture.content.scrollTop, 0);
 
+    const firstScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstScrollFrame);
+    runtime.raf.flush(firstScrollFrame, runtime.clock.now);
     runtime.clock.advance(600);
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(fixture.content.scrollTop > 0, true);
@@ -1188,6 +1191,9 @@ test("typewriter uses the outer trigger band and inner settle target", () => {
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(runtime.raf.pending.size, 1, "caret below the trigger band must start one scroll");
     runtime.raf.flushNext(runtime.clock.now);
+    const firstScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstScrollFrame);
+    runtime.raf.flush(firstScrollFrame, runtime.clock.now);
     assert.equal(runtime.raf.pending.size, 1);
 
     const scrollFrame = [...runtime.raf.pending.keys()][0];
@@ -1220,7 +1226,11 @@ test("typewriter click relocation keeps its existing 50% center target", () => {
     runtime.raf.flushNext(runtime.clock.now);
 
     assert.equal(runtime.raf.pending.size, 1, "an explicit far click starts its own motion");
+    const firstScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstScrollFrame);
+    runtime.raf.flush(firstScrollFrame, runtime.clock.now);
     const scrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(scrollFrame);
     runtime.clock.advance(1000);
     runtime.raf.flush(scrollFrame, runtime.clock.now);
     assert.equal(Math.round(fixture.content.scrollTop), 300);
@@ -1296,7 +1306,11 @@ test("typewriter defers transient caret changes until active scroll settles", ()
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(runtime.raf.pending.size, 1);
 
+    const initialScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(initialScrollFrame);
+    runtime.raf.flush(initialScrollFrame, runtime.clock.now);
     const firstScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstScrollFrame);
     runtime.clock.advance(401);
     runtime.setCaret(fixture.text, 1, rect(20, 850));
     runtime.document.dispatch("selectionchange");
@@ -1313,13 +1327,56 @@ test("typewriter defers transient caret changes until active scroll settles", ()
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(runtime.raf.pending.size, 1, "the resync starts one follow-up loop at the safe point");
     const resyncScrollFrame = [...runtime.raf.pending.keys()][0];
-    runtime.clock.advance(600);
     runtime.raf.flush(resyncScrollFrame, runtime.clock.now);
+    const resyncProgressFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(resyncProgressFrame);
+    runtime.clock.advance(600);
+    runtime.raf.flush(resyncProgressFrame, runtime.clock.now);
     assert.equal(fixture.content.scrollTop > 300, true, "the latest caret target is eventually adopted");
     assert.equal(runtime.raf.pending.size, 0);
   } finally {
     destroyTypewriter();
     inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("scroll starts its timeline from the first rAF timestamp", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  runtime.clock.now = 1_000;
+  fixture.content.scrollTop = 100;
+
+  try {
+    scroll.reset();
+    scroll.scrollTo(fixture.content, { deltaY: 400, duration: 400 });
+    const firstFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstFrame);
+
+    // Model the SiYuan runtime's distinct performance/rAF clock origins:
+    // performance.now() at request time is 1000, while the first rAF callback
+    // receives 1100. The first renderable frame must still be the baseline.
+    runtime.raf.flush(firstFrame, 1_100);
+    assert.equal(fixture.content.scrollTop, 100);
+
+    const secondFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(secondFrame);
+    runtime.raf.flush(secondFrame, 1_200);
+    assert.equal(
+      fixture.content.scrollTop,
+      331.25,
+      "progress is based on the difference between rAF timestamps",
+    );
+
+    const finalFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(finalFrame);
+    runtime.raf.flush(finalFrame, 1_500);
+    assert.equal(fixture.content.scrollTop, 500);
+    assert.equal(runtime.raf.pending.size, 0);
+  } finally {
+    scroll.reset();
     setActiveEditor(null);
     runtime.restore();
   }
@@ -1337,8 +1394,11 @@ test("scroll keeps its active timeline while adopting a structural resync target
     const firstFrame = [...runtime.raf.pending.keys()][0];
     assert.ok(firstFrame);
 
-    runtime.clock.advance(200);
     runtime.raf.flush(firstFrame, runtime.clock.now);
+    const firstProgressFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstProgressFrame);
+    runtime.clock.advance(200);
+    runtime.raf.flush(firstProgressFrame, runtime.clock.now);
     const activeFrame = [...runtime.raf.pending.keys()][0];
     assert.ok(activeFrame);
 
@@ -1398,7 +1458,10 @@ test("typewriter waits for stable structural geometry before changing active scr
     runtime.document.dispatch("selectionchange");
     runtime.raf.flushNext(runtime.clock.now);
 
-    const activeScrollFrame = [...runtime.raf.pending.keys()][0];
+    let activeScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(activeScrollFrame);
+    runtime.raf.flush(activeScrollFrame, runtime.clock.now);
+    activeScrollFrame = [...runtime.raf.pending.keys()][0];
     assert.ok(activeScrollFrame);
 
     // Start a structural edit while a scroll is in flight. The first
@@ -2296,7 +2359,11 @@ test("Tab list intent stays authoritative through nested-list reparent and stabl
     assert.equal(runtime.raf.pending.size, 0, "list-change keeps the existing typing debounce");
     runtime.clock.advance(401);
     assert.equal(runtime.raf.pending.size, 1, "debounced list-change starts one scroll");
+    const firstScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstScrollFrame);
+    runtime.raf.flush(firstScrollFrame, runtime.clock.now);
     const scrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(scrollFrame);
     runtime.clock.advance(1000);
     runtime.raf.flush(scrollFrame, runtime.clock.now);
     assert.equal(Math.round(fixture.content.scrollTop), 70);
@@ -2776,8 +2843,11 @@ test("scroll callbacks are reserved for active-loop retarget completion", () => 
     scroll.scrollTo(fixture.content, { deltaY: 100 }, () => { initialCallbackCount++; });
     const initialFrame = [...runtime.raf.pending.keys()][0];
     assert.ok(initialFrame);
-    runtime.clock.advance(600);
     runtime.raf.flush(initialFrame, runtime.clock.now);
+    const initialProgressFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(initialProgressFrame);
+    runtime.clock.advance(600);
+    runtime.raf.flush(initialProgressFrame, runtime.clock.now);
     assert.equal(initialCallbackCount, 0, "an initial scroll does not request resync");
     assert.equal(runtime.raf.pending.size, 0);
 
@@ -2868,7 +2938,11 @@ test("stable Enter structural authority uses the inner lower settle target", () 
     }
 
     assert.equal(runtime.raf.pending.size, 1, "stable structural authority starts one scroll");
+    const firstScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstScrollFrame);
+    runtime.raf.flush(firstScrollFrame, runtime.clock.now);
     const scrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(scrollFrame);
     runtime.clock.advance(1000);
     runtime.raf.flush(scrollFrame, runtime.clock.now);
     assert.equal(
@@ -3022,7 +3096,11 @@ test("stable block Backspace uses the shared inner lower settle target", () => {
     }
 
     assert.equal(runtime.raf.pending.size, 1, "stable Backspace starts one scroll");
+    const firstScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstScrollFrame);
+    runtime.raf.flush(firstScrollFrame, runtime.clock.now);
     const scrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(scrollFrame);
     runtime.clock.advance(1000);
     runtime.raf.flush(scrollFrame, runtime.clock.now);
     assert.equal(Math.round(fixture.content.scrollTop), 70);
