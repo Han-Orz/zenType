@@ -125,9 +125,9 @@ src/
 - 当前焦点、选区边界、范围矩形、当前块及其祖先块的 rect 与 computed style
 - `beforeinput`、`input`、IME composition、键盘、粘贴、拖放、点击和 focus 事件
 - `MutationObserver` 的 childList、characterData，以及 class/style/data-type 等结构/样式属性变化
-- `loaded-protyle-*`、`switch-protyle`、`destroy-protyle`、`switch-protyle-mode`、`ws-main` 等 EventBus 事件
+- `loaded-protyle-static`、`loaded-protyle-dynamic`、`switch-protyle`、`click-editorcontent`、`ws-main` 和 structural edit finish 等诊断事件
 
-默认只输出文本长度，不输出正文；开发者明确启用正文采集后，正文也会被截断。采集器使用有界内存环形缓存和批量发送；桥接端将事件追加到 `.debug/siyuan-hook.ndjson`，将最近快照写入 `.debug/siyuan-hook.latest.json`，日志超过上限后轮换旧文件。
+DebugKit 默认按 session 工作：timing 只输出低扰动诊断，forensic 输出截断正文；采集器使用有界内存环形缓存和批量发送，bridge 按 `.debug/sessions/<label>__<sessionId>/` 落盘，入口由 `.debug/latest-session.json` 指向。
 
 ---
 

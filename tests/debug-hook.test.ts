@@ -4,16 +4,38 @@ import { setActiveEditor } from "siyuan";
 import type { EventBus } from "siyuan";
 import {
   initDebugHook,
-  serializeStructuralEditSnapshot,
+  redactText,
+  summarizeKeyboardKey,
 } from "../src/modules/debugHook";
-import * as structuralEdit from "../src/modules/structuralEdit";
+
+class FakeClassList extends Set<string> {
+  contains(value: string): boolean {
+    return this.has(value);
+  }
+}
+
+class FakeText {
+  readonly nodeType = 3;
+  readonly childNodes: FakeText[] = [];
+  parentElement: FakeElement | null = null;
+  isConnected = true;
+  nodeValue: string;
+
+  constructor(value: string) {
+    this.nodeValue = value;
+  }
+
+  get textContent(): string {
+    return this.nodeValue;
+  }
+}
 
 class FakeElement {
   readonly nodeType = 1;
-  readonly childNodes: FakeElement[] = [];
+  readonly childNodes: Array<FakeElement | FakeText> = [];
   readonly children: FakeElement[] = [];
+  readonly classList = new FakeClassList();
   readonly attributes: Array<{ name: string; value: string }> = [];
-  readonly classList = new Set<string>();
   parentElement: FakeElement | null = null;
   isConnected = true;
   scrollTop = 0;
@@ -22,11 +44,11 @@ class FakeElement {
   scrollWidth = 100;
   clientHeight = 100;
   clientWidth = 100;
-  textContent = "";
   tagName: string;
+  private ownText = "";
 
-  constructor(tagName = "DIV", attrs: Record<string, string> = {}) {
-    this.tagName = tagName;
+  constructor(tagName: string, attrs: Record<string, string> = {}) {
+    this.tagName = tagName.toUpperCase();
     for (const [name, value] of Object.entries(attrs)) {
       this.attributes.push({ name, value });
       if (name === "class") {
@@ -35,10 +57,18 @@ class FakeElement {
     }
   }
 
-  appendChild(child: FakeElement): void {
+  get textContent(): string {
+    return this.ownText + this.childNodes.map((child) => child.textContent ?? "").join("");
+  }
+
+  set textContent(value: string) {
+    this.ownText = value;
+  }
+
+  appendChild(child: FakeElement | FakeText): void {
     child.parentElement = this;
     this.childNodes.push(child);
-    this.children.push(child);
+    if (child instanceof FakeElement) this.children.push(child);
   }
 
   getAttribute(name: string): string | null {
@@ -48,39 +78,37 @@ class FakeElement {
   closest(selector: string): FakeElement | null {
     let current: FakeElement | null = this;
     while (current) {
-      if (selector === ".protyle" && current.getAttribute("class")?.split(/\s+/).includes("protyle")) {
-        return current;
-      }
-      if (selector === "[data-node-id]" && current.getAttribute("data-node-id")) {
-        return current;
-      }
+      if (current.matches(selector)) return current;
       current = current.parentElement;
     }
     return null;
   }
 
-  contains(node: object | null): boolean {
-    if (node === this) return true;
-    return this.children.some((child) => child.contains(node));
+  matches(selector: string): boolean {
+    return selector.split(",").some((part) => {
+      const normalized = part.trim();
+      if (normalized === ".protyle") return this.classList.has("protyle");
+      if (normalized === ".protyle-wysiwyg") return this.classList.has("protyle-wysiwyg");
+      if (normalized === ".protyle-action") return this.classList.has("protyle-action");
+      if (normalized === "[data-node-id]") return this.getAttribute("data-node-id") !== null;
+      return false;
+    });
   }
 
-  querySelector(_selector: string): FakeElement | null {
-    return this.querySelectorAll(_selector)[0] ?? null;
+  contains(node: object | null): boolean {
+    if (node === this) return true;
+    return this.children.some((child) => child.contains(node))
+      || this.childNodes.some((child) => child === node);
+  }
+
+  querySelector(selector: string): FakeElement | null {
+    return this.querySelectorAll(selector)[0] ?? null;
   }
 
   querySelectorAll(selector: string): FakeElement[] {
     const matches: FakeElement[] = [];
-    const matchesSelector = (element: FakeElement): boolean => (
-      selector === ".protyle"
-        ? element.getAttribute("class")?.split(/\s+/).includes("protyle") ?? false
-        : selector === ".protyle-wysiwyg"
-          ? element.classList.has("protyle-wysiwyg")
-          : selector === "[data-node-id]"
-            ? element.getAttribute("data-node-id") !== null
-            : false
-    );
     const visit = (element: FakeElement): void => {
-      if (matchesSelector(element)) matches.push(element);
+      if (element.matches(selector)) matches.push(element);
       for (const child of element.children) visit(child);
     };
     for (const child of this.children) visit(child);
@@ -89,14 +117,14 @@ class FakeElement {
 
   getBoundingClientRect(): DOMRect {
     return {
-      x: 0,
-      y: 0,
+      x: 1,
+      y: 2,
       width: 100,
       height: 20,
-      top: 0,
-      right: 100,
-      bottom: 20,
-      left: 0,
+      top: 2,
+      right: 101,
+      bottom: 22,
+      left: 1,
       toJSON: () => ({}),
     } as DOMRect;
   }
@@ -104,8 +132,8 @@ class FakeElement {
 
 class FakeSelection {
   rangeCount = 0;
-  anchorNode: FakeElement | null = null;
-  focusNode: FakeElement | null = null;
+  anchorNode: FakeText | null = null;
+  focusNode: FakeText | null = null;
   anchorOffset = 0;
   focusOffset = 0;
   isCollapsed = true;
@@ -124,11 +152,11 @@ class FakeDocument {
   readonly documentElement = new FakeElement("HTML");
   readonly selection = new FakeSelection();
   activeElement: FakeElement | null = null;
-  roots: FakeElement[] = [];
+  root: FakeElement | null = null;
   private readonly listeners = new Map<string, Set<EventListener>>();
 
-  constructor() {
-    this.documentElement.appendChild(this.body);
+  querySelector(selector: string): FakeElement | null {
+    return selector === ".protyle" ? this.root : null;
   }
 
   addEventListener(type: string, listener: EventListener): void {
@@ -141,10 +169,6 @@ class FakeDocument {
     this.listeners.get(type)?.delete(listener);
   }
 
-  querySelectorAll(selector: string): FakeElement[] {
-    return selector === ".protyle" ? this.roots : [];
-  }
-
   dispatch(type: string, event: Event): void {
     for (const listener of [...(this.listeners.get(type) ?? [])]) listener(event);
   }
@@ -154,38 +178,14 @@ class FakeDocument {
   }
 }
 
-class FakeRafQueue {
-  private nextId = 1;
-  readonly pending = new Map<number, FrameRequestCallback>();
-
-  constructor(private readonly now: () => number) {}
-
-  request = (callback: FrameRequestCallback): number => {
-    const id = this.nextId++;
-    this.pending.set(id, callback);
-    return id;
-  };
-
-  cancel = (id: number): void => {
-    this.pending.delete(id);
-  };
-
-  flushNext(time = this.now()): void {
-    const entry = this.pending.entries().next().value as [number, FrameRequestCallback] | undefined;
-    assert.ok(entry, "expected a pending animation frame");
-    this.pending.delete(entry[0]);
-    entry[1](time);
-  }
-}
-
 class FakeMutationObserver {
-  target: object | null = null;
+  target: FakeElement | null = null;
   options: MutationObserverInit | null = null;
   disconnectCount = 0;
 
   constructor(readonly callback: (records: MutationRecord[]) => void) {}
 
-  observe(target: object, options?: MutationObserverInit): void {
+  observe(target: FakeElement, options?: MutationObserverInit): void {
     this.target = target;
     this.options = options ?? null;
   }
@@ -207,19 +207,14 @@ class FakeEventBus {
   off(name: string, listener: (event: unknown) => void): void {
     this.listeners.get(name)?.delete(listener);
   }
-
-  emit(name: string, event: unknown): void {
-    for (const listener of [...(this.listeners.get(name) ?? [])]) listener(event);
-  }
 }
 
 class FakeRuntime {
   readonly document = new FakeDocument();
   readonly window = { getSelection: () => this.document.selection };
-  now = 0;
-  readonly raf = new FakeRafQueue(() => this.now);
-  readonly mutationObservers: FakeMutationObserver[] = [];
-  computedStyleCalls = 0;
+  readonly observers: FakeMutationObserver[] = [];
+  readonly fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
+  healthOnline = true;
   private readonly originalGlobals = new Map<string, PropertyDescriptor | undefined>();
 
   install(): void {
@@ -228,40 +223,48 @@ class FakeRuntime {
     this.defineGlobal("Node", { ELEMENT_NODE: 1, TEXT_NODE: 3 });
     this.defineGlobal("Element", FakeElement);
     this.defineGlobal("HTMLElement", FakeElement);
-    this.defineGlobal("requestAnimationFrame", this.raf.request);
-    this.defineGlobal("cancelAnimationFrame", this.raf.cancel);
-    this.defineGlobal("performance", { now: () => this.now });
     const runtime = this;
     this.defineGlobal("MutationObserver", class extends FakeMutationObserver {
       constructor(callback: (records: MutationRecord[]) => void) {
         super(callback);
-        runtime.mutationObservers.push(this);
+        runtime.observers.push(this);
       }
     });
-    this.defineGlobal("getComputedStyle", () => {
-      this.computedStyleCalls += 1;
-      return {
+    this.defineGlobal("getComputedStyle", () => ({
       display: "block",
-      position: "static",
+      position: "relative",
       opacity: "1",
       visibility: "visible",
       color: "rgb(0, 0, 0)",
       backgroundColor: "transparent",
-      fontSize: "16px",
-      lineHeight: "20px",
+      fill: "none",
+      stroke: "none",
       transform: "none",
-      transition: "none",
       filter: "none",
       mixBlendMode: "normal",
+      willChange: "auto",
+      transition: "opacity 100ms ease",
+      transitionProperty: "opacity",
+      transitionDuration: "100ms",
+      transitionTimingFunction: "ease",
+      zIndex: "1",
+      contain: "none",
+      isolation: "auto",
+      pointerEvents: "auto",
+      fontSize: "16px",
+      lineHeight: "20px",
       overflow: "visible",
-      zIndex: "auto",
       margin: "0px",
       padding: "0px",
-      pointerEvents: "auto",
-      getPropertyValue: () => "",
-      };
+      getPropertyValue: (property: string) => property === "--zt-ripple-opacity" ? "0.5" : "",
+    }));
+    this.defineGlobal("fetch", (url: string, init?: RequestInit) => {
+      this.fetchCalls.push({ url, init });
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: this.healthOnline, status: this.healthOnline ? 200 : 503 });
+      }
+      return Promise.resolve({ ok: true, status: 202 });
     });
-    this.defineGlobal("fetch", () => Promise.resolve({}));
   }
 
   restore(): void {
@@ -283,278 +286,174 @@ class FakeRuntime {
   }
 }
 
-function setup(): FakeRuntime {
+test("DebugKit is session-first and stays quiet while the bridge is offline", async () => {
   const runtime = new FakeRuntime();
   runtime.install();
-  structuralEdit.destroyStructuralEditCoordinator();
-  structuralEdit.initStructuralEditCoordinator();
-  return runtime;
-}
-
-function teardown(runtime: FakeRuntime): void {
-  structuralEdit.destroyStructuralEditCoordinator();
-  setActiveEditor(null);
-  runtime.restore();
-}
-
-test("structural debug snapshots serialize editor references without document text", () => {
-  const runtime = setup();
-  try {
-    const root = new FakeElement("DIV", { class: "protyle" });
-    const editor = new FakeElement("DIV", { "data-type": "protyle-wysiwyg" });
-    editor.textContent = "private document text";
-    root.appendChild(editor);
-
-    const serialized = serializeStructuralEditSnapshot({
-      generation: 7,
-      phase: "mutating",
-      kind: "enter",
-      editor: editor as unknown as HTMLElement,
-    }, root as unknown as Element);
-
-    assert.equal(serialized.generation, 7);
-    assert.equal(serialized.phase, "mutating");
-    assert.equal(serialized.kind, "enter");
-    assert.equal(serialized.editorPath, "div.protyle > div[data-type=\"protyle-wysiwyg\"]");
-    assert.equal(serialized.editorConnected, true);
-    assert.equal("editor" in serialized, false);
-    assert.equal(JSON.stringify(serialized).includes("private document text"), false);
-  } finally {
-    teardown(runtime);
-  }
-});
-
-test("debug hook emits structural finish diagnostics and removes its subscriber on destroy", () => {
-  const runtime = setup();
-  const eventBus = new FakeEventBus();
-  const controller = initDebugHook(eventBus as unknown as EventBus);
-  const editor = new FakeElement("DIV", { "data-type": "protyle-wysiwyg" });
-
-  try {
-    const generation = structuralEdit.beginStructuralEdit(
-      "enter",
-      editor as unknown as HTMLElement,
-    );
-    runtime.now = 16;
-    runtime.raf.flushNext();
-    runtime.now = 32;
-    runtime.raf.flushNext();
-    runtime.now = 48;
-    runtime.raf.flushNext();
-
-    const finishEvent = controller.getRecentEvents().find(
-      (event) => event.payload.name === "structural-edit-finish",
-    );
-    assert.ok(finishEvent);
-    assert.equal(finishEvent.payload.source, "structural-edit");
-    assert.equal(finishEvent.payload.generation, generation);
-    assert.equal(finishEvent.payload.kind, "enter");
-    assert.equal(finishEvent.payload.stable, true);
-    assert.equal(
-      (finishEvent.payload.structuralStateAfterFinish as { phase: string }).phase,
-      "idle",
-    );
-    assert.equal(typeof finishEvent.payload.monotonicMs, "number");
-    assert.doesNotThrow(() => JSON.stringify(finishEvent.payload));
-
-    controller.destroy();
-    const eventCountAfterDestroy = controller.getRecentEvents().length;
-    structuralEdit.beginStructuralEdit("backspace", editor as unknown as HTMLElement);
-    runtime.now = 64;
-    runtime.raf.flushNext();
-    runtime.now = 80;
-    runtime.raf.flushNext();
-    runtime.now = 96;
-    runtime.raf.flushNext();
-    assert.equal(controller.getRecentEvents().length, eventCountAfterDestroy);
-  } finally {
-    controller.destroy();
-    teardown(runtime);
-  }
-});
-
-test("DOM and mutation diagnostics carry the current structural state", () => {
-  const runtime = setup();
-  const root = new FakeElement("DIV", { class: "protyle" });
-  const editor = new FakeElement("DIV", { class: "protyle-wysiwyg", "data-type": "protyle-wysiwyg" });
-  root.appendChild(editor);
-  runtime.document.roots = [root];
+  runtime.healthOnline = false;
   const controller = initDebugHook(new FakeEventBus() as unknown as EventBus);
-
   try {
-    const generation = structuralEdit.beginStructuralEdit(
-      "enter",
-      editor as unknown as HTMLElement,
-    );
-    const event = {
-      type: "input",
-      target: editor,
-      composedPath: () => [editor, root],
+    assert.equal(runtime.fetchCalls.length, 0);
+    assert.equal(globalThis.__zentypeDebug, globalThis.__zentypeDebugHook);
+    const started = await controller.start("offline", { profile: "forensic" });
+    assert.equal(started.active, true);
+    assert.equal(controller.getState().transportState, "offline");
+    assert.equal(runtime.fetchCalls.filter((call) => call.url.endsWith("/health")).length, 1);
+
+    controller.mark("still useful", { source: "caller", detail: "kept in memory" });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.equal(runtime.fetchCalls.some((call) => call.url.endsWith("/events")), false);
+    assert.equal(controller.getRecentEvents().some((event) => event.payload.name === "mark"), true);
+
+    await controller.stop();
+    assert.equal(controller.getState().active, false);
+    assert.equal(runtime.fetchCalls.some((call) => call.url.endsWith("/events")), false);
+  } finally {
+    controller.destroy();
+    runtime.restore();
+  }
+});
+
+test("forensic sessions capture identity, text, styles, watches, and bounded snapshots", async () => {
+  const runtime = new FakeRuntime();
+  runtime.install();
+  const root = new FakeElement("DIV", { class: "protyle" });
+  const editor = new FakeElement("DIV", {
+    class: "protyle-wysiwyg",
+    "data-type": "protyle-wysiwyg",
+    "data-node-id": "block-a",
+  });
+  const marker = new FakeElement("SPAN", { class: "protyle-action" });
+  const initialText = new FakeText("current block text");
+  root.appendChild(editor);
+  root.appendChild(marker);
+  editor.appendChild(initialText);
+  runtime.document.root = root;
+  runtime.document.activeElement = marker;
+  runtime.document.selection.anchorNode = initialText;
+  runtime.document.selection.focusNode = initialText;
+  setActiveEditor({ protyle: { element: root, id: "protyle-a", block: { id: "block-a" } } });
+  const controller = initDebugHook(new FakeEventBus() as unknown as EventBus);
+  const watchId = controller.watch(".protyle-action", "marker");
+  try {
+    assert.equal(runtime.observers.length, 0);
+    await controller.start("marker-tab", { profile: "forensic" });
+    assert.equal(runtime.observers.length, 1);
+    assert.equal(runtime.observers[0].target, root);
+
+    const keyEvent = {
+      type: "keydown",
+      target: marker,
+      key: "a",
+      code: "KeyA",
+      repeat: false,
+      isComposing: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      metaKey: false,
+      composedPath: () => [marker, root],
       defaultPrevented: false,
       cancelBubble: false,
       eventPhase: 1,
-      timeStamp: 12,
-      inputType: "insertParagraph",
-      isComposing: false,
-      data: null,
+      timeStamp: 10,
     } as unknown as Event;
-    runtime.document.dispatch("input", event);
+    runtime.document.dispatch("keydown", keyEvent);
+    const keyCapture = controller.getRecentEvents().find((event) => event.payload.name === "keydown");
+    assert.ok(keyCapture);
+    assert.equal(keyCapture.payload.key, "a");
+    const markerReference = keyCapture.payload.target as { nodeToken: string; isConnected: boolean };
+    assert.match(markerReference.nodeToken, /^n\d+$/);
+    assert.equal(markerReference.isConnected, true);
 
-    const inputEvent = controller.getRecentEvents().find(
-      (item) => item.payload.name === "input",
+    const tabEvent = { ...keyEvent, key: "Tab", code: "Tab" } as unknown as Event;
+    runtime.document.dispatch("keydown", tabEvent);
+    const tabCapture = controller.getRecentEvents().find(
+      (event) => event.payload.name === "keydown" && event.payload.key === "Tab",
     );
-    assert.ok(inputEvent);
-    const inputState = inputEvent.payload.structuralEdit as {
-      generation: number;
-      phase: string;
-      editorPath: string | null;
-    };
-    assert.equal(inputState.generation, generation);
-    assert.equal(inputState.phase, "mutating");
-    assert.equal(inputState.editorPath, "div.protyle > div[data-type=\"protyle-wysiwyg\"]");
-    assert.deepEqual(inputEvent.payload.typewriterScroll, { active: false });
-    assert.equal(typeof inputEvent.payload.monotonicMs, "number");
+    assert.ok(tabCapture);
+    const samples = tabCapture.payload.watchSamples as Array<Record<string, unknown>>;
+    assert.equal(samples.length, 1);
+    assert.equal((samples[0].nodeToken as string), markerReference.nodeToken);
+    assert.equal((samples[0].label as string), "marker");
+    assert.equal((samples[0].computed as Record<string, string>).transitionDuration, "100ms");
 
-    const observer = runtime.mutationObservers[0];
-    observer.callback([{
-      type: "childList",
-      target: root,
-      attributeName: null,
-      oldValue: null,
-      addedNodes: [],
-      removedNodes: [],
-    } as unknown as MutationRecord]);
-    const mutationEvent = controller.getRecentEvents().find(
-      (item) => item.payload.name === "mutation",
-    );
-    assert.ok(mutationEvent);
-    assert.equal(
-      (mutationEvent.payload.structuralEdit as { generation: number }).generation,
-      generation,
-    );
-  } finally {
-    controller.destroy();
-    teardown(runtime);
-  }
-});
-
-test("disabled debug hook does not inspect a structural editor at finish", () => {
-  const runtime = setup();
-  const eventBus = new FakeEventBus();
-  const controller = initDebugHook(eventBus as unknown as EventBus);
-  let accessed = false;
-  const editor = new Proxy({}, {
-    get() {
-      accessed = true;
-      throw new Error("disabled debug hook inspected editor");
-    },
-  });
-
-  try {
-    controller.setEnabled(false);
-    structuralEdit.beginStructuralEdit("enter", editor as unknown as HTMLElement);
-    runtime.now = 16;
-    runtime.raf.flushNext();
-    runtime.now = 32;
-    runtime.raf.flushNext();
-    runtime.now = 48;
-    runtime.raf.flushNext();
-    assert.equal(accessed, false);
-  } finally {
-    controller.destroy();
-    teardown(runtime);
-  }
-});
-
-test("timing profile is the default, observes one active WYSIWYG, and stays cheap", () => {
-  const runtime = setup();
-  const root = new FakeElement("DIV", { class: "protyle" });
-  const editor = new FakeElement("DIV", { class: "protyle-wysiwyg", "data-type": "protyle-wysiwyg" });
-  root.appendChild(editor);
-  runtime.document.roots = [root];
-  const protyle = { element: root };
-  setActiveEditor({ protyle });
-  const controller = initDebugHook(new FakeEventBus() as unknown as EventBus);
-
-  try {
-    assert.equal(controller.getProfile(), "timing");
-    assert.equal(controller.getState().observedRootCount, 1);
-    const observer = runtime.mutationObservers[0];
-    assert.equal(observer.target, editor);
-    assert.deepEqual(observer.options, { subtree: true, childList: true });
-    assert.equal(runtime.computedStyleCalls, 0);
-
-    runtime.document.dispatch("input", {
-      type: "input",
-      target: editor,
-      inputType: "insertText",
-      isComposing: false,
-      composedPath: () => [editor, root],
-    } as unknown as Event);
-    observer.callback([{
+    const textNode = new FakeText("secret text");
+    editor.appendChild(textNode);
+    runtime.observers[0].callback([{
       type: "childList",
       target: editor,
       attributeName: null,
       oldValue: null,
-      addedNodes: [],
+      addedNodes: [textNode],
       removedNodes: [],
     } as unknown as MutationRecord]);
-
-    const events = controller.getRecentEvents();
-    const inputEvent = events.find((event) => event.payload.name === "input");
-    const mutationEvent = events.find((event) => event.payload.name === "mutation");
-    assert.ok(inputEvent);
-    assert.ok(mutationEvent);
-    assert.equal("dom" in inputEvent.payload, false);
-    assert.equal("records" in mutationEvent.payload, false);
-    assert.equal("computed" in mutationEvent.payload, false);
-    assert.equal(runtime.computedStyleCalls, 0);
-    assert.equal(controller.getState().timingEvents >= 2, true);
+    const mutation = controller.getRecentEvents().find((event) => event.payload.name === "mutation");
+    assert.ok(mutation);
+    const records = mutation.payload.records as Array<Record<string, unknown>>;
+    const addedText = records[0].addedTextNodes as Array<Record<string, unknown>>;
+    assert.equal(addedText[0].text, "secret text");
     assert.equal(controller.getState().mutationBatches, 1);
+
+    controller.mark("flash-seen");
+    const mark = controller.getRecentEvents().find((event) => event.payload.name === "mark");
+    assert.ok(mark);
+    assert.equal(mark.payload.source, "debugkit");
+    assert.equal(mark.payload.label, "flash-seen");
+    assert.equal((mark.payload.currentBlock as { text: string }).text, "current block textsecret text");
+
+    await controller.stop();
+    const snapshots = controller.getRecentEvents().filter((event) => event.kind === "snapshot");
+    assert.equal(snapshots.length, 2);
+    const snapshot = snapshots[0].payload as { dom: { nodeToken: string; children?: Array<{ nodeToken: string }> } };
+    assert.match(snapshot.dom.nodeToken, /^n\d+$/);
+    assert.equal(controller.getState().computedStyleReads > 0, true);
+    assert.equal(controller.getState().watchSamples >= 3, true);
+    controller.unwatch(watchId);
   } finally {
     controller.destroy();
-    teardown(runtime);
+    setActiveEditor(null);
+    runtime.restore();
   }
 });
 
-test("timing observer follows the active Protyle and forensic restores rich observation", () => {
-  const runtime = setup();
-  const rootA = new FakeElement("DIV", { class: "protyle" });
-  const editorA = new FakeElement("DIV", { class: "protyle-wysiwyg", "data-type": "protyle-wysiwyg" });
-  rootA.appendChild(editorA);
-  const rootB = new FakeElement("DIV", { class: "protyle" });
-  const editorB = new FakeElement("DIV", { class: "protyle-wysiwyg", "data-type": "protyle-wysiwyg" });
-  rootB.appendChild(editorB);
-  runtime.document.roots = [rootA, rootB];
-  const protyleA = { element: rootA };
-  const protyleB = { element: rootB };
-  setActiveEditor({ protyle: protyleA });
-  const eventBus = new FakeEventBus();
-  const controller = initDebugHook(eventBus as unknown as EventBus);
-
+test("timing profile masks printable keys and does not serialize a DOM tree", async () => {
+  const runtime = new FakeRuntime();
+  runtime.install();
+  const root = new FakeElement("DIV", { class: "protyle" });
+  const editor = new FakeElement("DIV", { class: "protyle-wysiwyg" });
+  root.appendChild(editor);
+  runtime.document.root = root;
+  setActiveEditor({ protyle: { element: root } });
+  const controller = initDebugHook(new FakeEventBus() as unknown as EventBus);
   try {
-    const firstTimingObserver = runtime.mutationObservers[0];
-    setActiveEditor({ protyle: protyleB });
-    eventBus.emit("switch-protyle", { detail: { protyle: protyleB } });
-    assert.equal(firstTimingObserver.disconnectCount, 1);
-    assert.equal(controller.getState().observedRootCount, 1);
-    assert.equal(runtime.mutationObservers[1].target, editorB);
-    assert.deepEqual(runtime.mutationObservers[1].options, { subtree: true, childList: true });
-
-    controller.setProfile("forensic");
-    assert.equal(controller.getProfile(), "forensic");
-    assert.equal(controller.getState().observedRootCount, 2);
-    const forensicObserver = runtime.mutationObservers[2];
-    assert.equal(forensicObserver.target, rootA);
-    assert.equal(forensicObserver.options?.attributes, true);
-    assert.equal(forensicObserver.options?.characterData, true);
-    assert.equal(forensicObserver.options?.attributeOldValue, true);
-
-    controller.setProfile("timing");
-    assert.equal(controller.getState().observedRootCount, 1);
-    assert.deepEqual(runtime.mutationObservers[4].options, { subtree: true, childList: true });
+    await controller.start("timing", { profile: "timing" });
+    const event = {
+      type: "keydown",
+      target: editor,
+      key: "x",
+      code: "KeyX",
+      isComposing: false,
+      repeat: false,
+      composedPath: () => [editor, root],
+    } as unknown as Event;
+    runtime.document.dispatch("keydown", event);
+    const keyCapture = controller.getRecentEvents().find((item) => item.payload.name === "keydown");
+    assert.ok(keyCapture);
+    assert.equal(keyCapture.payload.key, "<printable>");
+    assert.equal(controller.getRecentEvents().some((item) => item.kind === "snapshot"), false);
+    assert.equal(controller.getState().computedStyleReads, 0);
   } finally {
+    await controller.stop();
     controller.destroy();
-    teardown(runtime);
+    setActiveEditor(null);
+    runtime.restore();
   }
+});
+
+test("text helpers preserve the timing/forensic boundary", () => {
+  assert.deepEqual(redactText("嵌套块", false), { length: 3 });
+  assert.deepEqual(redactText("嵌套块", true), { length: 3, text: "嵌套块" });
+  assert.equal(summarizeKeyboardKey("Enter"), "Enter");
+  assert.equal(summarizeKeyboardKey("a"), "<printable>");
+  assert.equal(summarizeKeyboardKey("a", true), "a");
 });
