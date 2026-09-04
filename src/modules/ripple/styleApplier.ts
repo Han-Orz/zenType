@@ -319,9 +319,7 @@ export function createRippleStyleApplier(): RippleStyleApplier {
         }
 
         addRippleClass(element, activeTarget);
-        if (activeTarget.role !== "marker") {
-          commitHandoffBaseline(element);
-        }
+        commitHandoffBaseline(element);
         if (baselineOpacity === finalOpacity) {
           const normalDurationApplied = applyPrivateProperty(
             element,
