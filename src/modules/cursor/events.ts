@@ -8,11 +8,23 @@ import {
   isReadonlyEditorTarget,
 } from "../../utils/editorScope";
 
+export type CursorScrollSource = "scroll" | "manual-input";
+
+/** Manual policy applies to user input or scrolls not owned by Typewriter. */
+export function shouldUseManualScrollPolicy(
+  source: CursorScrollSource,
+  pendingKeyboardUpdate: boolean,
+  ownedScroll: boolean,
+): boolean {
+  if (source === "manual-input") return true;
+  return !pendingKeyboardUpdate && !ownedScroll;
+}
+
 export interface CursorEventContext {
   clearKeyboardPending: () => void;
   markKeyboardPending: () => void;
   onMouseClick?: () => void;
-  onScrollOrWheel: () => void;
+  onScrollOrWheel: (source: CursorScrollSource, target: EventTarget | null) => void;
   queueUpdate: () => void;
 }
 
@@ -40,7 +52,7 @@ export function bindCursorDocumentEvents(context: CursorEventContext): void {
   const onWheelExit: EventListener = (event) => {
     inputModeTriggers.onWheelOrTouchMove();
     context.clearKeyboardPending();
-    if (isInActiveEditor(event.target)) context.onScrollOrWheel();
+    if (isInActiveEditor(event.target)) context.onScrollOrWheel("manual-input", event.target);
   };
 
   // 聚焦/打字机模式：鼠标拖蓝检测（mouseup 时比对 selection 变化）
@@ -117,7 +129,7 @@ export function bindCursorDocumentEvents(context: CursorEventContext): void {
   };
 
   const onScroll: EventListener = (event) => {
-    if (isInActiveEditor(event.target)) context.onScrollOrWheel();
+    if (isInActiveEditor(event.target)) context.onScrollOrWheel("scroll", event.target);
   };
 
   const onCompositionEnd: EventListener = (event) => {

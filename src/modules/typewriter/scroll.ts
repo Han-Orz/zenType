@@ -106,6 +106,11 @@ export function isScrolling(): boolean {
   return activeScrollFrame !== null;
 }
 
+/** Whether this exact scroll container owns the current animated motion. */
+export function ownsActiveScroll(target: EventTarget | null): boolean {
+  return activeScrollFrame !== null && activeTarget !== null && activeTarget === target;
+}
+
 export function cancel(): void {
   if (DEBUG_ENABLED && activeScrollFrame !== null && activeTarget !== null) {
     emitDebug({

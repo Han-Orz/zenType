@@ -64,6 +64,8 @@ import {
   bindCursorDocumentEvents,
   destroyCursorDocumentEvents,
   type CursorEventContext,
+  type CursorScrollSource,
+  shouldUseManualScrollPolicy,
 } from "./cursor/events";
 import {
   startSwitchSettle,
@@ -73,6 +75,7 @@ import {
   type SwitchSettleContext,
 } from "./cursor/switchSettle";
 import * as inputMode from "./inputMode";
+import * as typewriterScroll from "./typewriter/scroll";
 
 const CURSOR_ID = "zentype-cursor";
 
@@ -299,6 +302,7 @@ function queueUpdate(): void {
 const scrollBindingContext = {
   getCursorElement: () => cursorEl,
   isKeyboardUpdatePending: () => pendingKeyboardUpdate,
+  isOwnedScrollTarget: (target: EventTarget | null) => typewriterScroll.ownsActiveScroll(target),
   pauseBreathe,
   queueUpdate,
 };
@@ -532,20 +536,33 @@ function scheduleResumeBreathe(): void {
 }
 
 /** 滚动 / 滚轮处理：暂停呼吸 + 停止过渡 + 立即更新 */
-function onScrollOrWheel(): void {
+function onScrollOrWheel(source: CursorScrollSource, target: EventTarget | null): void {
   if (!cursorEl) return;
   pauseBreathe();
   const noTransitionBefore = DEBUG_ENABLED && cursorEl.classList.contains("no-transition");
   const noAnimationBefore = DEBUG_ENABLED && cursorEl.classList.contains("no-animation");
+  const ownedScroll = source === "scroll" && typewriterScroll.ownsActiveScroll(target);
+  const useManualScrollPolicy = shouldUseManualScrollPolicy(
+    source,
+    pendingKeyboardUpdate,
+    ownedScroll,
+  );
   // round 4 fix：Enter 触发的 SiYuan 自动滚动会同步到这里；
   // 此时 pendingKeyboardUpdate=true，跳过加 .no-transition 保留按距离分档的过渡动画
-  if (!pendingKeyboardUpdate) {
+  if (useManualScrollPolicy) {
     cursorEl.classList.add("no-transition");
     cursorEl.classList.add("no-animation");
   }
   if (DEBUG_ENABLED) {
     emitDebugState("cursor-scroll-policy", {
-      policy: pendingKeyboardUpdate ? "keyboard-preserve-transition" : "manual-scroll-no-transition",
+      policy: pendingKeyboardUpdate
+        ? "keyboard-preserve-transition"
+        : ownedScroll
+          ? "typewriter-owned-scroll-preserve-transition"
+          : "manual-scroll-no-transition",
+      source,
+      ownedScroll,
+      manualPolicy: useManualScrollPolicy,
       pendingKeyboardUpdate,
       noTransitionBefore,
       noTransitionAfter: cursorEl.classList.contains("no-transition"),

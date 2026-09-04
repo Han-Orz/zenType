@@ -7,6 +7,8 @@ import * as inputModeTriggers from "../src/modules/inputModeTriggers";
 import {
   bindCursorDocumentEvents,
   destroyCursorDocumentEvents,
+  shouldUseManualScrollPolicy,
+  type CursorScrollSource,
 } from "../src/modules/cursor/events";
 import {
   destroyTypewriter,
@@ -1377,6 +1379,78 @@ test("scroll starts its timeline from the first rAF timestamp", () => {
     assert.equal(runtime.raf.pending.size, 0);
   } finally {
     scroll.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("cursor routes Typewriter-owned scrolls separately from manual input", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  const routed: Array<{ source: CursorScrollSource; target: EventTarget | null }> = [];
+
+  try {
+    inputMode.reset();
+    scroll.reset();
+    bindCursorDocumentEvents({
+      clearKeyboardPending: () => undefined,
+      markKeyboardPending: () => undefined,
+      onScrollOrWheel: (source, target) => routed.push({ source, target }),
+      queueUpdate: () => undefined,
+    });
+
+    scroll.scrollTo(fixture.content, { deltaY: 100, duration: 100 });
+    assert.equal(scroll.ownsActiveScroll(fixture.content), true);
+    assert.equal(scroll.ownsActiveScroll(fixture.wysiwyg), false);
+
+    runtime.document.dispatch("scroll", eventFor(fixture.content));
+    runtime.document.dispatch("scroll", eventFor(fixture.wysiwyg));
+    runtime.document.dispatch("wheel", eventFor(fixture.content));
+    runtime.document.dispatch("touchmove", eventFor(fixture.content));
+
+    assert.deepEqual(
+      routed.map(({ source, target }) => ({
+        source,
+        manual: shouldUseManualScrollPolicy(
+          source,
+          false,
+          source === "scroll" && scroll.ownsActiveScroll(target),
+        ),
+      })),
+      [
+        { source: "scroll", manual: false },
+        { source: "scroll", manual: true },
+        { source: "manual-input", manual: true },
+        { source: "manual-input", manual: true },
+      ],
+    );
+    assert.equal(shouldUseManualScrollPolicy("manual-input", true, true), true);
+
+    const firstFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstFrame);
+    runtime.raf.flush(firstFrame, 0);
+    const finalFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(finalFrame);
+    runtime.raf.flush(finalFrame, 100);
+    assert.equal(scroll.ownsActiveScroll(fixture.content), false);
+
+    runtime.document.dispatch("scroll", eventFor(fixture.content));
+    const finalRoute = routed.at(-1);
+    assert.ok(finalRoute);
+    assert.equal(finalRoute.source, "scroll");
+    assert.equal(
+      shouldUseManualScrollPolicy(
+        finalRoute.source,
+        false,
+        scroll.ownsActiveScroll(finalRoute.target),
+      ),
+      true,
+    );
+  } finally {
+    destroyCursorDocumentEvents();
+    scroll.reset();
+    inputMode.reset();
     setActiveEditor(null);
     runtime.restore();
   }
