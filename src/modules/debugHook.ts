@@ -21,6 +21,8 @@ export type {
   DebugKitController,
   DebugKitCounters,
   DebugKitState,
+  DebugMarkerForensicOptions,
+  DebugMarkerForensicTarget,
   DebugMutationRecord,
   DebugNodeReference,
   DebugProfile,

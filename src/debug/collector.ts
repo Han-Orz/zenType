@@ -11,6 +11,8 @@ import {
 import type {
   DebugDomTreeNode,
   DebugFrameBurstOptions,
+  DebugMarkerForensicOptions,
+  DebugMarkerForensicTarget,
   DebugProfile,
   DebugSnapshot,
   DebugStructuralEditState,
@@ -68,11 +70,19 @@ const TIMING_DOM_EVENT_NAMES = [
 type DomEventName = (typeof FORENSIC_DOM_EVENT_NAMES)[number]
   | (typeof TIMING_DOM_EVENT_NAMES)[number];
 
+export interface DebugWatchDefinition {
+  selector: string;
+  label: string;
+}
+
 export interface DebugCollectorOptions {
   eventBus: EventBus;
   profile: DebugProfile;
   getWatches: () => readonly DebugWatch[];
+  replaceWatches: (definitions: readonly DebugWatchDefinition[]) => void;
   onEvent: (payload: Record<string, unknown>, reason?: string) => void;
+  onMarkerBurstStart: (payload: Record<string, unknown>) => void;
+  onMarkerBurstCancelled: (payload: Record<string, unknown>) => void;
   onMutationBatch: (serializedRecordCount: number) => void;
   onWatchSamples: (count: number) => void;
   onNodeSerialized: () => void;
@@ -82,10 +92,12 @@ export interface DebugCollectorOptions {
 export interface DebugCollector {
   setProfile(profile: DebugProfile): void;
   setFrameBurst(options?: DebugFrameBurstOptions): void;
+  setMarkerForensic(options?: DebugMarkerForensicOptions): void;
   resetNodeIdentity(): void;
   attach(): void;
   detach(): void;
   getObservedRootCount(): number;
+  getLatestBurstId(): string | null;
   createSnapshot(reason: string): DebugSnapshot;
   captureContext(reason: string): Record<string, unknown>;
 }
@@ -100,6 +112,8 @@ interface BlockLike {
 
 interface FrameBurstRun {
   token: number;
+  burstId: string | null;
+  triggerIndex: number | null;
   trigger: {
     key: string;
     shiftKey: boolean;
@@ -251,6 +265,29 @@ function controlKey(event: Event): boolean {
   return ["Tab", "Enter", "Backspace", "Delete"].includes(key);
 }
 
+function markerTrigger(event: Event): boolean {
+  return event.type === "keydown" && (event as KeyboardEvent).key === "Tab";
+}
+
+function nodeIdSelector(nodeId: string): string {
+  const escaped = typeof CSS !== "undefined" && typeof CSS.escape === "function"
+    ? CSS.escape(nodeId)
+    : nodeId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `[data-node-id="${escaped}"]`;
+}
+
+function markerWatchDefinitions(target: DebugMarkerForensicTarget): DebugWatchDefinition[] {
+  const suspectSelector = nodeIdSelector(target.suspectNodeId);
+  const currentSelector = nodeIdSelector(target.currentNodeId);
+  return [
+    { selector: suspectSelector, label: "suspect-list-item" },
+    { selector: `${suspectSelector} > .protyle-action`, label: "suspect-marker" },
+    { selector: `${suspectSelector} > .protyle-action svg`, label: "suspect-marker-svg" },
+    { selector: `${suspectSelector} > .protyle-action use`, label: "suspect-marker-use" },
+    { selector: currentSelector, label: "current-list-item" },
+  ];
+}
+
 function frameCount(value: number | undefined): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_FRAME_BURST_FRAMES;
   return Math.min(MAX_FRAME_BURST_FRAMES, Math.max(1, Math.floor(value)));
@@ -276,6 +313,9 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
   let frameBurstToken = 0;
   let frameBurstRequest: number | null = null;
   let frameBurstRun: FrameBurstRun | null = null;
+  let markerForensic: DebugMarkerForensicOptions | null = null;
+  let markerBurstSequence = 0;
+  let latestBurstId: string | null = null;
 
   function sampleWatches(reason: string, root = currentRoot): ReturnType<DebugSerializer["watchSamples"]> {
     const samples = serializer.watchSamples(options.getWatches(), root, reason);
@@ -496,13 +536,26 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
     observedRoot = null;
   }
 
-  function cancelFrameBurst(): void {
+  function cancelFrameBurst(reason = "cancelled", notify = false): void {
+    const cancelled = frameBurstRun;
     frameBurstToken += 1;
     if (frameBurstRequest !== null && typeof cancelAnimationFrame === "function") {
       cancelAnimationFrame(frameBurstRequest);
     }
     frameBurstRequest = null;
     frameBurstRun = null;
+    if (notify && cancelled?.burstId) {
+      options.onMarkerBurstCancelled({
+        source: "debugkit",
+        name: "marker-burst-cancelled",
+        burstId: cancelled.burstId,
+        triggerIndex: cancelled.triggerIndex,
+        trigger: cancelled.trigger,
+        capturedFrameCount: cancelled.frameIndex,
+        requestedFrameCount: cancelled.frameCount,
+        reason,
+      });
+    }
   }
 
   function scheduleFrameBurstFrame(run: FrameBurstRun): void {
@@ -532,6 +585,10 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
       options.onEvent({
         source: "debugkit",
         name: "watch-frame",
+        ...(run.burstId ? {
+          burstId: run.burstId,
+          triggerIndex: run.triggerIndex,
+        } : {}),
         trigger: run.trigger,
         frameIndex: run.frameIndex,
         elapsedMs: round(Math.max(0, frameTimestamp - run.startedAt)),
@@ -553,6 +610,59 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
     });
   }
 
+  function startMarkerFrameBurst(event: Event): void {
+    if (
+      profile !== "forensic"
+      || !frameBurstEnabled
+      || !markerForensic?.enabled
+      || typeof requestAnimationFrame !== "function"
+    ) return;
+
+    options.replaceWatches([]);
+    cancelFrameBurst("replaced-by-new-tab", true);
+
+    let target: DebugMarkerForensicTarget | null = null;
+    try {
+      target = markerForensic.resolveTarget(event);
+    } catch {
+      target = null;
+    }
+    if (!target) return;
+
+    const burstId = `b${++markerBurstSequence}`;
+    latestBurstId = burstId;
+    const triggerIndex = markerBurstSequence;
+    options.replaceWatches(markerWatchDefinitions(target));
+    options.onMarkerBurstStart({
+      source: "debugkit",
+      name: "marker-burst-start",
+      burstId,
+      triggerIndex,
+      key: (event as KeyboardEvent).key,
+      shiftKey: (event as KeyboardEvent).shiftKey,
+      currentNodeId: target.currentNodeId,
+      suspectNodeId: target.suspectNodeId,
+      currentNodeToken: serializer.nodeTokenFor(target.currentElement),
+      suspectNodeToken: serializer.nodeTokenFor(target.suspectElement),
+    });
+
+    const keyboard = event as KeyboardEvent;
+    const run: FrameBurstRun = {
+      token: frameBurstToken,
+      burstId,
+      triggerIndex,
+      trigger: {
+        key: keyboard.key,
+        shiftKey: keyboard.shiftKey,
+      },
+      startedAt: monotonicNow(),
+      frameIndex: 0,
+      frameCount: frameBurstFrameCount,
+    };
+    frameBurstRun = run;
+    scheduleFrameBurstFrame(run);
+  }
+
   function startFrameBurst(event: Event): void {
     cancelFrameBurst();
     if (
@@ -565,6 +675,8 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
     const keyboard = event as KeyboardEvent;
     const run: FrameBurstRun = {
       token: frameBurstToken,
+      burstId: null,
+      triggerIndex: null,
       trigger: {
         key: keyboard.key,
         shiftKey: keyboard.shiftKey,
@@ -654,11 +766,12 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
       }, "scroll");
       return;
     }
+    if (markerForensic?.enabled && markerTrigger(event)) startMarkerFrameBurst(event);
     const payload = profile === "timing"
       ? timingEventPayload(event, root)
       : forensicEventPayload(event, root);
     options.onEvent(payload, event.type);
-    if (controlKey(event)) startFrameBurst(event);
+    if (!markerForensic?.enabled && controlKey(event)) startFrameBurst(event);
   }
 
   function onLoaded(
@@ -894,6 +1007,14 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
       frameBurstFrameCount = frameCount(nextOptions?.frames);
       if (!frameBurstEnabled) cancelFrameBurst();
     },
+    setMarkerForensic(nextOptions) {
+      const wasMarkerForensic = markerForensic?.enabled === true;
+      cancelFrameBurst();
+      markerForensic = nextOptions?.enabled === true ? nextOptions : null;
+      markerBurstSequence = 0;
+      latestBurstId = null;
+      if (wasMarkerForensic || markerForensic) options.replaceWatches([]);
+    },
     resetNodeIdentity() {
       serializer.resetNodeIdentity();
     },
@@ -908,6 +1029,9 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
     detach,
     getObservedRootCount() {
       return observer && observedRoot ? 1 : 0;
+    },
+    getLatestBurstId() {
+      return latestBurstId;
     },
     createSnapshot,
     captureContext(reason) {

@@ -86,14 +86,45 @@ class FakeElement {
   }
 
   matches(selector: string): boolean {
-    return selector.split(",").some((part) => {
-      const normalized = part.trim();
-      if (normalized === ".protyle") return this.classList.has("protyle");
-      if (normalized === ".protyle-wysiwyg") return this.classList.has("protyle-wysiwyg");
-      if (normalized === ".protyle-action") return this.classList.has("protyle-action");
-      if (normalized === "[data-node-id]") return this.getAttribute("data-node-id") !== null;
-      return false;
-    });
+    return selector.split(",").some((part) => this.matchesSingle(part.trim()));
+  }
+
+  private matchesSingle(selector: string): boolean {
+    const directChild = selector.indexOf(" > ");
+    if (directChild >= 0) {
+      const parentSelector = selector.slice(0, directChild).trim();
+      const childSelector = selector.slice(directChild + 3).trim();
+      const descendantBoundary = childSelector.lastIndexOf(" ");
+      if (descendantBoundary > 0) {
+        const descendantSelector = childSelector.slice(0, descendantBoundary).trim();
+        const descendantSelf = childSelector.slice(descendantBoundary + 1).trim();
+        if (!this.matchesSingle(descendantSelf)) return false;
+        let candidate = this.parentElement;
+        while (candidate) {
+          if (candidate.matches(descendantSelector) && candidate.parentElement?.matches(parentSelector)) {
+            return true;
+          }
+          candidate = candidate.parentElement;
+        }
+        return false;
+      }
+      return this.matchesSingle(childSelector) && !!this.parentElement?.matches(parentSelector);
+    }
+
+    const descendant = selector.lastIndexOf(" ");
+    if (descendant > 0) {
+      const ancestorSelector = selector.slice(0, descendant).trim();
+      const selfSelector = selector.slice(descendant + 1).trim();
+      return this.matchesSingle(selfSelector) && !!this.parentElement?.closest(ancestorSelector);
+    }
+
+    if (selector.startsWith(".")) return this.classList.has(selector.slice(1));
+    const attribute = /^\[([^=\]]+)(?:="([^"]*)")?\]$/.exec(selector);
+    if (attribute) {
+      const value = this.getAttribute(attribute[1]);
+      return value !== null && (attribute[2] === undefined || value === attribute[2]);
+    }
+    return selector.toUpperCase() === this.tagName;
   }
 
   contains(node: object | null): boolean {
@@ -318,6 +349,8 @@ test("DebugKit is session-first and stays quiet while the bridge is offline", as
     assert.equal(globalThis.__zentypeDebug, globalThis.__zentypeDebugHook);
     const started = await controller.start("offline", { profile: "forensic" });
     assert.equal(started.active, true);
+    assert.equal(started.buildSha, "unknown");
+    assert.equal(controller.getState().buildSha, "unknown");
     assert.equal(controller.getState().transportState, "offline");
     assert.equal(runtime.fetchCalls.filter((call) => call.url.endsWith("/health")).length, 1);
 
@@ -331,6 +364,7 @@ test("DebugKit is session-first and stays quiet while the bridge is offline", as
     assert.equal(runtime.fetchCalls.some((call) => call.url.endsWith("/events")), false);
     const lifecycle = controller.getRecentEvents();
     assert.equal(lifecycle[0].payload.name, "session-start");
+    assert.equal(lifecycle[0].payload.buildSha, "unknown");
     assert.equal(lifecycle.at(-1)?.payload.name, "session-stop");
   } finally {
     controller.destroy();
@@ -646,6 +680,189 @@ test("frame bursts stay inactive without forensic watches and stop cancels pendi
     await controller.stop();
     assert.equal(runtime.animationFrames.size, 0);
     assert.equal(controller.getRecentEvents().some((item) => item.payload.name === "watch-frame"), false);
+  } finally {
+    await controller.stop();
+    controller.destroy();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("marker forensic mode arms without a target and creates replaceable Tab bursts", async () => {
+  const runtime = new FakeRuntime();
+  runtime.install();
+  const root = new FakeElement("DIV", { class: "protyle" });
+  const editor = new FakeElement("DIV", { class: "protyle-wysiwyg" });
+  const list = new FakeElement("UL");
+  const suspectOne = new FakeElement("LI", {
+    "data-type": "NodeListItem",
+    "data-node-id": "suspect-one",
+  });
+  const currentOne = new FakeElement("LI", {
+    "data-type": "NodeListItem",
+    "data-node-id": "current-one",
+  });
+  const suspectTwo = new FakeElement("LI", {
+    "data-type": "NodeListItem",
+    "data-node-id": "suspect-two",
+  });
+  const currentTwo = new FakeElement("LI", {
+    "data-type": "NodeListItem",
+    "data-node-id": "current-two",
+  });
+  const markerOne = new FakeElement("SPAN", { class: "protyle-action" });
+  const markerOneSvg = new FakeElement("SVG");
+  const markerOneUse = new FakeElement("USE");
+  markerOneSvg.appendChild(markerOneUse);
+  markerOne.appendChild(markerOneSvg);
+  suspectOne.appendChild(markerOne);
+  const markerTwo = new FakeElement("SPAN", { class: "protyle-action" });
+  const markerTwoSvg = new FakeElement("SVG");
+  const markerTwoUse = new FakeElement("USE");
+  markerTwoSvg.appendChild(markerTwoUse);
+  markerTwo.appendChild(markerTwoSvg);
+  suspectTwo.appendChild(markerTwo);
+  list.appendChild(suspectOne);
+  list.appendChild(currentOne);
+  list.appendChild(suspectTwo);
+  list.appendChild(currentTwo);
+  editor.appendChild(list);
+  root.appendChild(editor);
+  runtime.document.root = root;
+  setActiveEditor({ protyle: { element: root } });
+
+  const targets = [
+    {
+      currentElement: currentOne as unknown as Element,
+      currentNodeId: "current-one",
+      suspectElement: suspectOne as unknown as Element,
+      suspectNodeId: "suspect-one",
+    },
+    {
+      currentElement: currentTwo as unknown as Element,
+      currentNodeId: "current-two",
+      suspectElement: suspectTwo as unknown as Element,
+      suspectNodeId: "suspect-two",
+    },
+  ];
+  let resolveCalls = 0;
+  const controller = initDebugHook(new FakeEventBus() as unknown as EventBus);
+  const keyEvent = (target: FakeElement, key: string, shiftKey = false): Event => ({
+    type: "keydown",
+    target,
+    key,
+    code: key,
+    repeat: false,
+    isComposing: false,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey,
+    metaKey: false,
+    composedPath: () => [target, editor, root],
+    defaultPrevented: false,
+    cancelBubble: false,
+    eventPhase: 1,
+    timeStamp: 10,
+  } as unknown as Event);
+
+  try {
+    await controller.start("marker-frame", {
+      profile: "forensic",
+      frameBurst: { enabled: true, frames: 18 },
+      markerForensic: {
+        enabled: true,
+        resolveTarget: () => targets[resolveCalls++] ?? null,
+      },
+    });
+    assert.equal(resolveCalls, 0);
+    assert.equal(controller.getState().watchCount, 0);
+    assert.equal(controller.getState().latestBurstId, null);
+
+    runtime.document.dispatch("keydown", keyEvent(currentOne, "Enter"));
+    runtime.document.dispatch("keydown", keyEvent(currentOne, "Backspace"));
+    runtime.document.dispatch("keydown", keyEvent(currentOne, "Delete"));
+    assert.equal(resolveCalls, 0);
+    assert.equal(runtime.animationFrames.size, 0);
+    assert.equal(
+      controller.getRecentEvents().filter((event) => event.payload.name === "marker-burst-start").length,
+      0,
+    );
+
+    runtime.document.dispatch("keydown", keyEvent(currentOne, "Tab"));
+    const firstStart = controller.getRecentEvents().find(
+      (event) => event.payload.name === "marker-burst-start",
+    );
+    assert.ok(firstStart);
+    assert.equal(firstStart.payload.burstId, "b1");
+    assert.equal(firstStart.payload.triggerIndex, 1);
+    assert.equal(firstStart.payload.key, "Tab");
+    assert.equal(firstStart.payload.shiftKey, false);
+    assert.equal(firstStart.payload.currentNodeId, "current-one");
+    assert.equal(firstStart.payload.suspectNodeId, "suspect-one");
+    assert.match(firstStart.payload.currentNodeToken as string, /^n\d+$/);
+    assert.match(firstStart.payload.suspectNodeToken as string, /^n\d+$/);
+    assert.equal(controller.getState().watchCount, 5);
+    assert.equal(controller.getState().latestBurstId, "b1");
+    assert.equal(runtime.animationFrames.size, 1);
+
+    runtime.flushAnimationFrame(16);
+    const firstFrame = controller.getRecentEvents().find(
+      (event) => event.payload.name === "watch-frame" && event.payload.burstId === "b1",
+    );
+    assert.ok(firstFrame);
+    assert.equal(firstFrame.payload.frameIndex, 0);
+    assert.equal((firstFrame.payload.watchSamples as Array<unknown>).length, 5);
+
+    runtime.document.dispatch("keydown", keyEvent(currentTwo, "Tab", true));
+    const cancelled = controller.getRecentEvents().find(
+      (event) => event.payload.name === "marker-burst-cancelled",
+    );
+    assert.ok(cancelled);
+    assert.equal(cancelled.payload.burstId, "b1");
+    assert.equal(cancelled.payload.capturedFrameCount, 1);
+    assert.equal(cancelled.payload.reason, "replaced-by-new-tab");
+    const starts = controller.getRecentEvents().filter(
+      (event) => event.payload.name === "marker-burst-start",
+    );
+    assert.deepEqual(starts.map((event) => event.payload.burstId), ["b1", "b2"]);
+    assert.equal(starts[1].payload.triggerIndex, 2);
+    assert.equal(starts[1].payload.shiftKey, true);
+    assert.equal(starts[1].payload.currentNodeId, "current-two");
+    assert.equal(starts[1].payload.suspectNodeId, "suspect-two");
+    assert.equal(controller.getState().latestBurstId, "b2");
+    assert.equal(controller.getState().watchCount, 5);
+    assert.equal(runtime.animationFrames.size, 1);
+
+    const latestTab = controller.getRecentEvents().filter(
+      (event) => event.payload.name === "keydown" && event.payload.key === "Tab",
+    ).at(-1);
+    assert.ok(latestTab);
+    assert.deepEqual(
+      (latestTab.payload.watchSamples as Array<{ label: string }>).map((sample) => sample.label),
+      [
+        "suspect-list-item",
+        "suspect-marker",
+        "suspect-marker-svg",
+        "suspect-marker-use",
+        "current-list-item",
+      ],
+    );
+
+    controller.mark("marker-flicker-observed", {
+      latestBurstId: controller.getState().latestBurstId,
+    });
+    const mark = controller.getRecentEvents().find(
+      (event) => event.payload.name === "mark",
+    );
+    assert.ok(mark);
+    assert.equal(mark.payload.label, "marker-flicker-observed");
+    assert.equal(mark.payload.latestBurstId, "b2");
+
+    await controller.stop();
+    assert.equal(runtime.animationFrames.size, 0);
+    assert.equal(controller.getState().active, false);
+    assert.equal(controller.getState().latestBurstId, null);
+    assert.equal(controller.getState().watchCount, 0);
   } finally {
     await controller.stop();
     controller.destroy();

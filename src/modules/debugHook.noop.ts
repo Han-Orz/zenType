@@ -42,6 +42,7 @@ const INACTIVE_STATE: DebugKitState = {
   pendingEventCount: 0,
   observedRootCount: 0,
   watchCount: 0,
+  latestBurstId: null,
   destroyed: false,
 };
 

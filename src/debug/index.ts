@@ -124,7 +124,22 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     eventBus,
     profile,
     getWatches: () => [...watches.values()],
+    replaceWatches: (definitions) => {
+      watches.clear();
+      for (const definition of definitions) {
+        if (watches.size >= 8) break;
+        const selector = definition.selector.trim();
+        if (!selector) continue;
+        watches.set(`w${++watchSequence}`, {
+          id: `w${watchSequence}`,
+          selector,
+          label: truncate(definition.label.trim() || selector, MAX_LABEL_LENGTH),
+        });
+      }
+    },
     onEvent: (payload, reason) => publish("event", payload, reason),
+    onMarkerBurstStart: (payload) => publish("event", payload, "marker-burst-start"),
+    onMarkerBurstCancelled: (payload) => publish("event", payload, "marker-burst-cancelled"),
     onMutationBatch: (serializedRecordCount) => {
       counters.mutationBatches += 1;
       counters.serializedMutationRecords += serializedRecordCount;
@@ -219,6 +234,7 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     transport.reset(sessionId, bridgeUrl);
     collector.setProfile(profile);
     collector.setFrameBurst(options.frameBurst);
+    collector.setMarkerForensic(options.markerForensic);
     collector.resetNodeIdentity();
 
     // Keep the session-start envelope first. The collector must not be able
@@ -254,6 +270,7 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
       stoppedAt,
     }, "session-stop");
     collector.detach();
+    collector.setMarkerForensic();
     active = false;
     await transport.flush();
   }
@@ -341,6 +358,7 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
         pendingEventCount: transport.getPendingCount(),
         observedRootCount: active ? collector.getObservedRootCount() : 0,
         watchCount: watches.size,
+        latestBurstId: collector.getLatestBurstId(),
         destroyed,
       };
     },
@@ -369,10 +387,12 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
           stoppedAt,
         }, "session-stop");
         collector.detach();
+        collector.setMarkerForensic();
         active = false;
         void transport.flush().finally(() => transport.destroy());
       } else {
         collector.detach();
+        collector.setMarkerForensic();
         transport.destroy();
       }
       destroyed = true;
@@ -393,6 +413,8 @@ export type {
   DebugFrameBurstOptions,
   DebugHookController,
   DebugKitState,
+  DebugMarkerForensicOptions,
+  DebugMarkerForensicTarget,
   DebugProfile,
   DebugSessionState,
   DebugStartOptions,

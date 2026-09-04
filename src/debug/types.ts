@@ -16,8 +16,21 @@ export interface DebugFrameBurstOptions {
 export interface DebugStartOptions {
   profile?: DebugProfile;
   frameBurst?: DebugFrameBurstOptions;
+  markerForensic?: DebugMarkerForensicOptions;
   /** Development-only override used by local bridge smoke tests. */
   bridgeUrl?: string;
+}
+
+export interface DebugMarkerForensicTarget {
+  currentElement: Element;
+  currentNodeId: string;
+  suspectElement: Element;
+  suspectNodeId: string;
+}
+
+export interface DebugMarkerForensicOptions {
+  enabled: boolean;
+  resolveTarget: (event: Event) => DebugMarkerForensicTarget | null;
 }
 
 export interface DebugSessionState {
@@ -56,6 +69,7 @@ export interface DebugKitState extends DebugSessionState, DebugTransportCounters
   pendingEventCount: number;
   observedRootCount: number;
   watchCount: number;
+  latestBurstId: string | null;
   destroyed: boolean;
 }
 
