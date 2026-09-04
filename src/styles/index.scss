@@ -214,5 +214,5 @@
 // The duration custom property is written from RIPPLE_CONFIG.TRANSITION_SEC.
 .zentype-ripple-block {
   opacity: var(--zt-ripple-opacity, 1) !important;
-  transition: opacity var(--zt-ripple-transition-duration) ease;
+  transition: opacity var(--zt-ripple-transition-duration) ease !important;
 }
