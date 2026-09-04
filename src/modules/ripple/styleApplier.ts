@@ -31,6 +31,13 @@ interface PendingHandoff {
   finalOpacity: string;
 }
 
+interface PreparedHandoff {
+  element: HTMLElement;
+  target: ActiveTarget;
+  baselineOpacity: string;
+  finalOpacity: string;
+}
+
 export interface RippleStyleApplier {
   apply(
     plan: RippleTargetPlan,
@@ -85,8 +92,8 @@ function removeRippleClass(element: HTMLElement, target: ActiveTarget): void {
 
 function commitHandoffBaseline(element: HTMLElement): void {
   // A rAF callback still runs before paint. Force the browser to commit the
-  // zero-duration baseline before the old owner is released or the transition
-  // duration is restored.
+  // zero-duration baseline after the old owner has been released and before
+  // the transition duration is restored.
   void element.offsetHeight;
 }
 
@@ -241,6 +248,8 @@ export function createRippleStyleApplier(): RippleStyleApplier {
       }
     }
 
+    const preparedHandoffs: PreparedHandoff[] = [];
+
     for (const target of plan.targets) {
       const element = bindings.get(target.semanticId);
       if (!element || !nextTargets.has(element)) continue;
@@ -296,8 +305,8 @@ export function createRippleStyleApplier(): RippleStyleApplier {
 
       if (handoffSource) {
         // Establish the new layer at the old layer's visual baseline while
-        // transitions are suppressed. The baseline is flushed before the old
-        // layer is released; the next frame only retargets when needed.
+        // transitions are suppressed. The forced baseline commit is deferred
+        // until the old owner has been released below.
         const durationApplied = applyPrivateProperty(
           element,
           activeTarget.owned,
@@ -319,22 +328,12 @@ export function createRippleStyleApplier(): RippleStyleApplier {
         }
 
         addRippleClass(element, activeTarget);
-        commitHandoffBaseline(element);
-        if (baselineOpacity === finalOpacity) {
-          const normalDurationApplied = applyPrivateProperty(
-            element,
-            activeTarget.owned,
-            RIPPLE_TRANSITION_DURATION_PROPERTY,
-            `${RIPPLE_CONFIG.TRANSITION_SEC}s`,
-          );
-          if (!normalDurationApplied) {
-            activeTarget.blocked = true;
-            releaseTarget(element, activeTarget);
-            activeTargets.delete(element);
-          }
-        } else {
-          pendingHandoffs.set(element, { target: activeTarget, finalOpacity });
-        }
+        preparedHandoffs.push({
+          element,
+          target: activeTarget,
+          baselineOpacity,
+          finalOpacity,
+        });
         continue;
       }
 
@@ -371,6 +370,28 @@ export function createRippleStyleApplier(): RippleStyleApplier {
         activeTargets.delete(element);
       } else {
         releaseTargetAfterTransition(element, activeTarget);
+      }
+    }
+
+    for (const handoff of preparedHandoffs) {
+      const { element, target, baselineOpacity, finalOpacity } = handoff;
+      if (activeTargets.get(element) !== target || target.blocked) continue;
+
+      commitHandoffBaseline(element);
+      if (baselineOpacity === finalOpacity) {
+        const normalDurationApplied = applyPrivateProperty(
+          element,
+          target.owned,
+          RIPPLE_TRANSITION_DURATION_PROPERTY,
+          `${RIPPLE_CONFIG.TRANSITION_SEC}s`,
+        );
+        if (!normalDurationApplied) {
+          target.blocked = true;
+          releaseTarget(element, target);
+          activeTargets.delete(element);
+        }
+      } else {
+        pendingHandoffs.set(element, { target, finalOpacity });
       }
     }
 
