@@ -39,7 +39,8 @@ export type FlipDebugEventName =
   | "flip-frame-dead"
   | "flip-geometry"
   | "flip-write-blocked"
-  | "flip-transition-probe";
+  | "flip-transition-probe"
+  | "flip-readiness";
 
 export interface FlipDebugEvent {
   name: FlipDebugEventName;
@@ -484,6 +485,11 @@ export function start(
   // restoring the old animation to its logical endpoint during interruption.
   const interruptedElements = new Set<HTMLElement>();
   const interruptedVisualTops = new Map<HTMLElement, number>();
+  // Dev-only freeze bookkeeping: the rebase delta FLIP itself just writes, so
+  // readiness samples can derive the logical position the freeze transform
+  // hides (logical = rendered − rebaseDelta) and compare it against the
+  // rendered geometry. Null in production builds.
+  const interruptedRebaseDeltas = DEBUG_ENABLED ? new Map<HTMLElement, number>() : null;
   for (const el of lastFLIPElements) {
     if (!el.isConnected) {
       releaseFLIPElement(el);
@@ -545,7 +551,9 @@ export function start(
       releaseFLIPElement(el);
       continue;
     }
-    setOwnedFLIPStyle(el, "transform", `translateY(${visualTop - logicalTop}px)`);
+    const rebaseDelta = visualTop - logicalTop;
+    interruptedRebaseDeltas?.set(el, rebaseDelta);
+    setOwnedFLIPStyle(el, "transform", `translateY(${rebaseDelta}px)`);
   }
 
   if (DEBUG_ENABLED) {
@@ -560,6 +568,8 @@ export function start(
   // bounds the loop inverts anyway and the ~0 deltas skip, matching the old
   // fixed-frame behavior.
   let readinessFrames = 0;
+  let armedMovedInterrupted = 0;
+  let armedMovedOther = 0;
   const readinessStartedAt = performance.now();
   const runInvert = (expired: boolean): void => {
     if (token !== flipGeneration) {
@@ -651,6 +661,8 @@ export function start(
           frames: readinessFrames,
           elapsedMs: Math.round(performance.now() - readinessStartedAt),
           expired,
+          movedInterrupted: armedMovedInterrupted,
+          movedOther: armedMovedOther,
         },
         blocks: invertDebugBlocks ?? [],
       });
@@ -732,11 +744,64 @@ export function start(
     const containerTop = container ? container.getBoundingClientRect().top : 0;
     const scrollTop = container ? container.scrollTop : 0;
     let movedCount = 0;
+    let movedInterrupted = 0;
+    let maskedInterrupted = 0;
+    let skippedDisconnected = 0;
+    const tickSamples: Array<Record<string, unknown>> = [];
     for (const [el, y0] of first) {
-      if (!el.isConnected) continue;
+      if (!el.isConnected) {
+        skippedDisconnected += 1;
+        continue;
+      }
       const top = el.getBoundingClientRect().top;
       const contentTop = container ? top - containerTop + scrollTop : top;
-      if (Math.abs(y0 - contentTop) >= 2) movedCount += 1;
+      const rebaseDelta = interruptedRebaseDeltas?.get(el);
+      const dRendered = contentTop - y0;
+      let dLogical = dRendered;
+      if (rebaseDelta !== undefined) {
+        // Derived logical movement strips the freeze transform FLIP wrote and
+        // compares against the logical baseline the interruption preparation
+        // already read. dLogical moving while dRendered stays flat means the
+        // recorded rebase delta no longer matches the transform actually
+        // applied — the freeze is masking the structural change.
+        const logicalTop0 = interruptedLogicalTops.get(el);
+        if (logicalTop0 !== undefined) {
+          dLogical = (contentTop - rebaseDelta) - (logicalTop0 - containerTop0 + scrollTop0);
+        }
+        if (DEBUG_ENABLED && Math.abs(dLogical) >= 2 && tickSamples.length < 8) {
+          tickSamples.push({
+            id: el.getAttribute("data-node-id"),
+            elToken: elementToken(el),
+            rebaseDelta: Math.round(rebaseDelta * 100) / 100,
+            renderedContentTop: Math.round(contentTop * 100) / 100,
+            derivedLogicalContentTop: Math.round((contentTop - rebaseDelta) * 100) / 100,
+            dRenderedFromFirst: Math.round(dRendered * 100) / 100,
+            dLogicalFromLogicalFirst: Math.round(dLogical * 100) / 100,
+          });
+        }
+      }
+      if (Math.abs(dRendered) >= 2) {
+        movedCount += 1;
+        if (rebaseDelta !== undefined) movedInterrupted += 1;
+      } else if (Math.abs(dLogical) >= 2) {
+        maskedInterrupted += 1;
+      }
+    }
+    armedMovedInterrupted = movedInterrupted;
+    armedMovedOther = movedCount - movedInterrupted;
+    if (DEBUG_ENABLED) {
+      emitDebug({
+        name: "flip-readiness",
+        token,
+        phase: "tick",
+        frame: readinessFrames,
+        elapsedMs: Math.round(performance.now() - readinessStartedAt),
+        movedInterrupted,
+        movedOther: armedMovedOther,
+        maskedInterrupted,
+        skippedDisconnected,
+        samples: tickSamples,
+      });
     }
     if (movedCount > 0) {
       runInvert(false);
