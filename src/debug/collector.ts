@@ -52,6 +52,7 @@ const FORENSIC_DOM_EVENT_NAMES = [
   "drop",
   "click",
   "pointerdown",
+  "wheel",
   "focusin",
   "focusout",
   "scroll",
@@ -67,6 +68,7 @@ const TIMING_DOM_EVENT_NAMES = [
   "selectionchange",
   "click",
   "pointerdown",
+  "wheel",
   "scroll",
 ] as const;
 
