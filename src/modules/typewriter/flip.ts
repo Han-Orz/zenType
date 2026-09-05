@@ -7,6 +7,7 @@ import {
 } from "../../utils/inlineStyleOwnership";
 import { prefersReducedMotion } from "../../utils/reducedMotion";
 import * as inputMode from "../inputMode";
+import { RIPPLE_BLOCK_CLASS } from "../ripple/structuralCarryover";
 import { getStructuralEditSnapshot } from "../structuralEdit";
 
 const { SCROLL_CURVE } = TYPEWRITER_CONFIG;
@@ -318,13 +319,13 @@ function clearLastFLIPElements(): void {
   lastFLIPElements = [];
 }
 
-function setOwnedFLIPStyle(el: HTMLElement, property: string, value: string): boolean {
+function setOwnedFLIPStyle(el: HTMLElement, property: string, value: string, priority = ""): boolean {
   let owned = ownedFLIPStyles.get(el);
   if (!owned) {
     owned = claimInlineStyle(el.style, ["transform", "transition"]);
     ownedFLIPStyles.set(el, owned);
   }
-  const written = setOwnedInlineStyle(el.style, owned, property, value);
+  const written = setOwnedInlineStyle(el.style, owned, property, value, priority);
   if (DEBUG_ENABLED && !written) {
     emitDebug({
       name: "flip-write-blocked",
@@ -332,6 +333,7 @@ function setOwnedFLIPStyle(el: HTMLElement, property: string, value: string): bo
       id: el.getAttribute("data-node-id"),
       property,
       value,
+      priority,
       hadOwner: true,
     });
   }
@@ -638,8 +640,23 @@ export function start(
         return;
       }
 
+      const plainTransition = `transform 250ms ${SCROLL_CURVE}`;
+      const rippleComposedTransition =
+        `opacity var(--zt-ripple-transition-duration) ease, transform 250ms ${SCROLL_CURVE}`;
       for (const el of modifiedElements) {
-        setOwnedFLIPStyle(el, "transition", `transform 250ms ${SCROLL_CURVE}`);
+        // Ripple owns the block transition shorthand at stylesheet level with
+        // !important (Marker flicker fix), so on those blocks a plain inline
+        // transition loses the cascade and the transform snaps. FLIP composes
+        // its transform into one important inline transition instead; the
+        // opacity half mirrors Ripple's rule exactly and keeps using the
+        // duration custom property so Ripple's 0s handoff still works.
+        const rippleOwned = el.classList.contains(RIPPLE_BLOCK_CLASS);
+        setOwnedFLIPStyle(
+          el,
+          "transition",
+          rippleOwned ? rippleComposedTransition : plainTransition,
+          rippleOwned ? "important" : "",
+        );
         setOwnedFLIPStyle(el, "transform", "");
       }
       if (DEBUG_ENABLED) {
@@ -647,7 +664,8 @@ export function start(
           name: "flip-play",
           token,
           modifiedCount: modifiedElements.length,
-          transition: `transform 250ms ${SCROLL_CURVE}`,
+          transition: plainTransition,
+          rippleComposedTransition,
           blocks: modifiedElements.slice(0, 40).map((el) => ({
             id: el.getAttribute("data-node-id"),
             elToken: elementToken(el),

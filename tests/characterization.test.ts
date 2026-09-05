@@ -2988,6 +2988,55 @@ test("FLIP skips invalid local sampling without scanning the full editor", () =>
   }
 });
 
+test("FLIP composes Ripple's opacity transition into ripple blocks during play", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  const rippleBlock = new FakeElement({
+    classes: ["zentype-ripple-block"],
+    dataNodeId: "block-ripple",
+    contentEditable: true,
+  });
+  append(rippleBlock, new FakeText("ripple"));
+  rippleBlock.rect = rect(0, 100, 1000, 20);
+  const plainBlock = new FakeElement({ dataNodeId: "block-plain", contentEditable: true });
+  append(plainBlock, new FakeText("plain"));
+  plainBlock.rect = rect(0, 140, 1000, 20);
+  append(fixture.wysiwyg, rippleBlock, plainBlock);
+
+  try {
+    flip.reset();
+    const range = new FakeRange(fixture.text, 0);
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+    rippleBlock.rect = rect(0, 60, 1000, 20);
+    plainBlock.rect = rect(0, 100, 1000, 20);
+
+    let playFrames = 0;
+    while (!rippleBlock.style.transition.includes("250ms")) {
+      assert.ok(playFrames++ < 8, "FLIP must reach its play phase");
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+
+    assert.equal(
+      rippleBlock.style.getPropertyPriority("transition"),
+      "important",
+      "the composed transition must beat Ripple's important stylesheet shorthand",
+    );
+    assert.equal(
+      rippleBlock.style.transition,
+      "opacity var(--zt-ripple-transition-duration) ease, transform 250ms cubic-bezier(0.25, 0.1, 0.25, 1)",
+    );
+    assert.equal(plainBlock.style.getPropertyPriority("transition"), "");
+    assert.match(plainBlock.style.transition, /^transform 250ms/);
+    assert.equal(rippleBlock.style.transform, "");
+    assert.equal(plainBlock.style.transform, "");
+  } finally {
+    flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
 test("stable Enter structural authority uses the inner lower settle target", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
