@@ -30,6 +30,7 @@ export type FlipDebugEventName =
   | "flip-cleanup"
   | "flip-reset"
   | "flip-frame-dead"
+  | "flip-geometry"
   | "flip-write-blocked";
 
 export interface FlipDebugEvent {
@@ -122,6 +123,122 @@ function emitDebug(event: FlipDebugEvent): void {
     structural: structuralSnapshot(),
     inputMode: inputModeSnapshot(),
   });
+}
+
+// Dev-only readiness forensics: sample tracked-block geometry every rAF for a
+// bounded window after the First snapshot, recording viewport and
+// content-frame coordinates separately. contentTop is measured against the
+// scroll container's own rect, so plain scrollTop changes cancel out. This
+// observes only; the production FLIP timeline is untouched.
+const FLIP_GEOMETRY_SAMPLE_FRAMES = 6;
+
+function startGeometrySampler(
+  editor: HTMLElement,
+  token: number,
+  first: Map<HTMLElement, number>,
+): void {
+  const round2 = (value: number): number => Math.round(value * 100) / 100;
+  const containerAtStart = findScrollContainer(editor);
+  const containerRectTop0 = containerAtStart ? containerAtStart.getBoundingClientRect().top : 0;
+  const scrollTop0 = containerAtStart ? containerAtStart.scrollTop : 0;
+  const contentTop0 = new Map<HTMLElement, number>();
+  for (const [el, viewportTop] of first) {
+    contentTop0.set(el, viewportTop - containerRectTop0 + scrollTop0);
+  }
+
+  const mutationLog: Array<Record<string, unknown>> = [];
+  let samplerObserver: MutationObserver | null = null;
+  if (typeof MutationObserver === "function") {
+    samplerObserver = new MutationObserver((records) => {
+      if (mutationLog.length >= 8) return;
+      let childList = 0;
+      let added = 0;
+      let removed = 0;
+      for (const record of records) {
+        if (record.type !== "childList") continue;
+        childList += 1;
+        added += record.addedNodes.length;
+        removed += record.removedNodes.length;
+      }
+      if (childList === 0) return;
+      mutationLog.push({
+        t: Math.round(performance.now()),
+        childList,
+        added,
+        removed,
+      });
+    });
+    samplerObserver.observe(editor, { childList: true, subtree: true });
+  }
+
+  const startedAt = performance.now();
+  let frame = 0;
+
+  const finish = (phase: "dead" | "window-exhausted"): void => {
+    samplerObserver?.disconnect();
+    samplerObserver = null;
+    emitDebug({
+      name: "flip-geometry",
+      phase,
+      token,
+      frames: frame,
+      mutations: [...mutationLog],
+    });
+  };
+
+  const sampleTick = (): void => {
+    if (token !== flipGeneration) {
+      finish("dead");
+      return;
+    }
+    frame += 1;
+    const container = findScrollContainer(editor);
+    const containerRect = container ? container.getBoundingClientRect() : null;
+    const scrollTop = container ? container.scrollTop : 0;
+    const blocks: Array<Record<string, unknown>> = [];
+    for (const [el, viewportTop0] of first) {
+      const viewportTop = el.getBoundingClientRect().top;
+      const contentTop = containerRect
+        ? viewportTop - containerRect.top + scrollTop
+        : null;
+      const contentBase = contentTop0.get(el);
+      blocks.push({
+        id: el.getAttribute("data-node-id"),
+        elToken: elementToken(el),
+        connected: el.isConnected,
+        viewportTop: round2(viewportTop),
+        contentTop: contentTop === null ? null : round2(contentTop),
+        dViewportFromFirst: round2(viewportTop - viewportTop0),
+        dContentFromFirst: contentTop === null || contentBase === undefined
+          ? null
+          : round2(contentTop - contentBase),
+        offsetTop: el.offsetTop,
+      });
+    }
+    emitDebug({
+      name: "flip-geometry",
+      phase: "sample",
+      token,
+      frame,
+      elapsedMs: Math.round(performance.now() - startedAt),
+      container: container && containerRect
+        ? {
+          token: elementToken(container),
+          scrollTop: round2(scrollTop),
+          rectTop: round2(containerRect.top),
+        }
+        : null,
+      mutations: [...mutationLog],
+      blocks,
+    });
+    if (frame >= FLIP_GEOMETRY_SAMPLE_FRAMES) {
+      finish("window-exhausted");
+      return;
+    }
+    requestAnimationFrame(sampleTick);
+  };
+
+  requestAnimationFrame(sampleTick);
 }
 
 function debugWrite(el: HTMLElement, property: string, value: string): void {
@@ -353,6 +470,10 @@ export function start(
       continue;
     }
     setOwnedFLIPStyle(el, "transform", `translateY(${visualTop - logicalTop}px)`);
+  }
+
+  if (DEBUG_ENABLED) {
+    startGeometrySampler(editor, token, first);
   }
 
   // Wait one frame for SiYuan to finish the DOM change.
