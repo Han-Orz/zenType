@@ -12,6 +12,12 @@ import { getStructuralEditSnapshot } from "../structuralEdit";
 
 const { SCROLL_CURVE } = TYPEWRITER_CONFIG;
 const FLIP_BLOCK_RADIUS = 30;
+// Fail-open ceilings for the geometry readiness loop, not latency: an armed
+// generation inverts on its first ready frame. Real-machine worst ready is
+// ~31ms after keydown (Backspace merge, 3rd rAF), so 150ms ≈ 5× headroom and
+// the frame cap only matters under frame starvation.
+const READINESS_TIMEOUT_MS = 150;
+const READINESS_MAX_FRAMES = 12;
 
 type DeferredFrameScheduler = (callback: FrameRequestCallback) => number;
 
@@ -138,15 +144,11 @@ function startGeometrySampler(
   editor: HTMLElement,
   token: number,
   first: Map<HTMLElement, number>,
+  firstViewport: Map<HTMLElement, number>,
 ): void {
   const round2 = (value: number): number => Math.round(value * 100) / 100;
-  const containerAtStart = findScrollContainer(editor);
-  const containerRectTop0 = containerAtStart ? containerAtStart.getBoundingClientRect().top : 0;
-  const scrollTop0 = containerAtStart ? containerAtStart.scrollTop : 0;
-  const contentTop0 = new Map<HTMLElement, number>();
-  for (const [el, viewportTop] of first) {
-    contentTop0.set(el, viewportTop - containerRectTop0 + scrollTop0);
-  }
+  // `first` already stores content-space tops; the sampler re-derives the same
+  // quantity per frame from the live container rect and scrollTop.
 
   const mutationLog: Array<Record<string, unknown>> = [];
   let samplerObserver: MutationObserver | null = null;
@@ -198,20 +200,19 @@ function startGeometrySampler(
     const containerRect = container ? container.getBoundingClientRect() : null;
     const scrollTop = container ? container.scrollTop : 0;
     const blocks: Array<Record<string, unknown>> = [];
-    for (const [el, viewportTop0] of first) {
+    for (const [el, contentBase] of first) {
       const viewportTop = el.getBoundingClientRect().top;
       const contentTop = containerRect
         ? viewportTop - containerRect.top + scrollTop
         : null;
-      const contentBase = contentTop0.get(el);
       blocks.push({
         id: el.getAttribute("data-node-id"),
         elToken: elementToken(el),
         connected: el.isConnected,
         viewportTop: round2(viewportTop),
         contentTop: contentTop === null ? null : round2(contentTop),
-        dViewportFromFirst: round2(viewportTop - viewportTop0),
-        dContentFromFirst: contentTop === null || contentBase === undefined
+        dViewportFromFirst: round2(viewportTop - (firstViewport.get(el) ?? viewportTop)),
+        dContentFromFirst: contentTop === null
           ? null
           : round2(contentTop - contentBase),
         offsetTop: el.offsetTop,
@@ -464,9 +465,18 @@ export function start(
   clearActiveFLIPTimer();
 
   // Capture nearby blocks before SiYuan's bubble handler changes the DOM.
+  // First is stored in content space (block rect relative to the scroll
+  // container's own origin plus its scrollTop), so Typewriter viewport
+  // scrolling cancels out and only structural movement changes the value.
+  const container0 = findScrollContainer(editor);
+  const containerTop0 = container0 ? container0.getBoundingClientRect().top : 0;
+  const scrollTop0 = container0 ? container0.scrollTop : 0;
   const first = new Map<HTMLElement, number>();
+  const firstViewport = new Map<HTMLElement, number>();
   blocks.forEach((el) => {
-    first.set(el, el.getBoundingClientRect().top);
+    const top = el.getBoundingClientRect().top;
+    firstViewport.set(el, top);
+    first.set(el, top - containerTop0 + scrollTop0);
   });
 
   // If an earlier FLIP is still visible, freeze each element at its rendered
@@ -480,13 +490,12 @@ export function start(
       continue;
     }
     interruptedElements.add(el);
-    const visualTop = first.get(el) ?? el.getBoundingClientRect().top;
+    const visualTop = firstViewport.get(el) ?? el.getBoundingClientRect().top;
     interruptedVisualTops.set(el, visualTop);
-    first.set(el, visualTop);
+    first.set(el, visualTop - containerTop0 + scrollTop0);
   }
 
   if (DEBUG_ENABLED) {
-    const startScrollTop = scrollAtStart?.scrollTop ?? 0;
     emitDebug({
       name: "flip-start",
       token,
@@ -496,10 +505,19 @@ export function start(
       hadPendingCleanup,
       lastFLIPSize: lastFLIPElements.length,
       scroll: scrollAtStart,
-      blocks: Array.from(first.entries()).map(([el, top]) => blockSample(el, top, scrollAtStart)),
+      blocks: Array.from(first.entries()).map(([el, contentTop]) => ({
+        id: el.getAttribute("data-node-id"),
+        elToken: elementToken(el),
+        connected: el.isConnected,
+        viewportTop: Math.round((firstViewport.get(el) ?? 0) * 100) / 100,
+        contentTop: Math.round(contentTop * 100) / 100,
+      })),
       interrupted: Array.from(interruptedVisualTops.entries()).map(([el, visualTop]) => ({
-        ...blockSample(el, visualTop, scrollAtStart),
-        contentTop: Math.round((visualTop + startScrollTop) * 100) / 100,
+        id: el.getAttribute("data-node-id"),
+        elToken: elementToken(el),
+        connected: el.isConnected,
+        viewportTop: Math.round(visualTop * 100) / 100,
+        contentTop: Math.round((first.get(el) ?? 0) * 100) / 100,
       })),
     });
   }
@@ -531,14 +549,22 @@ export function start(
   }
 
   if (DEBUG_ENABLED) {
-    startGeometrySampler(editor, token, first);
+    startGeometrySampler(editor, token, first, firstViewport);
   }
 
-  // Wait one frame for SiYuan to finish the DOM change.
-  requestDeferredFrame(() => {
+  // Wait for SiYuan's structural change to actually reach geometry instead of
+  // guessing one fixed frame ahead: poll tracked blocks every rAF and invert
+  // on the first frame where any connected block's content position moved.
+  // Content-space comparison cancels Typewriter viewport scrolling, so only a
+  // structural shift arms the gate. Fail open: if nothing moves within the
+  // bounds the loop inverts anyway and the ~0 deltas skip, matching the old
+  // fixed-frame behavior.
+  let readinessFrames = 0;
+  const readinessStartedAt = performance.now();
+  const runInvert = (expired: boolean): void => {
     if (token !== flipGeneration) {
       if (DEBUG_ENABLED) {
-        emitDebug({ name: "flip-frame-dead", phase: "invert", token, currentGeneration: flipGeneration });
+        emitDebug({ name: "flip-frame-dead", phase: "readiness", token, currentGeneration: flipGeneration });
       }
       return;
     }
@@ -551,27 +577,28 @@ export function start(
       setOwnedFLIPStyle(el, "transform", "");
     }
 
+    const container = container0 && container0.isConnected ? container0 : null;
+    const containerTop = container ? container.getBoundingClientRect().top : 0;
+    const scrollTop = container ? container.scrollTop : 0;
     const deltas = new Map<HTMLElement, number>();
     const scrollAtInvert = DEBUG_ENABLED ? scrollTopOf(editor) : null;
     if (DEBUG_ENABLED) invertDebugBlocks = [];
 
     // Phase 1 (Invert): read every new position before writing any invert.
+    // The structural delta is First contentTop − current contentTop; viewport
+    // motion owned by the Typewriter cancels out of the comparison.
     for (const [el, y0] of first) {
       if (!el.isConnected) continue;
-      const y1 = el.getBoundingClientRect().top;
+      const rectTop = el.getBoundingClientRect().top;
+      const y1 = container ? rectTop - containerTop + scrollTop : rectTop;
       const delta = y0 - y1;
       if (DEBUG_ENABLED && invertDebugBlocks && invertDebugBlocks.length < 80) {
         invertDebugBlocks.push({
-          ...blockSample(el, y1, scrollAtInvert),
-          viewportDelta: Math.round((y0 - y1) * 100) / 100,
-          scrollDelta: scrollAtInvert && scrollAtStart
-            ? Math.round((scrollAtInvert.scrollTop - scrollAtStart.scrollTop) * 100) / 100
-            : null,
-          contentDelta: scrollAtInvert && scrollAtStart
-            ? Math.round(((y1 + scrollAtInvert.scrollTop) - (y0 + scrollAtStart.scrollTop)) * 100) / 100
-            : null,
+          ...blockSample(el, rectTop, scrollAtInvert),
+          viewportDelta: Math.round((rectTop - (firstViewport.get(el) ?? rectTop)) * 100) / 100,
+          contentDelta: Math.round(delta * 100) / 100,
           skipped: Math.abs(delta) < 2,
-          capturedTop: Math.round(y0 * 100) / 100,
+          capturedContentTop: Math.round(y0 * 100) / 100,
         });
       }
       if (Math.abs(delta) < 2) continue;
@@ -620,6 +647,11 @@ export function start(
         scroll: scrollAtInvert,
         scrollAtStart,
         modifiedCount: modifiedElements.length,
+        readiness: {
+          frames: readinessFrames,
+          elapsedMs: Math.round(performance.now() - readinessStartedAt),
+          expired,
+        },
         blocks: invertDebugBlocks ?? [],
       });
       invertDebugBlocks = null;
@@ -686,5 +718,39 @@ export function start(
         lastFLIPElements = [];
       }, 300);
     });
-  });
+  };
+
+  const readinessTick = (): void => {
+    if (token !== flipGeneration) {
+      if (DEBUG_ENABLED) {
+        emitDebug({ name: "flip-frame-dead", phase: "readiness", token, currentGeneration: flipGeneration });
+      }
+      return;
+    }
+    readinessFrames += 1;
+    const container = container0 && container0.isConnected ? container0 : null;
+    const containerTop = container ? container.getBoundingClientRect().top : 0;
+    const scrollTop = container ? container.scrollTop : 0;
+    let movedCount = 0;
+    for (const [el, y0] of first) {
+      if (!el.isConnected) continue;
+      const top = el.getBoundingClientRect().top;
+      const contentTop = container ? top - containerTop + scrollTop : top;
+      if (Math.abs(y0 - contentTop) >= 2) movedCount += 1;
+    }
+    if (movedCount > 0) {
+      runInvert(false);
+      return;
+    }
+    if (
+      readinessFrames >= READINESS_MAX_FRAMES
+      || performance.now() - readinessStartedAt >= READINESS_TIMEOUT_MS
+    ) {
+      runInvert(true);
+      return;
+    }
+    requestAnimationFrame(readinessTick);
+  };
+
+  requestAnimationFrame(readinessTick);
 }

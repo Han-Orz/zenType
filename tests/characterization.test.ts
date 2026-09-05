@@ -1564,7 +1564,7 @@ test("typewriter waits for stable structural geometry before changing active scr
     while (true) {
       const nonScrollFrame = [...runtime.raf.pending.keys()].find((id) => id !== activeScrollFrame);
       if (nonScrollFrame === undefined) break;
-      assert.ok(settleFrameCount++ < 4, "structural settle frames must remain bounded");
+      assert.ok(settleFrameCount++ < 16, "settle and readiness frames must remain bounded");
       runtime.clock.advance(16);
       runtime.raf.flush(nonScrollFrame, runtime.clock.now);
     }
@@ -3037,6 +3037,142 @@ test("FLIP composes Ripple's opacity transition into ripple blocks during play",
   }
 });
 
+test("FLIP readiness inverts on the first frame geometry actually moves", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  const secondBlock = new FakeElement({ dataNodeId: "block-second", contentEditable: true });
+  append(secondBlock, new FakeText("second"));
+  secondBlock.rect = rect(0, 100, 1000, 20);
+  append(fixture.wysiwyg, secondBlock);
+
+  try {
+    flip.reset();
+    const range = new FakeRange(fixture.text, 0);
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(secondBlock.style.transform, "", "frame 1 with unchanged geometry must not invert");
+    assert.equal(flip.hasShiftedBlocks(), false);
+
+    secondBlock.rect = rect(0, 60, 1000, 20);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(secondBlock.style.transform, "translateY(40px)", "the invert uses the structural delta");
+    assert.equal(flip.hasShiftedBlocks(), true);
+  } finally {
+    flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("FLIP readiness fails open when geometry never changes", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+
+  try {
+    flip.reset();
+    const range = new FakeRange(fixture.text, 0);
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+
+    let drained = 0;
+    while (runtime.raf.pending.size > 0) {
+      assert.ok(drained++ < 20, "the readiness loop must stop on its own");
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+    assert.equal(flip.hasShiftedBlocks(), false, "an expired window inverts into a no-op");
+    assert.equal(fixture.block.style.transform, "");
+  } finally {
+    flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("FLIP readiness stops polling after its elapsed bound", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+
+  try {
+    flip.reset();
+    const range = new FakeRange(fixture.text, 0);
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+
+    runtime.clock.advance(600);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 0, "the elapsed bound stops further polling");
+    assert.equal(flip.hasShiftedBlocks(), false);
+  } finally {
+    flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("a new FLIP generation kills the previous readiness loop", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  const secondBlock = new FakeElement({ dataNodeId: "block-second", contentEditable: true });
+  append(secondBlock, new FakeText("second"));
+  secondBlock.rect = rect(0, 100, 1000, 20);
+  append(fixture.wysiwyg, secondBlock);
+
+  try {
+    flip.reset();
+    const range = new FakeRange(fixture.text, 0);
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+    flip.reset();
+
+    secondBlock.rect = rect(0, 60, 1000, 20);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 0, "the dead loop must not reschedule");
+    assert.equal(secondBlock.style.transform, "", "a dead generation never inverts");
+    assert.equal(flip.hasShiftedBlocks(), false);
+  } finally {
+    flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("viewport scrolling alone never arms FLIP readiness", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  const secondBlock = new FakeElement({ dataNodeId: "block-second", contentEditable: true });
+  append(secondBlock, new FakeText("second"));
+  secondBlock.rect = rect(0, 100, 1000, 20);
+  append(fixture.wysiwyg, secondBlock);
+
+  try {
+    flip.reset();
+    const range = new FakeRange(fixture.text, 0);
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+
+    // The container scrolls under its own rect: block rects move with the
+    // viewport while the container box stays put, so content space is stable.
+    fixture.content.scrollTop = 30;
+    for (const el of [fixture.block, secondBlock]) {
+      el.rect = rect(0, el.rect.top - 30, 1000, 20);
+    }
+
+    let drained = 0;
+    while (runtime.raf.pending.size > 0) {
+      assert.ok(drained++ < 20, "pure scrolling must not hold the loop open");
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+    assert.equal(secondBlock.style.transform, "", "viewport motion is not structural motion");
+    assert.equal(flip.hasShiftedBlocks(), false);
+  } finally {
+    flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
 test("stable Enter structural authority uses the inner lower settle target", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
@@ -3057,6 +3193,15 @@ test("stable Enter structural authority uses the inner lower settle target", () 
     while (isStructuralEditPending()) {
       assert.ok(settleFrames++ < 10, "the coordinator must settle in a bounded number of frames");
       runtime.clock.advance(16);
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+
+    // The fake never models the structural geometry shift, so the FLIP
+    // readiness loop keeps polling until its bounded window fails open.
+    runtime.clock.advance(200);
+    let readinessDrain = 0;
+    while (runtime.raf.pending.size > 1) {
+      assert.ok(readinessDrain++ < 8, "FLIP readiness polling must remain bounded");
       runtime.raf.flushNext(runtime.clock.now);
     }
 
@@ -3099,11 +3244,20 @@ test("Enter on an empty block waits for a stable structural commit", () => {
     assert.equal(isStructuralEditPending(), true);
     let settleFrames = 0;
     while (isStructuralEditPending()) {
-      assert.ok(settleFrames++ < 4, "the coordinator must settle in a bounded number of frames");
+      assert.ok(settleFrames++ < 10, "the coordinator must settle in a bounded number of frames");
       runtime.clock.advance(16);
       runtime.raf.flushNext(runtime.clock.now);
     }
     assert.equal(settleFrames >= 2, true, "the authoritative check waits for quiet frames");
+    // The fake never models the structural geometry shift, so the FLIP
+    // readiness loop keeps polling until its bounded window fails open.
+    runtime.clock.advance(200);
+    let readinessDrain = 0;
+    while (runtime.raf.pending.size > 1) {
+      assert.ok(readinessDrain++ < 8, "FLIP readiness polling must remain bounded");
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+
     assert.equal(runtime.raf.pending.size, 1, "the stable commit starts the smooth scroll");
     assert.equal(fixture.content.scrollTop, 0);
   } finally {
@@ -3215,6 +3369,15 @@ test("stable block Backspace uses the shared inner lower settle target", () => {
     while (isStructuralEditPending()) {
       assert.ok(settleFrames++ < 10, "the coordinator must settle in a bounded number of frames");
       runtime.clock.advance(16);
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+
+    // The fake never models the structural geometry shift, so the FLIP
+    // readiness loop keeps polling until its bounded window fails open.
+    runtime.clock.advance(200);
+    let readinessDrain = 0;
+    while (runtime.raf.pending.size > 1) {
+      assert.ok(readinessDrain++ < 8, "FLIP readiness polling must remain bounded");
       runtime.raf.flushNext(runtime.clock.now);
     }
 
