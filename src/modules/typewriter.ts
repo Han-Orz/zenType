@@ -27,6 +27,7 @@ const deferredFrames = new Set<number>();
 
 // debounce / IME 状态（修复 3a/3b/3c）
 let lastInputAt = 0;                                       // 最近一次 input 事件时间戳；0 = 空闲
+let lastInputDebugType = "";                               // dev-only：最近一次 input 的 inputType
 let composing = false;                                     // IME composition 进行中
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;  // 停顿后触发一次舒适区对齐的定时器
 let firstCharAfterIdle = false;                            // Option i：空闲后的首个输入立即滚（input 监听器设置，checkAndScroll 消费）
@@ -115,6 +116,13 @@ function scheduleScrollResync(): void {
 
 type ScrollCheckAuthority = "ordinary" | "structural";
 
+// Dev-only visibility investigation: one event per checkAndScroll gate block,
+// recording the caret trajectory and debounce state without any text content.
+function reportCheckGate(gate: string, data: Record<string, unknown>): void {
+  if (!__ZENTYPE_DEV__) return;
+  scroll.reportDebugEvent({ name: "typewriter-check-gate", gate, ...data });
+}
+
 function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
   // 打字机模式关闭时：不自动滚动
   if (!inputMode.isTypewriterActive()) return;
@@ -128,6 +136,11 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
   // The coordinator's stable finish is the authoritative geometry sample; do
   // not let a transient range start, restart, or cancel that motion.
   if (structuralEdit.isStructuralEditPending()) {
+    reportCheckGate("structural-pending", {
+      authority,
+      scrolling: scroll.isScrolling(),
+      structural: structuralEdit.getStructuralEditSnapshot(),
+    });
     if (scroll.isScrolling()) scroll.requestResync(scheduleScrollResync);
     return;
   }
@@ -137,6 +150,7 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
   // single resync; only a coordinator stable finish may explicitly opt into a
   // structural target at its safe point.
   if (scroll.isScrolling() && authority !== "structural") {
+    reportCheckGate("scroll-active", { authority });
     scroll.requestResync(scheduleScrollResync);
     return;
   }
@@ -161,6 +175,7 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
     Math.abs(rect.width - lastCheckRect.width) < 1 &&
     Math.abs(rect.height - lastCheckRect.height) < 1
   ) {
+    reportCheckGate("unchanged-caret", { authority });
     return;
   }
   lastCheckRect = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
@@ -171,6 +186,7 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
   // equality check（原 bug：deferred check 被 equality check 吞掉 → 首字不滚）。
   if (prevY !== undefined && Math.abs(rect.y - prevY) > 3) {
     lastCheckRect = null;
+    reportCheckGate("vertical-jump-defer", { authority, prevY, caretY: rect.y });
     scheduleCheck();
     return;
   }
@@ -206,6 +222,13 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
         bypassEmptyBlock = false;
         // fall through（不 return）
       } else {
+        reportCheckGate("empty-block", {
+          authority,
+          caret: { y: Math.round(rect.y), height: Math.round(rect.height) },
+          editorTop: Math.round(result.editorRect.top),
+          editorBottom: Math.round(result.editorRect.bottom),
+          scrollTop: cachedContainer && cachedContainer.isConnected ? Math.round(cachedContainer.scrollTop) : null,
+        });
         return;
       }
     }
@@ -222,6 +245,25 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
     const now = Date.now();
     const sinceInput = now - lastInputAt;
     if (sinceInput < TYPING_GAP_MS) {
+      const debugContainer = cachedContainer && cachedContainer.isConnected ? cachedContainer : null;
+      reportCheckGate("typing-debounce", {
+        authority,
+        caret: { y: Math.round(rect.y), height: Math.round(rect.height) },
+        editorTop: Math.round(result.editorRect.top),
+        editorBottom: Math.round(result.editorRect.bottom),
+        caretTopGapPx: Math.round(rect.y - result.editorRect.top),
+        caretBottomGapPx: Math.round(result.editorRect.bottom - (rect.y + rect.height)),
+        cursorPct: result.editorRect.bottom > result.editorRect.top
+          ? Math.round(((rect.y - result.editorRect.top) / (result.editorRect.bottom - result.editorRect.top)) * 1000) / 1000
+          : null,
+        sinceInputMs: sinceInput,
+        debounceRemainingMs: TYPING_GAP_MS - sinceInput,
+        lastInputType: lastInputDebugType,
+        firstCharAfterIdle,
+        scrolling: scroll.isScrolling(),
+        scrollTop: debugContainer ? Math.round(debugContainer.scrollTop) : null,
+        maxScrollTop: debugContainer ? debugContainer.scrollHeight - debugContainer.clientHeight : null,
+      });
       // 连续键入中：延后到停顿后再滚一次
       if (debounceTimer !== null) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
@@ -427,6 +469,7 @@ export function initTypewriter(): void {
         // 仅 insert 类输入设置 firstCharAfterIdle（Backspace delete 不应绕过 debounce）
         if (wasIdle && ie.inputType?.startsWith("insert")) firstCharAfterIdle = true;
         lastInputAt = Date.now();
+        if (__ZENTYPE_DEV__) lastInputDebugType = ie.inputType ?? "";
       },
       { capture: true },
     ],

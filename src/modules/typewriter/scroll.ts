@@ -10,6 +10,7 @@ export interface ScrollOptions {
 }
 
 export type TypewriterScrollDebugEventName =
+  | "typewriter-check-gate"
   | "typewriter-scroll-resolve"
   | "typewriter-scroll-start"
   | "typewriter-scroll-frame"
