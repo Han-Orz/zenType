@@ -6,6 +6,8 @@ import {
   type OwnedInlineStyle,
 } from "../../utils/inlineStyleOwnership";
 import { prefersReducedMotion } from "../../utils/reducedMotion";
+import * as inputMode from "../inputMode";
+import { getStructuralEditSnapshot } from "../structuralEdit";
 
 const { SCROLL_CURVE } = TYPEWRITER_CONFIG;
 const FLIP_BLOCK_RADIUS = 30;
@@ -16,6 +18,115 @@ let activeFLIPTimer: ReturnType<typeof setTimeout> | null = null;
 let lastFLIPElements: HTMLElement[] = [];
 const ownedFLIPStyles = new WeakMap<HTMLElement, OwnedInlineStyle>();
 let flipGeneration = 0;
+
+// ── Development-only FLIP forensics (production builds are no-ops) ──────
+
+const DEBUG_ENABLED = __ZENTYPE_DEV__;
+
+export type FlipDebugEventName =
+  | "flip-start"
+  | "flip-invert"
+  | "flip-play"
+  | "flip-cleanup"
+  | "flip-reset"
+  | "flip-frame-dead"
+  | "flip-write-blocked";
+
+export interface FlipDebugEvent {
+  name: FlipDebugEventName;
+  [key: string]: unknown;
+}
+
+type FlipDebugSink = (event: FlipDebugEvent) => void;
+let debugSink: FlipDebugSink | null = null;
+const elementTokens = new WeakMap<object, number>();
+let elementTokenSequence = 0;
+let invertDebugBlocks: Array<Record<string, unknown>> | null = null;
+
+export function setFlipDebugSink(next: FlipDebugSink | null): void {
+  if (!DEBUG_ENABLED) return;
+  debugSink = next;
+}
+
+function elementToken(el: Element | null | undefined): number | null {
+  if (!el) return null;
+  let token = elementTokens.get(el);
+  if (token === undefined) {
+    token = ++elementTokenSequence;
+    elementTokens.set(el, token);
+  }
+  return token;
+}
+
+function structuralSnapshot(): Record<string, unknown> {
+  const snapshot = getStructuralEditSnapshot();
+  return { generation: snapshot.generation, phase: snapshot.phase, kind: snapshot.kind };
+}
+
+function inputModeSnapshot(): Record<string, unknown> {
+  return { typewriterActive: inputMode.isTypewriterActive(), focusActive: inputMode.isFocusActive() };
+}
+
+function findScrollContainer(editor: HTMLElement): HTMLElement | null {
+  let current: HTMLElement | null = editor;
+  while (current && current !== document.body) {
+    const style = window.getComputedStyle(current);
+    if (
+      (style.overflowY === "auto" || style.overflowY === "scroll")
+      && current.scrollHeight > current.clientHeight
+    ) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return null;
+}
+
+function scrollTopOf(editor: HTMLElement): { container: number | null; scrollTop: number } | null {
+  const container = findScrollContainer(editor);
+  if (!container) return null;
+  return { container: elementToken(container), scrollTop: Math.round(container.scrollTop * 100) / 100 };
+}
+
+function blockSample(
+  el: HTMLElement,
+  viewportTop: number | null,
+  scroll: { container: number | null; scrollTop: number } | null,
+): Record<string, unknown> {
+  return {
+    id: el.getAttribute("data-node-id"),
+    elToken: elementToken(el),
+    connected: el.isConnected,
+    viewportTop: viewportTop === null ? null : Math.round(viewportTop * 100) / 100,
+    contentTop: viewportTop === null || !scroll
+      ? null
+      : Math.round((viewportTop + scroll.scrollTop) * 100) / 100,
+  };
+}
+
+function caretBlockId(): string | null {
+  if (typeof window === "undefined" || typeof window.getSelection !== "function") return null;
+  const selection = window.getSelection();
+  const node = selection?.anchorNode;
+  const element = node
+    ? (node.nodeType === Node.ELEMENT_NODE ? node as Element : node.parentElement)
+    : null;
+  return element?.closest("[data-node-id]")?.getAttribute("data-node-id") ?? null;
+}
+
+function emitDebug(event: FlipDebugEvent): void {
+  if (!DEBUG_ENABLED) return;
+  debugSink?.({
+    ...event,
+    flipGeneration: event.flipGeneration ?? flipGeneration,
+    structural: structuralSnapshot(),
+    inputMode: inputModeSnapshot(),
+  });
+}
+
+function debugWrite(el: HTMLElement, property: string, value: string): void {
+  setOwnedFLIPStyle(el, property, value);
+}
 
 function clearActiveFLIPTimer(): void {
   if (activeFLIPTimer === null) return;
@@ -34,13 +145,24 @@ function clearLastFLIPElements(): void {
   lastFLIPElements = [];
 }
 
-function setOwnedFLIPStyle(el: HTMLElement, property: string, value: string): void {
+function setOwnedFLIPStyle(el: HTMLElement, property: string, value: string): boolean {
   let owned = ownedFLIPStyles.get(el);
   if (!owned) {
     owned = claimInlineStyle(el.style, ["transform", "transition"]);
     ownedFLIPStyles.set(el, owned);
   }
-  setOwnedInlineStyle(el.style, owned, property, value);
+  const written = setOwnedInlineStyle(el.style, owned, property, value);
+  if (DEBUG_ENABLED && !written) {
+    emitDebug({
+      name: "flip-write-blocked",
+      elToken: elementToken(el),
+      id: el.getAttribute("data-node-id"),
+      property,
+      value,
+      hadOwner: true,
+    });
+  }
+  return written;
 }
 
 function isBlockElement(el: Element | null): el is HTMLElement {
@@ -112,6 +234,19 @@ function collectFlipBlocks(editor: HTMLElement, range: Range): HTMLElement[] | n
 
 /** Cancel the current FLIP generation, cleanup timer, and owned inline styles. */
 export function reset(): void {
+  if (DEBUG_ENABLED) {
+    const stack = (new Error().stack ?? "")
+      .split("\n")
+      .slice(2, 7)
+      .map((line) => line.trim().replace(/^at /, ""))
+      .join(" <- ");
+    emitDebug({
+      name: "flip-reset",
+      releasedCount: lastFLIPElements.length,
+      hadTimer: activeFLIPTimer !== null,
+      caller: stack,
+    });
+  }
   flipGeneration += 1;
   clearActiveFLIPTimer();
   clearLastFLIPElements();
@@ -132,15 +267,25 @@ export function start(
   requestDeferredFrame: DeferredFrameScheduler,
 ): void {
   if (prefersReducedMotion()) {
+    if (DEBUG_ENABLED) {
+      emitDebug({ name: "flip-reset", reason: "reduced-motion", releasedCount: lastFLIPElements.length });
+    }
     reset();
     return;
   }
   const blocks = collectFlipBlocks(editor, range);
-  if (!blocks) return;
+  if (!blocks) {
+    if (DEBUG_ENABLED) {
+      emitDebug({ name: "flip-start", reason: "no-blocks", blockCount: 0, caretBlockId: caretBlockId(), editorToken: elementToken(editor) });
+    }
+    return;
+  }
 
   const token = ++flipGeneration;
+  const scrollAtStart = scrollTopOf(editor);
 
   // Cancel the previous cleanup before a new FLIP can own these styles.
+  const hadPendingCleanup = activeFLIPTimer !== null;
   clearActiveFLIPTimer();
 
   // Capture nearby blocks before SiYuan's bubble handler changes the DOM.
@@ -163,6 +308,25 @@ export function start(
     const visualTop = first.get(el) ?? el.getBoundingClientRect().top;
     interruptedVisualTops.set(el, visualTop);
     first.set(el, visualTop);
+  }
+
+  if (DEBUG_ENABLED) {
+    const startScrollTop = scrollAtStart?.scrollTop ?? 0;
+    emitDebug({
+      name: "flip-start",
+      token,
+      editorToken: elementToken(editor),
+      caretBlockId: caretBlockId(),
+      blockCount: first.size,
+      hadPendingCleanup,
+      lastFLIPSize: lastFLIPElements.length,
+      scroll: scrollAtStart,
+      blocks: Array.from(first.entries()).map(([el, top]) => blockSample(el, top, scrollAtStart)),
+      interrupted: Array.from(interruptedVisualTops.entries()).map(([el, visualTop]) => ({
+        ...blockSample(el, visualTop, scrollAtStart),
+        contentTop: Math.round((visualTop + startScrollTop) * 100) / 100,
+      })),
+    });
   }
 
   // Interruption preparation is deliberately split into read, baseline-write,
@@ -193,7 +357,12 @@ export function start(
 
   // Wait one frame for SiYuan to finish the DOM change.
   requestDeferredFrame(() => {
-    if (token !== flipGeneration) return;
+    if (token !== flipGeneration) {
+      if (DEBUG_ENABLED) {
+        emitDebug({ name: "flip-frame-dead", phase: "invert", token, currentGeneration: flipGeneration });
+      }
+      return;
+    }
 
     const interruptedConnected = Array.from(interruptedElements).filter((el) => el.isConnected);
     for (const el of interruptedConnected) {
@@ -204,12 +373,28 @@ export function start(
     }
 
     const deltas = new Map<HTMLElement, number>();
+    const scrollAtInvert = DEBUG_ENABLED ? scrollTopOf(editor) : null;
+    if (DEBUG_ENABLED) invertDebugBlocks = [];
 
     // Phase 1 (Invert): read every new position before writing any invert.
     for (const [el, y0] of first) {
       if (!el.isConnected) continue;
       const y1 = el.getBoundingClientRect().top;
       const delta = y0 - y1;
+      if (DEBUG_ENABLED && invertDebugBlocks && invertDebugBlocks.length < 80) {
+        invertDebugBlocks.push({
+          ...blockSample(el, y1, scrollAtInvert),
+          viewportDelta: Math.round((y0 - y1) * 100) / 100,
+          scrollDelta: scrollAtInvert && scrollAtStart
+            ? Math.round((scrollAtInvert.scrollTop - scrollAtStart.scrollTop) * 100) / 100
+            : null,
+          contentDelta: scrollAtInvert && scrollAtStart
+            ? Math.round(((y1 + scrollAtInvert.scrollTop) - (y0 + scrollAtStart.scrollTop)) * 100) / 100
+            : null,
+          skipped: Math.abs(delta) < 2,
+          capturedTop: Math.round(y0 * 100) / 100,
+        });
+      }
       if (Math.abs(delta) < 2) continue;
 
       deltas.set(el, delta);
@@ -229,6 +414,38 @@ export function start(
       if (!modifiedSet.has(el)) releaseFLIPElement(el);
     }
 
+    if (DEBUG_ENABLED) {
+      const deadSamples: Array<Record<string, unknown>> = [];
+      for (const [el] of first) {
+        if (el.isConnected || deadSamples.length >= 12) continue;
+        const id = el.getAttribute("data-node-id");
+        let replacement: Element | null = null;
+        try {
+          replacement = id ? editor.querySelector(`[data-node-id="${CSS.escape(id)}"]`) : null;
+        } catch {
+          replacement = null;
+        }
+        deadSamples.push({
+          id,
+          elToken: elementToken(el),
+          replacementConnected: replacement?.isConnected ?? false,
+          replacementToken: elementToken(replacement),
+        });
+      }
+      emitDebug({
+        name: "flip-invert",
+        token,
+        blockCount: first.size,
+        deadFirst: Array.from(first.keys()).filter((el) => !el.isConnected).length,
+        deadSamples,
+        scroll: scrollAtInvert,
+        scrollAtStart,
+        modifiedCount: modifiedElements.length,
+        blocks: invertDebugBlocks ?? [],
+      });
+      invertDebugBlocks = null;
+    }
+
     if (modifiedElements.length === 0) return;
 
     // Phase 2 (Commit): the single forced layout.
@@ -236,16 +453,37 @@ export function start(
 
     // Phase 3 (Play): start every transition in one deferred frame.
     requestDeferredFrame(() => {
-      if (token !== flipGeneration) return;
+      if (token !== flipGeneration) {
+        if (DEBUG_ENABLED) {
+          emitDebug({ name: "flip-frame-dead", phase: "play", token, currentGeneration: flipGeneration, modifiedCount: modifiedElements.length });
+        }
+        return;
+      }
 
       for (const el of modifiedElements) {
         setOwnedFLIPStyle(el, "transition", `transform 250ms ${SCROLL_CURVE}`);
         setOwnedFLIPStyle(el, "transform", "");
       }
+      if (DEBUG_ENABLED) {
+        emitDebug({
+          name: "flip-play",
+          token,
+          modifiedCount: modifiedElements.length,
+          transition: `transform 250ms ${SCROLL_CURVE}`,
+          blocks: modifiedElements.slice(0, 40).map((el) => ({
+            id: el.getAttribute("data-node-id"),
+            elToken: elementToken(el),
+            transformFrom: `translateY(${deltas.get(el)}px)`,
+          })),
+        });
+      }
       clearActiveFLIPTimer();
       activeFLIPTimer = setTimeout(() => {
         if (token !== flipGeneration || activeFLIPTimer === null) return;
         activeFLIPTimer = null;
+        if (DEBUG_ENABLED) {
+          emitDebug({ name: "flip-cleanup", token, releasedCount: modifiedElements.length });
+        }
         modifiedElements.forEach(releaseFLIPElement);
         lastFLIPElements = [];
       }, 300);

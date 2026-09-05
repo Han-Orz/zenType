@@ -2,6 +2,7 @@ import { getActiveEditor } from "siyuan";
 import type { EventBus, IProtyle, IWebSocketData } from "siyuan";
 import * as cursor from "../modules/cursor";
 import * as structuralEdit from "../modules/structuralEdit";
+import * as typewriterFlip from "../modules/typewriter/flip";
 import * as typewriterScroll from "../modules/typewriter/scroll";
 import {
   createDebugSerializer,
@@ -377,6 +378,24 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
       typewriterScrollActive: scrolling,
       typewriterScroll: { active: scrolling },
     }, event.name);
+  }
+
+  function onTypewriterFlipDebug(event: typewriterFlip.FlipDebugEvent): void {
+    if (!attached) return;
+    const { name, ...details } = event;
+    const snapshot = structuralEdit.getStructuralEditSnapshot();
+    const scrolling = typewriterScroll.isScrolling();
+    options.onEvent({
+      source: "typewriter-flip",
+      ...details,
+      structural: {
+        generation: snapshot.generation,
+        phase: snapshot.phase,
+        kind: snapshot.kind,
+      },
+      typewriterScrollActive: scrolling,
+      typewriterScroll: { active: scrolling },
+    }, name);
   }
 
   function onCursorDebug(event: CursorDebugEvent): void {
@@ -1030,6 +1049,7 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
   function detach(): void {
     cursor.setDebugSink(null);
     typewriterScroll.setDebugSink(null);
+    typewriterFlip.setFlipDebugSink(null);
     cancelFrameBurst();
     if (typeof document !== "undefined") {
       for (const listener of domEventListeners) {
@@ -1142,6 +1162,7 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
       attached = true;
       cursor.setDebugSink(onCursorDebug);
       typewriterScroll.setDebugSink(onTypewriterScrollDebug);
+      typewriterFlip.setFlipDebugSink(onTypewriterFlipDebug);
       attachEventBus();
       attachDomEvents();
       refreshRoot();
