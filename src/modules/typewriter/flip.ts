@@ -435,8 +435,9 @@ export function hasShiftedBlocks(): boolean {
 }
 
 /**
- * Start the existing three-stage FLIP sequence. The Typewriter supplies its
- * shared deferred-frame scheduler so frame ownership and lifecycle stay there.
+ * Start the existing three-stage FLIP sequence. The Typewriter's shared
+ * deferred-frame scheduler stays in the signature for frame-ownership
+ * compatibility; Play itself now writes in the same task as the Invert commit.
  */
 export function start(
   editor: HTMLElement,
@@ -578,6 +579,7 @@ export function start(
       }
       return;
     }
+    const invertStartedAt = DEBUG_ENABLED ? performance.now() : 0;
 
     const interruptedConnected = Array.from(interruptedElements).filter((el) => el.isConnected);
     for (const el of interruptedConnected) {
@@ -672,64 +674,69 @@ export function start(
 
     if (modifiedElements.length === 0) return;
 
-    // Phase 2 (Commit): the single forced layout.
+    // Phase 2 (Commit): the single forced layout. This commits the invert
+    // transform as the transition's starting computed state.
     void editor.offsetHeight;
+    const layoutCommittedAt = DEBUG_ENABLED ? performance.now() : 0;
 
-    // Phase 3 (Play): start every transition in one deferred frame.
-    requestDeferredFrame(() => {
-      if (token !== flipGeneration) {
-        if (DEBUG_ENABLED) {
-          emitDebug({ name: "flip-frame-dead", phase: "play", token, currentGeneration: flipGeneration, modifiedCount: modifiedElements.length });
-        }
-        return;
-      }
-
-      const plainTransition = `transform 250ms ${SCROLL_CURVE}`;
-      const rippleComposedTransition =
-        `opacity var(--zt-ripple-transition-duration) ease, transform 250ms ${SCROLL_CURVE}`;
-      for (const el of modifiedElements) {
-        // Ripple owns the block transition shorthand at stylesheet level with
-        // !important (Marker flicker fix), so on those blocks a plain inline
-        // transition loses the cascade and the transform snaps. FLIP composes
-        // its transform into one important inline transition instead; the
-        // opacity half mirrors Ripple's rule exactly and keeps using the
-        // duration custom property so Ripple's 0s handoff still works.
-        const rippleOwned = el.classList.contains(RIPPLE_BLOCK_CLASS);
-        setOwnedFLIPStyle(
-          el,
-          "transition",
-          rippleOwned ? rippleComposedTransition : plainTransition,
-          rippleOwned ? "important" : "",
-        );
-        setOwnedFLIPStyle(el, "transform", "");
-      }
+    // Phase 3 (Play): write the transitions in the same task. The forced
+    // layout above already established the transition baseline, so deferring
+    // Play to the next frame would only add a one-frame freeze between the
+    // interruption freeze and the resumed motion.
+    if (token !== flipGeneration) {
       if (DEBUG_ENABLED) {
-        emitDebug({
-          name: "flip-play",
-          token,
-          modifiedCount: modifiedElements.length,
-          transition: plainTransition,
-          rippleComposedTransition,
-          blocks: modifiedElements.slice(0, 40).map((el) => ({
-            id: el.getAttribute("data-node-id"),
-            elToken: elementToken(el),
-            transformFrom: `translateY(${deltas.get(el)}px)`,
-          })),
-        });
-        emitTransitionProbe(token, "play", modifiedElements);
-        startTransitionPostProbe(token, modifiedElements);
+        emitDebug({ name: "flip-frame-dead", phase: "play", token, currentGeneration: flipGeneration, modifiedCount: modifiedElements.length });
       }
-      clearActiveFLIPTimer();
-      activeFLIPTimer = setTimeout(() => {
-        if (token !== flipGeneration || activeFLIPTimer === null) return;
-        activeFLIPTimer = null;
-        if (DEBUG_ENABLED) {
-          emitDebug({ name: "flip-cleanup", token, releasedCount: modifiedElements.length });
-        }
-        modifiedElements.forEach(releaseFLIPElement);
-        lastFLIPElements = [];
-      }, 300);
-    });
+      return;
+    }
+
+    const plainTransition = `transform 250ms ${SCROLL_CURVE}`;
+    const rippleComposedTransition =
+      `opacity var(--zt-ripple-transition-duration) ease, transform 250ms ${SCROLL_CURVE}`;
+    for (const el of modifiedElements) {
+      // Ripple owns the block transition shorthand at stylesheet level with
+      // !important (Marker flicker fix), so on those blocks a plain inline
+      // transition loses the cascade and the transform snaps. FLIP composes
+      // its transform into one important inline transition instead; the
+      // opacity half mirrors Ripple's rule exactly and keeps using the
+      // duration custom property so Ripple's 0s handoff still works.
+      const rippleOwned = el.classList.contains(RIPPLE_BLOCK_CLASS);
+      setOwnedFLIPStyle(
+        el,
+        "transition",
+        rippleOwned ? rippleComposedTransition : plainTransition,
+        rippleOwned ? "important" : "",
+      );
+      setOwnedFLIPStyle(el, "transform", "");
+    }
+    if (DEBUG_ENABLED) {
+      emitDebug({
+        name: "flip-play",
+        token,
+        modifiedCount: modifiedElements.length,
+        transition: plainTransition,
+        rippleComposedTransition,
+        invertToPlayMs: Math.round(performance.now() - invertStartedAt),
+        commitToPlayMs: Math.round(performance.now() - layoutCommittedAt),
+        blocks: modifiedElements.slice(0, 40).map((el) => ({
+          id: el.getAttribute("data-node-id"),
+          elToken: elementToken(el),
+          transformFrom: `translateY(${deltas.get(el)}px)`,
+        })),
+      });
+      emitTransitionProbe(token, "play", modifiedElements);
+      startTransitionPostProbe(token, modifiedElements);
+    }
+    clearActiveFLIPTimer();
+    activeFLIPTimer = setTimeout(() => {
+      if (token !== flipGeneration || activeFLIPTimer === null) return;
+      activeFLIPTimer = null;
+      if (DEBUG_ENABLED) {
+        emitDebug({ name: "flip-cleanup", token, releasedCount: modifiedElements.length });
+      }
+      modifiedElements.forEach(releaseFLIPElement);
+      lastFLIPElements = [];
+    }, 300);
   };
 
   const readinessTick = (): void => {

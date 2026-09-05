@@ -2790,9 +2790,18 @@ test("FLIP interruption freezes the rendered position and rebases the next edit"
 
     flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
     secondBlock.rect = rect(0, 80, 1000, 20);
+    const transformWrites: string[] = [];
+    const setProperty = secondBlock.style.setProperty.bind(secondBlock.style);
+    secondBlock.style.setProperty = (property: string, value: string, priority = "") => {
+      if (property === "transform") transformWrites.push(value);
+      setProperty(property, value, priority);
+    };
     runtime.raf.flushNext(runtime.clock.now);
-    assert.equal(secondBlock.style.transform, "translateY(20px)");
-    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(
+      transformWrites.slice(0, 2),
+      ["translateY(20px)", ""],
+      "invert writes the frozen delta and play clears it in the same task",
+    );
     assert.equal(secondBlock.style.transition.includes("250ms"), true);
     assert.equal(flip.hasShiftedBlocks(), true);
     assert.deepEqual(runtime.clock.delays(), [300]);
@@ -2803,12 +2812,11 @@ test("FLIP interruption freezes the rendered position and rebases the next edit"
 
     secondBlock.rect = rect(0, 60, 1000, 20);
     runtime.raf.flushNext(runtime.clock.now);
-    assert.equal(
-      secondBlock.style.transform,
-      "translateY(30px)",
-      "the new Invert phase starts from the frozen rendered position",
+    assert.deepEqual(
+      transformWrites.slice(2),
+      ["", "translateY(10px)", "", "translateY(30px)", ""],
+      "the new Invert starts from the frozen rendered position",
     );
-    runtime.raf.flushNext(runtime.clock.now);
     assert.equal(secondBlock.style.transform, "");
     assert.equal(secondBlock.style.transition.includes("250ms"), true);
 
@@ -2870,7 +2878,6 @@ test("FLIP interruption batches baseline and logical geometry phases", () => {
     flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
     secondBlock.rect = rect(0, 80, 1000, 20);
     thirdBlock.rect = rect(0, 120, 1000, 20);
-    runtime.raf.flushNext(runtime.clock.now);
     runtime.raf.flushNext(runtime.clock.now);
     phases.length = 0;
 
@@ -3056,8 +3063,19 @@ test("FLIP readiness inverts on the first frame geometry actually moves", () => 
     assert.equal(flip.hasShiftedBlocks(), false);
 
     secondBlock.rect = rect(0, 60, 1000, 20);
+    const transformWrites: string[] = [];
+    const setProperty = secondBlock.style.setProperty.bind(secondBlock.style);
+    secondBlock.style.setProperty = (property: string, value: string, priority = "") => {
+      if (property === "transform") transformWrites.push(value);
+      setProperty(property, value, priority);
+    };
     runtime.raf.flushNext(runtime.clock.now);
-    assert.equal(secondBlock.style.transform, "translateY(40px)", "the invert uses the structural delta");
+    assert.deepEqual(
+      transformWrites,
+      ["translateY(40px)", ""],
+      "the invert writes the structural delta before play clears it in the same task",
+    );
+    assert.equal(secondBlock.style.transition.includes("250ms"), true);
     assert.equal(flip.hasShiftedBlocks(), true);
   } finally {
     flip.reset();
@@ -3130,6 +3148,7 @@ test("a new FLIP generation kills the previous readiness loop", () => {
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(runtime.raf.pending.size, 0, "the dead loop must not reschedule");
     assert.equal(secondBlock.style.transform, "", "a dead generation never inverts");
+    assert.equal(secondBlock.style.transition, "", "a dead generation never writes a play transition");
     assert.equal(flip.hasShiftedBlocks(), false);
   } finally {
     flip.reset();
@@ -3166,6 +3185,40 @@ test("viewport scrolling alone never arms FLIP readiness", () => {
     }
     assert.equal(secondBlock.style.transform, "", "viewport motion is not structural motion");
     assert.equal(flip.hasShiftedBlocks(), false);
+  } finally {
+    flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("FLIP writes the play transition in the same task as the invert commit", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  const rippleBlock = new FakeElement({
+    classes: ["zentype-ripple-block"],
+    dataNodeId: "block-ripple",
+    contentEditable: true,
+  });
+  append(rippleBlock, new FakeText("ripple"));
+  rippleBlock.rect = rect(0, 100, 1000, 20);
+  append(fixture.wysiwyg, rippleBlock);
+
+  try {
+    flip.reset();
+    const range = new FakeRange(fixture.text, 0);
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+    rippleBlock.rect = rect(0, 60, 1000, 20);
+
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(
+      rippleBlock.style.transition,
+      "opacity var(--zt-ripple-transition-duration) ease, transform 250ms cubic-bezier(0.25, 0.1, 0.25, 1)",
+      "a single frame must reach the play writes without an extra deferred frame",
+    );
+    assert.equal(rippleBlock.style.getPropertyPriority("transition"), "important");
+    assert.equal(rippleBlock.style.transform, "");
   } finally {
     flip.reset();
     setActiveEditor(null);
