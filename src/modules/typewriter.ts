@@ -123,6 +123,26 @@ function reportCheckGate(gate: string, data: Record<string, unknown>): void {
   scroll.reportDebugEvent({ name: "typewriter-check-gate", gate, ...data });
 }
 
+// Hard visibility margin: the caret counts as "at risk" once it is within this
+// distance of the editor viewport edge. Real-machine gate data showed unsafe
+// observations clustered at 0-26px with ~38px lines, so about one line and a
+// quarter of margin starts the follow before the caret is visually clipped,
+// while mid-editor checks never come close to the boundary.
+export const CARET_VISIBILITY_MARGIN_PX = 48;
+
+// 舒适区修正可以 debounce；caret 可见性不能 debounce。该判定只用于让
+// empty-block 守卫和打字 debounce 为视口安全让位，不影响 structural
+// pending / 暂停 / scroll ownership 等更早的 gate。
+export function isCaretNearVisibilityBoundary(
+  caretRect: { y: number; height: number },
+  editorRect: { top: number; bottom: number },
+): boolean {
+  return (
+    caretRect.y - CARET_VISIBILITY_MARGIN_PX <= editorRect.top
+    || caretRect.y + caretRect.height + CARET_VISIBILITY_MARGIN_PX >= editorRect.bottom
+  );
+}
+
 function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
   // 打字机模式关闭时：不自动滚动
   if (!inputMode.isTypewriterActive()) return;
@@ -201,6 +221,8 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
   if (!result.editorRect) return;
   if (!result.cursorElement) return;
 
+  const visibilityBypass = isCaretNearVisibilityBoundary(rect, result.editorRect);
+
   // 新增：空块守卫。光标在空块时 typewriter scroll 无意义（块高近 0，cursor
   // 在块顶），且 getCursorRect 已走非突变 fallback 也无 cursorPct 可言。
   // 同时这是防御层：即使未来 fallback 路径再次突变 DOM，空块也直接退出。
@@ -217,8 +239,9 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
       // 空块时清除 lastCheckRect，使下次（首字符）checkAndScroll 的 prevY=undefined
       // 避免 |firstCharY - emptyBlockY| > 3 触发 defer 级联导致滚动丢失（TODO-6）
       lastCheckRect = null;
-      // Enter 新建空块时绕过守卫 —— 块虽空但用户需要看到它被带入舒适区
-      if (bypassEmptyBlock) {
+      // Enter 新建空块时绕过守卫 —— 块虽空但用户需要看到它被带入舒适区；
+      // caret 已处于视口边缘时同样必须放行（可见性不能被守卫吞掉）
+      if (bypassEmptyBlock || visibilityBypass) {
         bypassEmptyBlock = false;
         // fall through（不 return）
       } else {
@@ -241,7 +264,7 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
   if (firstCharAfterIdle) {
     // Option i：空闲后的首个输入立即滚（input 监听器检测到 wasIdle 并设置此标志）
     firstCharAfterIdle = false;
-  } else {
+  } else if (!visibilityBypass) {
     const now = Date.now();
     const sinceInput = now - lastInputAt;
     if (sinceInput < TYPING_GAP_MS) {

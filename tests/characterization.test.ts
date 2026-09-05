@@ -13,6 +13,7 @@ import {
 import {
   destroyTypewriter,
   initTypewriter,
+  isCaretNearVisibilityBoundary,
 } from "../src/modules/typewriter";
 import * as flip from "../src/modules/typewriter/flip";
 import * as scroll from "../src/modules/typewriter/scroll";
@@ -1236,6 +1237,236 @@ test("typewriter click relocation keeps its existing 50% center target", () => {
     runtime.clock.advance(1000);
     runtime.raf.flush(scrollFrame, runtime.clock.now);
     assert.equal(Math.round(fixture.content.scrollTop), 300);
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("isCaretNearVisibilityBoundary uses a hard margin at both editor edges", () => {
+  const editorRect = { top: 100, bottom: 1100 };
+  assert.equal(isCaretNearVisibilityBoundary({ y: 400, height: 20 }, editorRect), false);
+  assert.equal(
+    isCaretNearVisibilityBoundary({ y: 149, height: 20 }, editorRect),
+    false,
+    "one px outside the top margin is still safe",
+  );
+  assert.equal(
+    isCaretNearVisibilityBoundary({ y: 148, height: 20 }, editorRect),
+    true,
+    "the top margin edge is at risk",
+  );
+  assert.equal(
+    isCaretNearVisibilityBoundary({ y: 1031, height: 20 }, editorRect),
+    false,
+    "one px inside the bottom margin is still safe",
+  );
+  assert.equal(
+    isCaretNearVisibilityBoundary({ y: 1032, height: 20 }, editorRect),
+    true,
+    "the bottom margin edge is at risk",
+  );
+});
+
+test("continuous backspace mid-editor keeps the typing debounce", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  runtime.clock.now = 30_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+
+    runtime.setCaret(fixture.text, 1, rect(20, 400));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 0, "mid-editor deletion holds without scrolling");
+
+    runtime.clock.advance(100);
+    runtime.setCaret(fixture.text, 1, rect(20, 403));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(runtime.clock.delays(), [401], "comfort correction stays debounced");
+    assert.equal(fixture.content.scrollTop, 0);
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("caret entering the top visibility zone bypasses the typing debounce", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  runtime.clock.now = 30_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+    fixture.content.scrollTop = 300;
+
+    runtime.setCaret(fixture.text, 1, rect(20, 400));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 0);
+    assert.deepEqual(runtime.clock.delays(), [401], "comfort debounce armed while the caret is safe");
+
+    runtime.clock.advance(100);
+    runtime.setCaret(fixture.text, 1, rect(20, 30));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(
+      runtime.clock.delays(),
+      [401],
+      "the bypass must not re-arm the debounce (a re-arm would show 301ms)",
+    );
+    assert.equal(runtime.raf.pending.size, 1, "the resolver starts the visibility follow");
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("caret beyond the editor viewport edge also bypasses the debounce", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  runtime.clock.now = 30_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+    fixture.content.scrollTop = 300;
+
+    runtime.setCaret(fixture.text, 1, rect(20, 400));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(runtime.clock.delays(), [401], "comfort debounce armed while the caret is safe");
+
+    runtime.clock.advance(100);
+    runtime.setCaret(fixture.text, 1, rect(20, -20));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(
+      runtime.clock.delays(),
+      [401],
+      "an out-of-viewport caret cannot wait for debounce",
+    );
+    assert.equal(runtime.raf.pending.size, 1, "the resolver starts the visibility follow");
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("caret entering the bottom visibility zone bypasses the typing debounce", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  runtime.clock.now = 30_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+
+    runtime.setCaret(fixture.text, 1, rect(20, 500));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 0);
+    assert.deepEqual(runtime.clock.delays(), [401], "comfort debounce armed while the caret is safe");
+
+    runtime.clock.advance(100);
+    runtime.setCaret(fixture.text, 1, rect(20, 970));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(
+      runtime.clock.delays(),
+      [401],
+      "the bypass must not re-arm the debounce (a re-arm would show 301ms)",
+    );
+    assert.equal(runtime.raf.pending.size, 1, "the resolver starts the visibility follow");
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("empty block at the visibility boundary still follows the caret", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime, "");
+  runtime.clock.now = 30_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+    fixture.content.scrollTop = 300;
+
+    runtime.setCaret(fixture.text, 0, rect(20, 500));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 0, "mid-editor empty blocks stay guarded");
+
+    runtime.clock.advance(100);
+    runtime.setCaret(fixture.text, 0, rect(20, 30));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(runtime.clock.delays(), [], "the visibility boundary must bypass the guard and the debounce");
+    assert.equal(runtime.raf.pending.size, 1, "an empty block at the viewport edge still follows");
   } finally {
     destroyTypewriter();
     inputMode.reset();
