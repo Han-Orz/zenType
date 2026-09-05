@@ -471,7 +471,14 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
       selection,
       currentBlockId: blockId(block) ?? (selection.anchorBlockId as string | null),
       currentBlockToken: block ? serializer.nodeTokenFor(block) : null,
+      // document-level events (selectionchange) have no element target, so the
+      // selection anchor's scroll state is what matters; fall back to the root.
       scroll: serializer.scrollStateFor(target ?? root, root),
+      selectionScroll: target ? null : serializer.scrollStateFor(
+        asElement((typeof window !== "undefined" ? window.getSelection()?.anchorNode : null) as Node | null)
+        ?? root,
+        root,
+      ),
       typewriterScrollActive: scrolling,
       typewriterScroll: { active: scrolling },
     };
