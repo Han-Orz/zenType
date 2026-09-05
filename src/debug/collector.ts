@@ -210,9 +210,22 @@ function blockId(element: Element | null): string | null {
   return element?.getAttribute("data-node-id") ?? null;
 }
 
+function caretRectSample(): { x: number; y: number; height: number } | null {
+  if (typeof window === "undefined" || typeof window.getSelection !== "function") return null;
+  try {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return null;
+    const rect = selection.getRangeAt(0).getBoundingClientRect();
+    if (!rect || rect.height === 0) return null;
+    return { x: round(rect.x), y: round(rect.y), height: round(rect.height) };
+  } catch {
+    return null;
+  }
+}
+
 function timingSelection(serializer: DebugSerializer): Record<string, unknown> {
   if (typeof window === "undefined" || typeof window.getSelection !== "function") {
-    return { anchorBlockId: null, focusBlockId: null, collapsed: null };
+    return { anchorBlockId: null, focusBlockId: null, collapsed: null, caret: null };
   }
   try {
     const selection = window.getSelection();
@@ -224,9 +237,10 @@ function timingSelection(serializer: DebugSerializer): Record<string, unknown> {
       anchorToken: serializer.nodeTokenFor(selection?.anchorNode),
       focusToken: serializer.nodeTokenFor(selection?.focusNode),
       collapsed: selection ? selection.isCollapsed : null,
+      caret: caretRectSample(),
     };
   } catch {
-    return { anchorBlockId: null, focusBlockId: null, collapsed: null };
+    return { anchorBlockId: null, focusBlockId: null, collapsed: null, caret: null };
   }
 }
 
@@ -310,6 +324,7 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
   });
   const eventBusOffs: Array<() => void> = [];
   const domEventListeners: Array<{ type: DomEventName; handler: EventListener }> = [];
+  const lastScrollTopByTarget = new WeakMap<EventTarget, number>();
   let unsubStructuralFinish: (() => void) | null = null;
   let frameBurstEnabled = false;
   let frameBurstFrameCount = DEFAULT_FRAME_BURST_FRAMES;
@@ -820,20 +835,35 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
 
   function handleDomEvent(event: Event): void {
     if (!attached) return;
-    const root = rootForEvent(event);
-    if (!root) return;
+    // Scroll forensics intentionally bypass the protyle-root filter: an
+    // external scroll owner may move an ancestor or sibling container, and the
+    // per-target delta is what identifies motion that Typewriter did not write.
     if (event.type === "scroll") {
-      const target = serializer.nodeReference(event.target, root, false);
+      const target = event.target;
+      const root = currentRoot;
+      const reference = serializer.nodeReference(target, root, false);
+      const scrollTop = scrollValue(target, "scrollTop");
+      const previousScrollTop = target === null ? undefined : lastScrollTopByTarget.get(target);
+      if (target !== null && scrollTop !== null) {
+        lastScrollTopByTarget.set(target, scrollTop);
+      }
       const snapshot = structuralEdit.getStructuralEditSnapshot();
       const scrolling = typewriterScroll.isScrolling();
       options.onEvent({
         source: "dom",
         name: "scroll",
-        target,
-        targetPath: target.path,
-        scrollTop: scrollValue(event.target, "scrollTop"),
-        scrollLeft: scrollValue(event.target, "scrollLeft"),
+        target: reference,
+        targetPath: reference.path,
+        inRoot: connectedContains(root, target),
+        scrollTop,
+        scrollLeft: scrollValue(target, "scrollLeft"),
+        deltaScrollTop: scrollTop !== null && previousScrollTop !== undefined
+          ? round(scrollTop - previousScrollTop)
+          : null,
+        firstSample: previousScrollTop === undefined,
+        caret: caretRectSample(),
         typewriterScrollActive: scrolling,
+        typewriterScroll: { active: scrolling },
         structural: {
           generation: snapshot.generation,
           phase: snapshot.phase,
@@ -842,6 +872,8 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
       }, "scroll");
       return;
     }
+    const root = rootForEvent(event);
+    if (!root) return;
     if (markerForensic?.enabled && markerTrigger(event)) startMarkerFrameBurst(event);
     const payload = profile === "timing"
       ? timingEventPayload(event, root)
