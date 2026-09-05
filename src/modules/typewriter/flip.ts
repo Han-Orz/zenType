@@ -31,7 +31,8 @@ export type FlipDebugEventName =
   | "flip-reset"
   | "flip-frame-dead"
   | "flip-geometry"
-  | "flip-write-blocked";
+  | "flip-write-blocked"
+  | "flip-transition-probe";
 
 export interface FlipDebugEvent {
   name: FlipDebugEventName;
@@ -239,6 +240,61 @@ function startGeometrySampler(
   };
 
   requestAnimationFrame(sampleTick);
+}
+
+// Dev-only transition probe: sample each modified block's inline and computed
+// transition state at Invert, immediately after the Play writes, and for three
+// frames afterwards. This observes whether the FLIP transform transition
+// actually interpolates, or is suppressed by a stylesheet-level important
+// transition on the same element (Ripple block dimming class, which must keep
+// its Marker fix). Observes only; the production FLIP timeline is untouched.
+function transitionProbeSample(el: HTMLElement): Record<string, unknown> {
+  const computed = window.getComputedStyle(el);
+  return {
+    id: el.getAttribute("data-node-id"),
+    elToken: elementToken(el),
+    connected: el.isConnected,
+    hasRippleClass: el.classList.contains("zentype-ripple-block"),
+    inlineTransition: el.style.getPropertyValue("transition"),
+    inlineTransitionPriority: el.style.getPropertyPriority("transition"),
+    inlineTransform: el.style.getPropertyValue("transform"),
+    computedTransitionProperty: computed.transitionProperty,
+    computedTransitionDuration: computed.transitionDuration,
+    computedTransitionTimingFunction: computed.transitionTimingFunction,
+    computedTransform: computed.transform,
+    viewportTop: Math.round(el.getBoundingClientRect().top * 100) / 100,
+  };
+}
+
+function emitTransitionProbe(token: number, phase: string, elements: HTMLElement[]): void {
+  if (elements.length === 0) return;
+  emitDebug({
+    name: "flip-transition-probe",
+    token,
+    phase,
+    modifiedCount: elements.length,
+    blocks: elements.map(transitionProbeSample),
+  });
+}
+
+function startTransitionPostProbe(token: number, elements: HTMLElement[]): void {
+  let completedFrames = 0;
+  const postTick = (): void => {
+    if (token !== flipGeneration) {
+      emitDebug({
+        name: "flip-transition-probe",
+        token,
+        phase: "aborted",
+        completedFrames,
+        blocks: [],
+      });
+      return;
+    }
+    completedFrames += 1;
+    emitTransitionProbe(token, `post${completedFrames}`, elements);
+    if (completedFrames < 3) requestAnimationFrame(postTick);
+  };
+  requestAnimationFrame(postTick);
 }
 
 function debugWrite(el: HTMLElement, property: string, value: string): void {
@@ -565,6 +621,7 @@ export function start(
         blocks: invertDebugBlocks ?? [],
       });
       invertDebugBlocks = null;
+      emitTransitionProbe(token, "invert", modifiedElements);
     }
 
     if (modifiedElements.length === 0) return;
@@ -597,6 +654,8 @@ export function start(
             transformFrom: `translateY(${deltas.get(el)}px)`,
           })),
         });
+        emitTransitionProbe(token, "play", modifiedElements);
+        startTransitionPostProbe(token, modifiedElements);
       }
       clearActiveFLIPTimer();
       activeFLIPTimer = setTimeout(() => {
