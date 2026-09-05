@@ -289,9 +289,12 @@ export function start(
   clearActiveFLIPTimer();
 
   // Capture nearby blocks before SiYuan's bubble handler changes the DOM.
-  const first = new Map<HTMLElement, number>();
+  // rect.top freezes the rendered viewport position for the invert transform;
+  // offsetTop is scroll-immune layout position, so the skip decision cannot
+  // mistake Typewriter scroll motion for structural block motion.
+  const first = new Map<HTMLElement, { top: number; offsetTop: number }>();
   blocks.forEach((el) => {
-    first.set(el, el.getBoundingClientRect().top);
+    first.set(el, { top: el.getBoundingClientRect().top, offsetTop: el.offsetTop });
   });
 
   // If an earlier FLIP is still visible, freeze each element at its rendered
@@ -305,9 +308,9 @@ export function start(
       continue;
     }
     interruptedElements.add(el);
-    const visualTop = first.get(el) ?? el.getBoundingClientRect().top;
+    const visualTop = first.get(el)?.top ?? el.getBoundingClientRect().top;
     interruptedVisualTops.set(el, visualTop);
-    first.set(el, visualTop);
+    first.set(el, { top: visualTop, offsetTop: el.offsetTop });
   }
 
   if (DEBUG_ENABLED) {
@@ -321,7 +324,7 @@ export function start(
       hadPendingCleanup,
       lastFLIPSize: lastFLIPElements.length,
       scroll: scrollAtStart,
-      blocks: Array.from(first.entries()).map(([el, top]) => blockSample(el, top, scrollAtStart)),
+      blocks: Array.from(first.entries()).map(([el, captured]) => blockSample(el, captured.top, scrollAtStart)),
       interrupted: Array.from(interruptedVisualTops.entries()).map(([el, visualTop]) => ({
         ...blockSample(el, visualTop, scrollAtStart),
         contentTop: Math.round((visualTop + startScrollTop) * 100) / 100,
@@ -355,11 +358,33 @@ export function start(
     setOwnedFLIPStyle(el, "transform", `translateY(${visualTop - logicalTop}px)`);
   }
 
-  // Wait one frame for SiYuan to finish the DOM change.
-  requestDeferredFrame(() => {
+  // SiYuan applies the structural DOM change asynchronously after the keydown
+  // (a merge lands ~20ms later, past the next animation frame). Inverting on a
+  // fixed frame reads pre-change layout, finds no delta, and the blocks snap.
+  // Invert on the first childList mutation instead — the same signal the
+  // structural-edit coordinator uses — with a bounded frame fallback so a
+  // no-op edit cannot leave interrupted elements frozen forever.
+  let invertDone = false;
+  let invertObserver: MutationObserver | null = null;
+  let fallbackFramesLeft = 3;
+  let fallbackFrame: number | null = null;
+
+  const detachInvertTriggers = (): void => {
+    invertObserver?.disconnect();
+    invertObserver = null;
+    if (fallbackFrame !== null) {
+      cancelAnimationFrame(fallbackFrame);
+      fallbackFrame = null;
+    }
+  };
+
+  const runInvert = (trigger: "mutation" | "fallback"): void => {
+    if (invertDone) return;
+    invertDone = true;
+    detachInvertTriggers();
     if (token !== flipGeneration) {
       if (DEBUG_ENABLED) {
-        emitDebug({ name: "flip-frame-dead", phase: "invert", token, currentGeneration: flipGeneration });
+        emitDebug({ name: "flip-frame-dead", phase: "invert", token, currentGeneration: flipGeneration, trigger });
       }
       return;
     }
@@ -377,27 +402,32 @@ export function start(
     if (DEBUG_ENABLED) invertDebugBlocks = [];
 
     // Phase 1 (Invert): read every new position before writing any invert.
-    for (const [el, y0] of first) {
+    for (const [el, before] of first) {
       if (!el.isConnected) continue;
       const y1 = el.getBoundingClientRect().top;
-      const delta = y0 - y1;
+      // Structural delta comes from scroll-immune layout positions; the
+      // transform itself keeps the viewport delta so the element stays at its
+      // exact pre-edit rendered position while the transition runs.
+      const structuralDelta = before.offsetTop - el.offsetTop;
+      const viewportDelta = before.top - y1;
       if (DEBUG_ENABLED && invertDebugBlocks && invertDebugBlocks.length < 80) {
         invertDebugBlocks.push({
           ...blockSample(el, y1, scrollAtInvert),
-          viewportDelta: Math.round((y0 - y1) * 100) / 100,
+          viewportDelta: Math.round(viewportDelta * 100) / 100,
+          layoutDelta: Math.round(structuralDelta * 100) / 100,
           scrollDelta: scrollAtInvert && scrollAtStart
             ? Math.round((scrollAtInvert.scrollTop - scrollAtStart.scrollTop) * 100) / 100
             : null,
           contentDelta: scrollAtInvert && scrollAtStart
-            ? Math.round(((y1 + scrollAtInvert.scrollTop) - (y0 + scrollAtStart.scrollTop)) * 100) / 100
+            ? Math.round(((y1 + scrollAtInvert.scrollTop) - (before.top + scrollAtStart.scrollTop)) * 100) / 100
             : null,
-          skipped: Math.abs(delta) < 2,
-          capturedTop: Math.round(y0 * 100) / 100,
+          skipped: Math.abs(structuralDelta) < 2,
+          capturedTop: Math.round(before.top * 100) / 100,
         });
       }
-      if (Math.abs(delta) < 2) continue;
+      if (Math.abs(structuralDelta) < 2) continue;
 
-      deltas.set(el, delta);
+      deltas.set(el, viewportDelta);
     }
 
     // Then batch every invert write together.
@@ -435,6 +465,7 @@ export function start(
       emitDebug({
         name: "flip-invert",
         token,
+        trigger,
         blockCount: first.size,
         deadFirst: Array.from(first.keys()).filter((el) => !el.isConnected).length,
         deadSamples,
@@ -488,5 +519,22 @@ export function start(
         lastFLIPElements = [];
       }, 300);
     });
-  });
+  };
+
+  if (typeof MutationObserver === "function") {
+    invertObserver = new MutationObserver((records) => {
+      if (records.some((record) => record.type === "childList")) runInvert("mutation");
+    });
+    invertObserver.observe(editor, { childList: true, subtree: true });
+  }
+  const fallbackTick = (): void => {
+    if (invertDone || token !== flipGeneration) return;
+    fallbackFramesLeft -= 1;
+    if (fallbackFramesLeft <= 0) {
+      runInvert("fallback");
+      return;
+    }
+    fallbackFrame = requestDeferredFrame(fallbackTick);
+  };
+  fallbackFrame = requestDeferredFrame(fallbackTick);
 }

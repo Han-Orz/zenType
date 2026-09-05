@@ -261,6 +261,10 @@ class FakeElement extends FakeEventTarget {
     return this.rect.height;
   }
 
+  get offsetTop(): number {
+    return this.rect.top;
+  }
+
   get textContent(): string {
     return this.childNodes.map((child) => child instanceof FakeText
       ? child.data
@@ -1515,6 +1519,14 @@ test("scroll keeps its active timeline while adopting a structural resync target
   }
 });
 
+// FLIP inverts on the first childList mutation (SiYuan applies structural DOM
+// changes asynchronously); tests simulate that DOM change through the flip
+// observer registered by the last flip.start call.
+function dispatchFlipDomChange(runtime: FakeRuntime): void {
+  const observer = runtime.mutationObservers[runtime.mutationObservers.length - 1];
+  observer?.callback([{ type: "childList" } as unknown as MutationRecord]);
+}
+
 test("typewriter waits for stable structural geometry before changing active scroll", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
@@ -1546,6 +1558,7 @@ test("typewriter waits for stable structural geometry before changing active scr
       isComposing: false,
       defaultPrevented: false,
     }));
+    dispatchFlipDomChange(runtime);
     runtime.document.dispatch("selectionchange");
     const pendingFrames = [...runtime.raf.pending.keys()];
     const transientCheck = pendingFrames[pendingFrames.length - 1];
@@ -2790,7 +2803,7 @@ test("FLIP interruption freezes the rendered position and rebases the next edit"
 
     flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
     secondBlock.rect = rect(0, 80, 1000, 20);
-    runtime.raf.flushNext(runtime.clock.now);
+    dispatchFlipDomChange(runtime);
     assert.equal(secondBlock.style.transform, "translateY(20px)");
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(secondBlock.style.transition.includes("250ms"), true);
@@ -2802,7 +2815,7 @@ test("FLIP interruption freezes the rendered position and rebases the next edit"
     assert.deepEqual(runtime.clock.delays(), [], "the old cleanup timer is cancelled at interruption");
 
     secondBlock.rect = rect(0, 60, 1000, 20);
-    runtime.raf.flushNext(runtime.clock.now);
+    dispatchFlipDomChange(runtime);
     assert.equal(
       secondBlock.style.transform,
       "translateY(30px)",
@@ -2870,7 +2883,7 @@ test("FLIP interruption batches baseline and logical geometry phases", () => {
     flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
     secondBlock.rect = rect(0, 80, 1000, 20);
     thirdBlock.rect = rect(0, 120, 1000, 20);
-    runtime.raf.flushNext(runtime.clock.now);
+    dispatchFlipDomChange(runtime);
     runtime.raf.flushNext(runtime.clock.now);
     phases.length = 0;
 
@@ -3003,6 +3016,7 @@ test("stable Enter structural authority uses the inner lower settle target", () 
       isComposing: false,
       defaultPrevented: false,
     }));
+    dispatchFlipDomChange(runtime);
 
     let settleFrames = 0;
     while (isStructuralEditPending()) {
@@ -3048,6 +3062,7 @@ test("Enter on an empty block waits for a stable structural commit", () => {
       defaultPrevented: false,
     }));
     assert.equal(isStructuralEditPending(), true);
+    dispatchFlipDomChange(runtime);
     let settleFrames = 0;
     while (isStructuralEditPending()) {
       assert.ok(settleFrames++ < 4, "the coordinator must settle in a bounded number of frames");
@@ -3160,6 +3175,7 @@ test("stable block Backspace uses the shared inner lower settle target", () => {
       isComposing: false,
       defaultPrevented: false,
     }));
+    dispatchFlipDomChange(runtime);
 
     assert.equal(isStructuralEditPending(), true);
     let settleFrames = 0;
