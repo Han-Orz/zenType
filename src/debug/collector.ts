@@ -387,6 +387,7 @@ export function createDebugCollector(options: DebugCollectorOptions): DebugColle
     const scrolling = typewriterScroll.isScrolling();
     options.onEvent({
       source: "typewriter-flip",
+      name,
       ...details,
       structural: {
         generation: snapshot.generation,
