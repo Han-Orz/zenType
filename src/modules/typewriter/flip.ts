@@ -154,7 +154,83 @@ function emitDebug(event: FlipDebugEvent): void {
 // content-frame coordinates separately. contentTop is measured against the
 // scroll container's own rect, so plain scrollTop changes cancel out. This
 // observes only; the production FLIP timeline is untouched.
-const FLIP_GEOMETRY_SAMPLE_FRAMES = 6;
+const FLIP_GEOMETRY_SAMPLE_FRAMES = 30;
+
+function roundRectFields(rect: DOMRect | null): Record<string, number> | null {
+  if (!rect) return null;
+  return {
+    left: Math.round(rect.left * 100) / 100,
+    top: Math.round(rect.top * 100) / 100,
+    right: Math.round(rect.right * 100) / 100,
+    bottom: Math.round(rect.bottom * 100) / 100,
+  };
+}
+
+/**
+ * Dev-only caret/cursor/marker motion probe, one sample per geometry frame.
+ * Answers three questions with real numbers instead of guesses:
+ * 1. does Range.getBoundingClientRect() include the FLIP ancestor transform
+ *    (caretRect tracks itemRect while the invert/play transform interpolates)?
+ * 2. does the zenType Cursor overlay track the caret's visual rect during the
+ *    motion, or does it stay parked at the last event-driven position?
+ * 3. does the marker keep a constant offset to its item (Case A), or does a
+ *    host positional transition on the marker drift against the parent FLIP
+ *    transform (Case B)?
+ */
+function sampleMotionFrame(): Record<string, unknown> {
+  const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
+  const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+  const caretRect = range ? range.getBoundingClientRect() : null;
+  const anchorNode = selection?.anchorNode ?? null;
+  const anchorElement = anchorNode
+    ? (anchorNode.nodeType === Node.ELEMENT_NODE ? anchorNode as Element : anchorNode.parentElement)
+    : null;
+  const anchorBlock = anchorElement?.closest("[data-node-id]") ?? null;
+  const item = anchorElement?.closest('[data-type="NodeListItem"]') ?? null;
+  const itemRect = item ? item.getBoundingClientRect() : null;
+  const itemStyle = item ? window.getComputedStyle(item) : null;
+  const marker = item?.querySelector(".protyle-action") ?? null;
+  const markerRect = marker ? marker.getBoundingClientRect() : null;
+  const markerStyle = marker ? window.getComputedStyle(marker) : null;
+  const cursorEl = document.getElementById("zentype-cursor");
+  const cursorRect = cursorEl ? cursorEl.getBoundingClientRect() : null;
+  const caretOffsetFromItem = itemRect && caretRect
+    ? {
+      x: Math.round((caretRect.left - itemRect.left) * 100) / 100,
+      y: Math.round((caretRect.top - itemRect.top) * 100) / 100,
+    }
+    : null;
+  return {
+    anchorBlockId: anchorBlock?.getAttribute("data-node-id") ?? null,
+    anchorOffset: range?.startOffset ?? null,
+    caretRect: roundRectFields(caretRect),
+    itemBlockId: item?.getAttribute("data-node-id") ?? null,
+    itemRect: roundRectFields(itemRect),
+    itemTransform: itemStyle?.transform ?? null,
+    markerRect: roundRectFields(markerRect),
+    markerTransition: markerStyle
+      ? `${markerStyle.transitionProperty} | ${markerStyle.transitionDuration} | ${markerStyle.transitionTimingFunction}`
+      : null,
+    markerTransform: markerStyle?.transform ?? null,
+    markerPosition: markerStyle?.position ?? null,
+    markerOffset: itemRect && markerRect
+      ? {
+        x: Math.round((markerRect.left - itemRect.left) * 100) / 100,
+        y: Math.round((markerRect.top - itemRect.top) * 100) / 100,
+      }
+      : null,
+    caretOffsetFromItem,
+    cursorRect: roundRectFields(cursorRect),
+    cursorTransform: cursorEl?.style.transform ?? null,
+    cursorHidden: cursorEl ? cursorEl.classList.contains("hidden") : null,
+    cursorMinusCaret: cursorRect && caretRect
+      ? {
+        x: Math.round((cursorRect.left - caretRect.left) * 100) / 100,
+        y: Math.round((cursorRect.top - caretRect.top) * 100) / 100,
+      }
+      : null,
+  };
+}
 
 function startGeometrySampler(
   editor: HTMLElement,
@@ -262,6 +338,7 @@ function startGeometrySampler(
         }
         : null,
       mutations: [...mutationLog],
+      motion: sampleMotionFrame(),
       blocks,
     });
     if (frame >= FLIP_GEOMETRY_SAMPLE_FRAMES) {
