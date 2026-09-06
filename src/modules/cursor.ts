@@ -96,6 +96,7 @@ export type CursorDebugEventName =
   | "cursor-scroll-policy"
   | "cursor-transition-restored"
   | "cursor-switch-settle"
+  | "cursor-reacquire-reveal"
   | "cursor-perf-summary";
 
 export interface CursorDebugEvent {
@@ -213,6 +214,52 @@ export function setDebugSink(next: CursorDebugSink | null): void {
 function restoreNativeCaretAndHideCustom(): void {
   nativeCaretOwner = restoreNativeCaretOwner(nativeCaretOwner);
   cursorEl?.classList.add("hidden");
+  // 标记"可靠不可见"：下次成功定位时用一次轻量 opacity fade 恢复存在感。
+  reacquirePending = true;
+}
+
+// Reacquire reveal：custom caret 从可靠不可见（.hidden）恢复到可靠可见时，
+// 位置先在 .hidden 的 transition:none 下 snap 提交，存在感用一次 120ms
+// opacity fade 恢复。只做一次位置提交 + 一次 rAF handoff，无持续 rAF loop。
+const REACQUIRE_REVEAL_MS = 120;
+let reacquirePending = false;
+let reacquireRevealToken = 0;
+let reacquireRevealFrame: number | null = null;
+
+function cancelReacquireReveal(): void {
+  reacquireRevealToken += 1;
+  if (reacquireRevealFrame !== null) {
+    cancelAnimationFrame(reacquireRevealFrame);
+    reacquireRevealFrame = null;
+  }
+}
+
+/**
+ * 恢复可见：.hidden 已让新位置在上一段同步代码里提交（transition:none snap）。
+ * 先保持不可见并强制布局一次，再交给 opacity-only inline transition 从 0 淡入。
+ */
+function startReacquireReveal(targetOpacity: string): void {
+  const el = cursorEl;
+  if (!el) return;
+  reacquirePending = false;
+  el.classList.remove("hidden");
+  // reveal 期间 transition 必须真正生效：清掉可能残留的 no-transition
+  // （例如滚动策略在 skip 路径上留下 no-transition 后才转 hidden）。
+  el.classList.remove("no-transition");
+  el.style.opacity = "0";
+  el.style.transition = `opacity ${REACQUIRE_REVEAL_MS}ms ease-out`;
+  void el.offsetHeight;
+  lastCursorDur = null; // 下一次正常更新按移动距离重写完整 transition
+  const token = ++reacquireRevealToken;
+  if (DEBUG_ENABLED) emitDebugState("cursor-reacquire-reveal", { phase: "start", targetOpacity });
+  reacquireRevealFrame = requestAnimationFrame(() => {
+    reacquireRevealFrame = null;
+    if (token !== reacquireRevealToken || !cursorEl) return;
+    // switch settle 用自己的 inline opacity 生命周期揭示，这里让位避免双重 reveal。
+    if (isSwitchHiddenActive() || isSwitchRevealPending()) return;
+    cursorEl.style.opacity = targetOpacity;
+    if (DEBUG_ENABLED) emitDebugState("cursor-reacquire-reveal", { phase: "revealed", targetOpacity });
+  });
 }
 
 /** Dev-only: doUpdateCursor gave up before producing visible geometry. */
@@ -253,6 +300,7 @@ function activateCustomCaret(element: Element): boolean {
   nativeCaretOwner = activateNativeCaretOwner(nativeCaretOwner, element);
   if (!nativeCaretOwner) {
     cursorEl?.classList.add("hidden");
+    reacquirePending = true;
     return false;
   }
   return true;
@@ -309,6 +357,7 @@ function createCursorElement(): HTMLDivElement {
 /**
  * commit 1：写 inline opacity + transform(含 scale) + height 三个属性。
  * 离屏/边缘淡出态专用，正常态继续走原生 transform 写入（不带 scale）。
+ * 返回实际写入的 opacity 字符串，供 reacquire reveal 决定淡入目标。
  */
 function applyFadeAndScale(
   el: HTMLDivElement,
@@ -316,11 +365,13 @@ function applyFadeAndScale(
   scale: number,
   pos: { x: number; y: number; height: number },
   yOffset: number = 2,
-): void {
-  el.style.opacity = String(Math.round(opacity * 1000) / 1000);
+): string {
+  const opacityValue = String(Math.round(opacity * 1000) / 1000);
+  el.style.opacity = opacityValue;
   el.style.transform =
     `translate3d(${pos.x}px, ${pos.y - yOffset}px, 0) scale(${scale})`;
   el.style.height = `${pos.height}px`;
+  return opacityValue;
 }
 
 export function flushCursorTransitionIfNeeded(el: HTMLDivElement): boolean {
@@ -435,6 +486,10 @@ function doUpdateCursor(frameTimestamp?: number): void {
     cursorEl.classList.add("no-transition", "no-animation");
   }
 
+  // 在途的 reacquire reveal handoff 一律由本次更新接管（任何出口都安全：
+  // 成功路径自己决定是否开新 reveal，skip 路径转 hidden，fade 中断即取消）。
+  cancelReacquireReveal();
+
   // 1) 暂停呼吸（操作中不需要呼吸感）
   pauseBreathe();
 
@@ -538,14 +593,16 @@ function doUpdateCursor(frameTimestamp?: number): void {
   //   yOffset：光标上移 N 像素，让光标视觉重心偏到行中线之上（用户偏好）。
   //   HEIGHT_RATIO > 1 时光标下沿超出 lineHeight，光标看起来仍偏下；微调上移抵消。
   const yOffset = 2;
+  // 本帧解析出的可见 opacity（"" = 交回 CSS / 呼吸动画），reacquire reveal 的淡入目标。
+  let resolvedOpacity = "";
   if (edge.isOffScreen) {
     // 完全离屏：opacity=0, scale=MIN_SCALE
-    applyFadeAndScale(cursorEl, 0, EDGE_FADE.MIN_SCALE, rect, yOffset);
+    resolvedOpacity = applyFadeAndScale(cursorEl, 0, EDGE_FADE.MIN_SCALE, rect, yOffset);
   } else if (edge.distance < EDGE_FADE.ZONE) {
     // FADE_ZONE 内：opacity = factor, scale = lerp(MIN_SCALE, 1, factor)
     const scale =
       EDGE_FADE.MIN_SCALE + (1 - EDGE_FADE.MIN_SCALE) * edge.factor;
-    applyFadeAndScale(cursorEl, edge.factor, scale, rect, yOffset);
+    resolvedOpacity = applyFadeAndScale(cursorEl, edge.factor, scale, rect, yOffset);
   } else {
     // 远离边缘：清 inline opacity 让 CSS / 呼吸动画接管；transform 不带 scale
     // Q7：长距离 = 长时长。查表 TRANSITION.TIERS（config.ts），用户可自行调整。
@@ -576,7 +633,24 @@ function doUpdateCursor(frameTimestamp?: number): void {
   }
 
   // 显示光标（commit 1：可能仍带 .hidden 残留，离屏分支不再加 .hidden 但清理一次保险）
-  cursorEl.classList.remove("hidden");
+  // Reacquire reveal：从可靠 hidden 恢复时，上面的位置写入在 .hidden 的
+  // transition:none 下必然 snap（不会从旧位置飞过来），这里只做 opacity 淡入。
+  const switchOwnsVisibility = isSwitchHiddenActive() || isSwitchRevealPending();
+  if (switchOwnsVisibility) {
+    // switch settle 有自己的 inline opacity 生命周期，不叠加 reacquire fade。
+    reacquirePending = false;
+    cursorEl.classList.remove("hidden");
+  } else if (
+    reacquirePending &&
+    cursorEl.classList.contains("hidden") &&
+    !reducedMotion &&
+    resolvedOpacity !== "0"
+  ) {
+    startReacquireReveal(resolvedOpacity);
+  } else {
+    reacquirePending = false;
+    cursorEl.classList.remove("hidden");
+  }
 
   // 7) 仅在 no-transition 生效时同步一次布局，让瞬移位置先提交，再恢复过渡。
   if (!reducedMotion && flushCursorTransitionIfNeeded(cursorEl)) {
@@ -724,6 +798,8 @@ export function destroyCursor(): void {
     cancelAnimationFrame(removeTransitionFrame);
     removeTransitionFrame = null;
   }
+  cancelReacquireReveal();
+  reacquirePending = false;
   stopSwitchSettle();
 
   // 移除 DOM 元素

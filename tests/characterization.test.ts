@@ -2026,6 +2026,188 @@ test("cursor fails open on invalid geometry, active-editor mismatch, and rejecte
   }
 });
 
+test("cursor reveals with a fade when reacquiring from reliable hidden", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime, "cursor");
+  runtime.clock.now = 120_000;
+
+  try {
+    inputMode.reset();
+    initCursor();
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.raf.flushNext(runtime.clock.now);
+
+    const cursor = runtime.document.getElementById("zentype-cursor");
+    assert.ok(cursor);
+    const positionedTransform = cursor.style.transform;
+    assert.equal(positionedTransform.includes("translate3d("), true);
+    assert.equal(cursor.style.transition.startsWith("transform"), true);
+
+    // Reliably hidden: no caret geometry at all.
+    runtime.clearCaret();
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.classList.contains("hidden"), true);
+
+    // Reacquire: geometry is reliable again at the same caret.
+    runtime.setCaret(fixture.text, 1, rect(20, 500));
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    // Position snaps to the caret (same math as a normal update) while the
+    // element is still invisible; the reveal is opacity-only.
+    assert.equal(cursor.style.transform, positionedTransform);
+    assert.equal(cursor.classList.contains("hidden"), false);
+    assert.equal(cursor.style.opacity, "0");
+    assert.equal(cursor.style.transition, "opacity 120ms ease-out");
+    // Native caret handover happens in the same update, before the fade.
+    assert.equal(fixture.block.classList.contains("zentype-custom-caret-active"), true);
+
+    // The reveal handoff restores presence on the next frame.
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.style.opacity, "");
+    assert.equal(cursor.style.transition, "opacity 120ms ease-out");
+    assert.equal(runtime.raf.pending.size, 0);
+
+    // A normal visible update takes over: transition rewritten by distance,
+    // no reveal replay, no opacity "0" intermediate.
+    runtime.setCaret(fixture.text, 1, rect(20, 600));
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.style.opacity, "");
+    assert.equal(cursor.style.transition.startsWith("transform"), true);
+    assert.notEqual(cursor.style.transform, positionedTransform);
+  } finally {
+    destroyCursor();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("cursor skips the reacquire fade while the caret is off-screen", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime, "cursor");
+  runtime.clock.now = 130_000;
+
+  try {
+    inputMode.reset();
+    initCursor();
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.raf.flushNext(runtime.clock.now);
+
+    const cursor = runtime.document.getElementById("zentype-cursor");
+    assert.ok(cursor);
+
+    runtime.clearCaret();
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.classList.contains("hidden"), true);
+
+    // Caret point is inside the editor rect (allowed) but its line bottom
+    // extends past it (off-screen): the cursor must stay invisible with no
+    // reveal handoff — never fade to full opacity off-screen.
+    runtime.setCaret(fixture.text, 1, rect(20, 995));
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.classList.contains("hidden"), false);
+    assert.equal(cursor.style.opacity, "0");
+    assert.equal(runtime.raf.pending.size, 0);
+  } finally {
+    destroyCursor();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("cursor appears instantly without reveal under reduced motion", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime, "cursor");
+  runtime.window.reducedMotion = true;
+  runtime.clock.now = 140_000;
+
+  try {
+    inputMode.reset();
+    initCursor();
+    runtime.raf.flushNext(runtime.clock.now);
+
+    const cursor = runtime.document.getElementById("zentype-cursor");
+    assert.ok(cursor);
+
+    runtime.clearCaret();
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.classList.contains("hidden"), true);
+
+    runtime.setCaret(fixture.text, 1, rect(20, 500));
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.classList.contains("hidden"), false);
+    assert.equal(cursor.style.opacity, "");
+    assert.equal(runtime.raf.pending.size, 0);
+  } finally {
+    destroyCursor();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("cursor switch settle supersedes a pending reacquire reveal", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime, "cursor");
+  runtime.clock.now = 150_000;
+
+  try {
+    inputMode.reset();
+    initCursor();
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.raf.flushNext(runtime.clock.now);
+
+    const cursor = runtime.document.getElementById("zentype-cursor");
+    assert.ok(cursor);
+
+    runtime.clearCaret();
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.classList.contains("hidden"), true);
+
+    // Switch settle takes over visibility while the reacquire is pending.
+    onProtyleSwitched({} as never);
+    assert.equal(cursor.classList.contains("hidden"), false);
+    assert.equal(cursor.style.opacity, "0");
+    assert.equal(isSwitchHiddenActive(), true);
+
+    // A successful update mid-settle must not start a reacquire reveal.
+    runtime.setCaret(fixture.text, 1, rect(20, 500));
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.style.opacity, "0");
+    assert.equal(isSwitchHiddenActive(), true);
+
+    // Drive the settle to stability: 8 stable ticks finish it, then the
+    // switch reveal and the transition-restore frame both run.
+    for (let index = 0; index < 12; index++) {
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+    assert.equal(isSwitchHiddenActive(), false);
+    assert.equal(isSwitchRevealPending(), false);
+    assert.equal(cursor.style.opacity, "");
+    assert.equal(cursor.classList.contains("hidden"), false);
+    assert.equal(runtime.raf.pending.size, 0);
+  } finally {
+    stopSwitchSettle();
+    destroyCursor();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
 test("cursor switch settle hides until stable, cancels stale settle, and reveals once", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
