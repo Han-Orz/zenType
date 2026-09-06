@@ -641,9 +641,7 @@ function onScrollOrWheel(source: CursorScrollSource, target: EventTarget | null)
     emitDebugState("cursor-scroll-policy", {
       policy: pendingKeyboardUpdate
         ? "keyboard-preserve-transition"
-        : ownedScroll
-          ? "typewriter-owned-scroll-preserve-transition"
-          : "manual-scroll-no-transition",
+        : "manual-scroll-no-transition",
       source,
       ownedScroll,
       manualPolicy: useManualScrollPolicy,

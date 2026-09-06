@@ -1654,13 +1654,20 @@ test("cursor routes Typewriter-owned scrolls separately from manual input", () =
         ),
       })),
       [
-        { source: "scroll", manual: false },
+        // Engine-owned scroll without a keyboard cooldown is pure viewport
+        // motion: the cursor snaps 1:1 (sweep fix for follow lag).
+        { source: "scroll", manual: true },
         { source: "scroll", manual: true },
         { source: "manual-input", manual: true },
         { source: "manual-input", manual: true },
       ],
     );
     assert.equal(shouldUseManualScrollPolicy("manual-input", true, true), true);
+    assert.equal(
+      shouldUseManualScrollPolicy("scroll", true, true),
+      false,
+      "keyboard-pending engine scrolls keep the transition",
+    );
 
     const firstFrame = [...runtime.raf.pending.keys()][0];
     assert.ok(firstFrame);

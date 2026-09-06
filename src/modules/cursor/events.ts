@@ -13,14 +13,24 @@ const DEBUG_ENABLED = __ZENTYPE_DEV__;
 
 export type CursorScrollSource = "scroll" | "manual-input";
 
-/** Manual policy applies to user input or scrolls not owned by Typewriter. */
+/**
+ * Manual policy applies to user input or scrolls not owned by Typewriter.
+ *
+ * Stabilization sweep fix: an engine-owned scroll without an active keyboard
+ * cooldown is pure viewport motion (post-typing comfort centering, click
+ * centering) — the caret is stationary in content space while the viewport
+ * sweeps, so the cursor must track 1:1. Preserving its transition there made
+ * it chase the per-frame targets with easing restarts (visible follow lag).
+ * Keyboard-pending scrolls (Enter auto-scroll, structural finishes inside the
+ * cooldown) keep the transition: the caret itself just moved in content space.
+ */
 export function shouldUseManualScrollPolicy(
   source: CursorScrollSource,
   pendingKeyboardUpdate: boolean,
-  ownedScroll: boolean,
+  _ownedScroll: boolean,
 ): boolean {
   if (source === "manual-input") return true;
-  return !pendingKeyboardUpdate && !ownedScroll;
+  return !pendingKeyboardUpdate;
 }
 
 export interface CursorEventContext {
@@ -127,10 +137,12 @@ export function bindCursorDocumentEvents(context: CursorEventContext): void {
     if (!pasteLike && !inputEvent.isComposing) {
       inputModeTriggers.onTextInput();
       context.markKeyboardPending();
-    }
-    if (DEBUG_ENABLED) {
-      cursorPerf.keyboardEvents++;
-      cursorPerf.keyboardEventAt = performance.now();
+      // Stamp only when the keyboard cooldown actually arms, so IME composing
+      // inputs cannot leave a stale slot for a later unrelated update to consume.
+      if (DEBUG_ENABLED) {
+        cursorPerf.keyboardEvents++;
+        cursorPerf.keyboardEventAt = performance.now();
+      }
     }
     requestAnimationFrame((outerFrameTs) => {
       if (DEBUG_ENABLED) cursorPerf.keyboardOuterRafAt = outerFrameTs;

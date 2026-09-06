@@ -100,7 +100,9 @@ export function buildCursorPerfSummary(
       twoFrame: cursorPerf.keyboardTwoFrame,
       latency: ringStats(cursorPerf.keyboardLatencies),
     },
-    scroll: {
+    // Named scrollDup: the collector reserves `scroll` for its own scroll-state
+    // snapshot and would otherwise overwrite these counters.
+    scrollDup: {
       docCaptureScroll: cursorPerf.docCaptureScroll,
       docCaptureWheel: cursorPerf.docCaptureWheel,
       containerScroll: cursorPerf.containerScroll,
