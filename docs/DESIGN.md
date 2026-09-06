@@ -73,7 +73,7 @@ src/
 │   │   ├── resizeBindings.ts     # protyle-content / protyle-wysiwyg 的 ResizeObserver
 │   │   └── popoverDrag.ts        # block__popover 拖动手柄绑定
 │   ├── typewriter.ts             # 打字机模式（舒适区间滚动 + 块级 FLIP）
-│   ├── ripple.ts                 # 涟漪聚焦（块级 opacity + 句级 Highlight dim/fade）
+│   ├── ripple.ts                 # 涟漪聚焦（块级 opacity + 句级语义 → sentence transition engine）
 │   ├── debugHook.ts              # 开发版 DOM / 输入 / EventBus 快照与事件采集
 │   ├── debugHook.noop.ts          # 正式构建替代模块，不含采集逻辑
 │   ├── inputMode.ts              # 聚焦/打字机 ON/OFF 状态 + 订阅
@@ -458,7 +458,7 @@ function animateBlockShift(editor: HTMLElement, range: Range): void {
 ### 4.1 想要的效果（v2.6.1 更新：CSS Custom Highlight API + 句级 fade）
 
 - **当前输入句**稳定态保持默认文字色（最亮）；当前块的**其它句**用 `::highlight(zt-sentence-dim)` 染色为 `color: rgba(0,0,0,0.6)`（浅色）/ `rgba(255,255,255,0.6)`（深色）——按 `.`、`?`、`!`、`。`、`？`、`！`、`…` 切句，**句级**而非仅块级
-- **句级切换动画**：旧当前句用 `zt-sentence-fade-out` 从原文字色插值到 dim 色；新当前句用 `zt-sentence-fade-in` 从 dim 色插值到原文字色；动画由 `requestAnimationFrame` + `easeInOutCubic` 驱动，不依赖 CSS transition
+- **句级切换动画**：每个正在过渡的句子拥有独立的 presentation slot（`zt-sentence-transition-0..3`，含自身 Range / from→to 颜色 / startTime / duration）；acquire（dim→text）为 400ms、release（text→dim）为 600ms，均 `easeInOutCubic`。单个共享 rAF driver 每帧只对在飞 slot 采样并写 CSS 变量，空闲时 rAF = 0。呈现状态机位于 `ripple/sentenceTransition.ts`，ripple.ts 只负责把语义目标交给它。
 - 当前块 opacity = 1.0，不参与视觉权重衰减；相邻 ±1 块 opacity ≈ 0.4 × 视觉权重
 - 相邻 ±2 块 opacity ≈ 0.2；更远按 `[0.15, 0.1, 0.05]` 继续衰减
 - **块级** dimming 仍用 JS `style.opacity`；**句级** dimming / fade 用 CSS Custom Highlight API（零 DOM 突变，§4.3.3）
@@ -474,7 +474,7 @@ function animateBlockShift(editor: HTMLElement, range: Range): void {
 | **句级粒度**（v2.5.0 改 Highlight API） | 按 `.?!。？！…` 切句，小数点保护 | `ripple.ts` `splitSentences` / `applySentenceHighlight` | 用户偏好"看清整句"，不只是块；v2.5.0 废弃 `getSentences`/span 包裹 |
 | **块级 opacity 梯度** | `[1.0, 0.4, 0.2, 0.15, 0.1, 0.05]` | `config.ts` `BLOCK_LEVELS` | v2.6.0 参考 Obsidian focus，增强聚焦对比 |
 | **句级 dim alpha** | `SENTENCE_DIM_ALPHA = 0.6` | `config.ts` `SENTENCE_DIM_ALPHA` | v2.6.1 调低非当前句亮度，当前句稳定态保持原色 |
-| **句级切换动画** | `zt-sentence-fade-out` + `zt-sentence-fade-in`，rAF 颜色插值 | `ripple.ts` `startSentenceFade` | `::highlight` 不支持 transition，用 JS 驱动颜色插值且保持零 DOM 突变 |
+| **句级切换动画** | 每句独立 slot `zt-sentence-transition-0..3`（各自 Range / 颜色 / startTime），acquire 400ms / release 600ms rAF 颜色插值 | `ripple/sentenceTransition.ts` `createSentenceTransitionEngine` | `::highlight` 不支持 transition；per-slot 状态使反向/打断时从当前颜色续走，无 timeline 继承 |
 | **当前块 opacity** | `distance === 0` 强制 `1.0` | `ripple.ts` `applyBlockOpacity` | 防止当前块因 `visualWeightOf` 小于 1 导致当前句比非聚焦模式淡 |
 | **视觉权重** | 仅 distance=1 的相邻块参与；distance≥2 跳过布局回读 | `ripple.ts` `visualWeightOf` / `applyBlockOpacity` | 相邻块过渡更自然，远块差异不可感知 |
 | **应用方式** | 块级 `style.opacity`；句级 CSS Custom Highlight API | `ripple.ts` / `styles/index.scss` | 块级简单直接；句级零 DOM 突变（v2.5.0，避免数据丢失） |
@@ -528,53 +528,66 @@ applyRipple():  // rAF 节流（pendingFrame 标志）
     block.style.opacity = String(baseOpacity * weightFactor)
   })
 
-  // 2) 句级 dimming / fade（CSS Custom Highlight API，零 DOM 突变，§4.3.3）
+  // 2) 句级 presentation（CSS Custom Highlight API，零 DOM 突变，§4.3.3）
   textNodeMap = buildTextNodeMap(currentBlock)  // 单次 TreeWalker
   caretOffset = getCaretOffset(currentBlock, textNodeMap)
   if (caretOffset !== null):
-    applySentenceHighlight(currentBlock, caretOffset, textNodeMap)  // 给非当前句染色；跨句时启动 fade
+    applySentenceHighlight(currentBlock, caretOffset, textNodeMap)
+    // splitSentences + resolveActiveSentenceRanges 算出 semantic active set，
+    // 交给 sentenceTransitionEngine.update(...)；stable dim 与 transition
+    // slots 全部由 engine 写入 CSS.highlights（唯一 writer，单一状态模型）。
   else:
-    CSS.highlights.delete("zt-sentence-dim")
-    CSS.highlights.delete("zt-sentence-fade-in")
-    CSS.highlights.delete("zt-sentence-fade-out")
+    sentenceTransitionEngine.clear()
 ```
 
-#### 4.3.3 句级 dimming / fade（CSS Custom Highlight API，v2.6.1 更新）
+#### 4.3.3 句级 presentation / transition（CSS Custom Highlight API，engine 版）
 
 v2.5.0 废弃 span 包裹，改用 [CSS Custom Highlight API](https://developer.mozilla.org/en-US/docs/Web/API/CSS_Custom_Highlight_API) 标记非当前句。**零 DOM 突变**——只在已有文本节点上构造 `Range` 对象，注册到 `CSS.highlights`，由 `::highlight(...)` 染色。
 
-v2.6.1 在同一套 Highlight API 上增加跨句切换动画：稳定态只保留 `zt-sentence-dim`；光标从旧句移到新句时，临时排除旧句和新句的稳定 dim，高亮旧句为 `zt-sentence-fade-out`、新句为 `zt-sentence-fade-in`，用 rAF 修改 CSS 变量完成颜色插值。动画结束后删除两个临时 highlight，恢复只排除当前句的稳定 dim。
+**架构（语义 / 呈现分层，取代旧的单一 fade timeline）**：
+
+- `ripple.ts` 只负责**语义输入**：DOM/selection → 当前块 text + 单次 TreeWalker 的 textNodeMap → caret offset → `splitSentences`（Intl.Segmenter，唯一句界来源）→ `resolveActiveSentenceRanges` 的 active set → 主题色 / reduced-motion 门控 → 调用 `sentenceTransitionEngine.update(...)`。
+- `ripple/sentenceTransition.ts` 是 sentence presentation 的唯一写入者：stable dim channel（`zt-sentence-dim`）+ bounded slot pool（`zt-sentence-transition-0..3`）+ 单个共享 rAF driver + CSS 变量所有权。它不读 selection、不碰 inputMode / structuralEdit / 当前块查找、不调 Segmenter。
+- 每个在飞 slot 拥有自己的 `range / from / to / current / startTime / duration`：
+  - acquire（dim→text）= 400ms，release（text→dim）= 600ms，均 `easeInOutCubic`；
+  - 打断 / 反向 = retarget：`from` 取上一帧实际渲染颜色，`startTime` 重新锚定到下一帧——不继承旧 startTime、不从终点重来、不先 settle 再动；
+  - 同句连续输入（文本变但句数稳定）：只 rebind 该 slot 的 geometry，timeline 不 restart / 不 cancel / 不重算 from；
+  - slot 结束：active 方向直接移除（句子回到自然文字色）；dim 方向把 range 交回 stable `zt-sentence-dim`（在完成的那一帧内加入，无中间帧亮度跳变）。
+- 句 identity 用确定性规则而非永久 tracker：文本未变按 range 值相等；文本变但句数稳定按 ordinal 重绑定（同句延续）；句数变化（增删句号等 topology 变化）→ settle / rebuild 到最终语义状态——不闪、无残留 slot，允许该瞬间没有复杂 transition（有意识边界，非 TODO bug）。
+- dual-focus（{A,B}）只是 semantic target：A/B 各自独立 retarget，不是动画 special case。
 
 ```typescript
-const SENTENCE_DIM_HIGHLIGHT = "zt-sentence-dim";
-const SENTENCE_FADE_IN_HIGHLIGHT = "zt-sentence-fade-in";
-const SENTENCE_FADE_OUT_HIGHLIGHT = "zt-sentence-fade-out";
-
-// applySentenceHighlight(block, caretOffset)
-//   1. textContent 按正则 /(?<!\d)[.?!。？！…]+(?!\d)/g 切句
-//   2. 为"不含光标"的每句构造 Range
-//   3. CSS.highlights.set("zt-sentence-dim", new Highlight(...dimRanges))
-//   4. 若当前句 start 与上次不同：
-//      - stable dim 临时排除旧当前句 + 新当前句
-//      - fade-out: textColor → dimColor
-//      - fade-in: dimColor → textColor
-//      - requestAnimationFrame + easeInOutCubic 驱动 CSS 变量
+// ripple.ts —— 语义层（每块只认一遍 textNodeMap + splitSentences）
+sentenceTransitionEngine.update({
+  blockKey,
+  sentenceRanges: matches,        // splitSentences(text)
+  activeRanges,                   // resolveActiveSentenceRanges(...)
+  textChanged,
+  textNodeMap,
+  textColor,
+  dimColor,
+  animate: !prefersReducedMotion(),
+});
 ```
 
-样式（`styles/index.scss`）：
+样式（`styles/index.scss`）——slot 数量固定（`SENTENCE_SLOT_COUNT = 4`），无动态创建：
 
 ```scss
 :root {
   --zt-sentence-dim-color: rgba(0, 0, 0, 0.6);
-  --zt-sentence-fade-in-color: rgba(0, 0, 0, 1);
-  --zt-sentence-fade-out-color: rgba(0, 0, 0, 0.6);
+  --zt-sentence-transition-0-color: rgba(0, 0, 0, 0.6);
+  --zt-sentence-transition-1-color: rgba(0, 0, 0, 0.6);
+  --zt-sentence-transition-2-color: rgba(0, 0, 0, 0.6);
+  --zt-sentence-transition-3-color: rgba(0, 0, 0, 0.6);
 }
 ::highlight(zt-sentence-dim) { color: var(--zt-sentence-dim-color); }
-::highlight(zt-sentence-fade-in) { color: var(--zt-sentence-fade-in-color); }
-::highlight(zt-sentence-fade-out) { color: var(--zt-sentence-fade-out-color); }
+::highlight(zt-sentence-transition-0) { color: var(--zt-sentence-transition-0-color); }
+::highlight(zt-sentence-transition-1) { color: var(--zt-sentence-transition-1-color); }
+::highlight(zt-sentence-transition-2) { color: var(--zt-sentence-transition-2-color); }
+::highlight(zt-sentence-transition-3) { color: var(--zt-sentence-transition-3-color); }
 ```
 
-`styles/index.scss` 的变量是兜底值；运行时 `ripple.ts` 会按主题和 `SENTENCE_DIM_ALPHA` 写入实际颜色。当前代码中 `SENTENCE_DIM_ALPHA = 0.6`。
+`styles/index.scss` 的变量是兜底值；运行时 `sentenceTransition.ts` 按主题与 `SENTENCE_DIM_ALPHA` 写入实际颜色（含各 slot 的动画中间色）。当前代码中 `SENTENCE_DIM_ALPHA = 0.6`。
 
 **为什么不用 opacity**：`::highlight()` 伪元素只支持 `color` / `background-color` / `text-decoration` / `text-shadow`（[css-pseudo-4 §3.2](https://drafts.csswg.org/css-pseudo-4/#highlight-styling) 规范明列），**不支持 `opacity`、也不支持厂商前缀属性（如 `-webkit-text-fill-color`）或 `transition`**。句级 dimming 用 `color: rgba(…,0.6)` 模拟；句级 fade 用 rAF 插值 `color`，不走 CSS transition。块级 dimming 仍用 `style.opacity`（见 §4.3.2）。
 
@@ -584,7 +597,7 @@ const SENTENCE_FADE_OUT_HIGHLIGHT = "zt-sentence-fade-out";
 
 > **v2.6.0 移除**：`isRippleTargetBlock`/`depthOf`/`RIPPLE_TARGET_BLOCK_TYPES`/`RIPPLE_SKIP_BLOCK_TYPES`/`RIPPLE_SKIP_SELECTORS` 全部删除。块级 opacity 现在直接作用于 `container.children`（所有带 `data-node-id` 的顶层块），不再区分 block type。
 
-**性能**：`applySentenceHighlight` 只在 focus 激活后由 `selectionchange`、`input` 或当前块 mutation 触发（被 `pendingFrame` rAF 节流），不每帧扫。`TreeWalker` 遍历文本节点 + 正则切句，开销与旧 span 方案同级，但省掉了 `extractContents`/`insertNode` 的 DOM 读写 + 选区保存/恢复。
+**性能**：语义计算只在 focus 激活后由 `selectionchange`、`input` 或当前块 mutation 触发（被 `pendingFrame` rAF 节流），不做每帧全文档扫描。transition rAF driver 只在存在在飞 slot 时运行，空闲 rAF = 0；slot 池固定（4），CSS highlight 数量恒定；无 timer farm、无新增全局事件监听。彩色文字（mark/链接）在过渡期间会被 slot 覆盖成统一插值色（`::highlight` 无法相对原色 dim，沿用 v2.6.1 取舍）。
 
 #### 4.3.4 相邻块视觉权重（v2.6.0 简化）
 
@@ -644,11 +657,11 @@ onInput():
 ```typescript
 BLOCK_LEVELS: [1.0, 0.4, 0.2, 0.15, 0.1, 0.05]  // 块级 opacity 梯度（按距离衰减，v2.6.0 替换 SENTENCE_LEVELS）
 SENTENCE_DIM_ALPHA: 0.6                           // 句级 dimming alpha（v2.6.1 调整）
-TRANSITION_SEC: 0.4                               // 块级 opacity 过渡 + 句级 fade 插值时长（秒）
+TRANSITION_SEC: 0.4                               // 块级 opacity 过渡时长（秒）
 WEIGHT_MIN: 0.85                                  // 视觉权重下限（lerp 起点）
 ```
 
-> v2.6.0 重构：`SENTENCE_LEVELS`/`EMBED_MULTIPLIER`/`DEPTH_FACTOR` → `BLOCK_LEVELS`/`SENTENCE_DIM_ALPHA`/`TRANSITION_SEC`。句级 dimming 的 alpha 由 `SENTENCE_DIM_ALPHA` 统一控制（之前为硬编码 0.88）。v2.6.1 复用 `TRANSITION_SEC` 作为句级 fade-in/fade-out 的 rAF 插值时长。
+> v2.6.0 重构：`SENTENCE_LEVELS`/`EMBED_MULTIPLIER`/`DEPTH_FACTOR` → `BLOCK_LEVELS`/`SENTENCE_DIM_ALPHA`/`TRANSITION_SEC`。句级 dimming 的 alpha 由 `SENTENCE_DIM_ALPHA` 统一控制（之前为硬编码 0.88）。句级 transition 时长（acquire 400ms / release 600ms）由 `ripple/sentenceTransition.ts` 的 `SENTENCE_ACQUIRE_MS`/`SENTENCE_RELEASE_MS` 持有，`TRANSITION_SEC` 只作用于块级 opacity。
 
 ### 4.6 TODO
 
@@ -807,7 +820,7 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 | 打字机 | `TYPEWRITER_CONFIG` | `CLICK_CENTER_LOW` / `CLICK_CENTER_HIGH` | `0.25` / `0.75` | 点击后超出此区间才主动居中到 0.5 |
 | 涟漪 | `RIPPLE_CONFIG` | **`BLOCK_LEVELS`** | **`[1.0, 0.4, 0.2, 0.15, 0.1, 0.05]`** | **v2.6.0：块级 opacity 梯度（替换 SENTENCE_LEVELS）** |
 | 涟漪 | `RIPPLE_CONFIG` | **`SENTENCE_DIM_ALPHA`** | **`0.6`** | **v2.6.1 调整：句级 dimming alpha** |
-| 涟漪 | `RIPPLE_CONFIG` | **`TRANSITION_SEC`** | **`0.4`** | **v2.6.1 复用：块级 opacity 过渡 + 句级 fade 插值时长（秒）** |
+| 涟漪 | `RIPPLE_CONFIG` | **`TRANSITION_SEC`** | **`0.4`** | **块级 opacity 过渡时长（秒）；句级时长见 `ripple/sentenceTransition.ts` 的 acquire 400ms / release 600ms** |
 | 涟漪 | `RIPPLE_CONFIG` | `WEIGHT_MIN` | `0.85` | 视觉权重 lerp 下限 |
 
 ### 8.2 "暂停功能"入口
