@@ -3377,14 +3377,47 @@ test("ripple retains outgoing sentence dim through a block handoff", () => {
   }
 });
 
+// --- Sentence transition slot helpers (new engine contract) ---
+// The engine owns one bounded slot highlight per in-flight sentence
+// (zt-sentence-transition-0..3) plus the stable zt-sentence-dim channel.
+// A slot completing toward dim hands its range to stable dim; a slot
+// completing toward active simply disappears (natural text color).
+
+const TRANSITION_SLOT_NAMES = [0, 1, 2, 3].map((index) => `zt-sentence-transition-${index}`);
+const transitionSlotVar = (index: number) => `--zt-sentence-transition-${index}-color`;
+
+function transitionStartOffsets(runtime: FakeRuntime): number[] {
+  const starts: number[] = [];
+  for (const name of TRANSITION_SLOT_NAMES) {
+    const highlight = runtime.highlights.get(name);
+    if (highlight && highlight.ranges.length > 0) starts.push(highlight.ranges[0].startOffset);
+  }
+  return starts.sort((a, b) => a - b);
+}
+
+function transitionSlotNameFor(runtime: FakeRuntime, startOffset: number): string {
+  for (const name of TRANSITION_SLOT_NAMES) {
+    const highlight = runtime.highlights.get(name);
+    if (highlight && highlight.ranges.some((range) => range.startOffset === startOffset)) {
+      return name;
+    }
+  }
+  assert.ok(false, `expected a transition slot covering sentence at ${startOffset}`);
+  return "";
+}
+
+function transitionSlotColor(runtime: FakeRuntime, startOffset: number): string {
+  const name = transitionSlotNameFor(runtime, startOffset);
+  const index = Number(name.split("-").pop());
+  return runtime.document.documentElement.style.getPropertyValue(transitionSlotVar(index));
+}
+
 test("sentence focus activates both sentences on the shared boundary", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
   const fixture = createRippleFixture(runtime);
-  // Asymmetric fade contract (ripple.ts): acquisition keeps the v2.6.3
-  // 400ms easeInOut language, release runs a 600ms slow tail.
-  const fadeInMs = 400;
-  const fadeOutMs = 600;
+  // Asymmetric fade contract: acquisition keeps the 400ms easeInOut language,
+  // release runs a 600ms slow tail. Each in-flight sentence owns its slot.
 
   try {
     inputMode.reset();
@@ -3407,35 +3440,28 @@ test("sentence focus activates both sentences on the shared boundary", () => {
     runtime.document.dispatch("selectionchange");
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(runtime.highlights.has("zt-sentence-dim"), false);
-    // Entering sentence fades in; the staying one does not fade out.
-    const fadeIn = runtime.highlights.get("zt-sentence-fade-in");
-    assert.ok(fadeIn);
-    assert.equal(fadeIn.ranges.length, 1);
-    assert.equal(fadeIn.ranges[0].startOffset, 5);
-    assert.equal(fadeIn.ranges[0].endOffset, 9);
-    assert.equal(runtime.highlights.has("zt-sentence-fade-out"), false);
+    // The entering sentence B owns one acquisition slot; A stays active.
+    assert.deepEqual(transitionStartOffsets(runtime), [5]);
 
-    // Entering-only fade runs on the 400ms acquisition timeline.
-    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the fade at t=0
-    runtime.clock.advance(fadeInMs);
+    // The acquisition runs on the 400ms timeline and releases its slot.
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the slot at t=0
+    runtime.clock.advance(400);
     runtime.raf.flushNext(runtime.clock.now);
-    assert.equal(runtime.highlights.has("zt-sentence-fade-in"), false);
+    assert.deepEqual(transitionStartOffsets(runtime), []);
 
-    // Leaving the boundary into the second sentence fades the first out.
+    // Leaving the boundary into the second sentence fades the first out: A
+    // owns a single release slot now.
     runtime.setCaret(fixture.focusText, 6, rect(20, 400));
     runtime.document.dispatch("selectionchange");
     runtime.raf.flushNext(runtime.clock.now);
-    const fadeOut = runtime.highlights.get("zt-sentence-fade-out");
-    assert.ok(fadeOut);
-    assert.equal(fadeOut.ranges.length, 1);
-    assert.equal(fadeOut.ranges[0].startOffset, 0);
-    assert.equal(fadeOut.ranges[0].endOffset, 5);
-    assert.equal(runtime.highlights.has("zt-sentence-fade-in"), false);
+    assert.deepEqual(transitionStartOffsets(runtime), [0]);
 
-    // Leaving-only fade runs on the slow 600ms release timeline.
-    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the fade at t=0
-    runtime.clock.advance(fadeOutMs);
+    // The leaving-only fade runs on the slow 600ms release timeline and hands
+    // A over to the stable dim channel on completion.
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the slot at t=0
+    runtime.clock.advance(600);
     runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(transitionStartOffsets(runtime), []);
     const stableDim = runtime.highlights.get("zt-sentence-dim");
     assert.ok(stableDim);
     assert.equal(stableDim.ranges.length, 1);
@@ -3453,8 +3479,6 @@ test("sentence fade covers direct sentence jumps at BOF and EOF", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
   const fixture = createRippleFixture(runtime);
-  // Both directions participate, so the lifecycle runs to the slow release end.
-  const fadeTotalMs = 600;
 
   try {
     inputMode.reset();
@@ -3466,45 +3490,48 @@ test("sentence fade covers direct sentence jumps at BOF and EOF", () => {
     runtime.document.dispatch("selectionchange");
     runtime.raf.flushNext(runtime.clock.now);
 
-    // EOF jump: caret at text.length keeps the last sentence active.
+    // EOF jump: caret at text.length keeps the last sentence active. A leaves
+    // (release slot) and B enters (acquisition slot) — two independent slots.
     runtime.setCaret(fixture.focusText, 9, rect(20, 400));
     runtime.document.dispatch("selectionchange");
     runtime.raf.flushNext(runtime.clock.now);
-    const eofFadeOut = runtime.highlights.get("zt-sentence-fade-out");
-    const eofFadeIn = runtime.highlights.get("zt-sentence-fade-in");
-    assert.ok(eofFadeOut);
-    assert.ok(eofFadeIn);
-    assert.equal(eofFadeOut.ranges[0].startOffset, 0);
-    assert.equal(eofFadeOut.ranges[0].endOffset, 5);
-    assert.equal(eofFadeIn.ranges[0].startOffset, 5);
-    assert.equal(eofFadeIn.ranges[0].endOffset, 9);
+    assert.deepEqual(transitionStartOffsets(runtime), [0, 5]);
+    const eofLeaving = runtime.highlights.get(transitionSlotNameFor(runtime, 0));
+    const eofEntering = runtime.highlights.get(transitionSlotNameFor(runtime, 5));
+    assert.equal(eofLeaving!.ranges[0].startOffset, 0);
+    assert.equal(eofLeaving!.ranges[0].endOffset, 5);
+    assert.equal(eofEntering!.ranges[0].startOffset, 5);
+    assert.equal(eofEntering!.ranges[0].endOffset, 9);
     assert.equal(runtime.highlights.has("zt-sentence-dim"), false);
 
-    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the fade at t=0
-    runtime.clock.advance(fadeTotalMs);
+    // Release runs to 600ms; A then rejoins the stable dim channel.
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors both slots at t=0
+    runtime.clock.advance(600);
     runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(transitionStartOffsets(runtime), []);
     const eofDim = runtime.highlights.get("zt-sentence-dim");
     assert.ok(eofDim);
     assert.equal(eofDim.ranges.length, 1);
     assert.equal(eofDim.ranges[0].startOffset, 0);
     assert.equal(eofDim.ranges[0].endOffset, 5);
 
-    // BOF jump back: caret 0 keeps the first sentence active.
+    // BOF jump back: caret 0 keeps the first sentence active. B releases and
+    // A acquires.
     runtime.setCaret(fixture.focusText, 0, rect(20, 400));
     runtime.document.dispatch("selectionchange");
     runtime.raf.flushNext(runtime.clock.now);
-    const bofFadeOut = runtime.highlights.get("zt-sentence-fade-out");
-    const bofFadeIn = runtime.highlights.get("zt-sentence-fade-in");
-    assert.ok(bofFadeOut);
-    assert.ok(bofFadeIn);
-    assert.equal(bofFadeOut.ranges[0].startOffset, 5);
-    assert.equal(bofFadeOut.ranges[0].endOffset, 9);
-    assert.equal(bofFadeIn.ranges[0].startOffset, 0);
-    assert.equal(bofFadeIn.ranges[0].endOffset, 5);
+    assert.deepEqual(transitionStartOffsets(runtime), [0, 5]);
+    const bofLeaving = runtime.highlights.get(transitionSlotNameFor(runtime, 5));
+    const bofEntering = runtime.highlights.get(transitionSlotNameFor(runtime, 0));
+    assert.equal(bofLeaving!.ranges[0].startOffset, 5);
+    assert.equal(bofLeaving!.ranges[0].endOffset, 9);
+    assert.equal(bofEntering!.ranges[0].startOffset, 0);
+    assert.equal(bofEntering!.ranges[0].endOffset, 5);
 
-    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the fade at t=0
-    runtime.clock.advance(fadeTotalMs);
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors both slots at t=0
+    runtime.clock.advance(600);
     runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(transitionStartOffsets(runtime), []);
     const bofDim = runtime.highlights.get("zt-sentence-dim");
     assert.ok(bofDim);
     assert.equal(bofDim.ranges.length, 1);
@@ -3543,55 +3570,46 @@ test("sentence fade acquires at 400ms and releases at 600ms", () => {
     assert.ok(initialDim);
     assert.equal(initialDim.ranges.length, 2);
 
-    // {A} -> {B}: both directions participate on one lifecycle.
+    // {A} -> {B}: A owns a release slot, B an acquisition slot; C stays static.
     runtime.setCaret(fixture.text, 7, rect(20, 400));
     runtime.document.dispatch("selectionchange");
     runtime.raf.flushNext(runtime.clock.now);
-    const fadeOut = runtime.highlights.get("zt-sentence-fade-out");
-    const fadeIn = runtime.highlights.get("zt-sentence-fade-in");
-    assert.ok(fadeOut);
-    assert.ok(fadeIn);
-    assert.equal(fadeOut.ranges.length, 1);
-    assert.equal(fadeOut.ranges[0].startOffset, 0);
-    assert.equal(fadeOut.ranges[0].endOffset, 5);
-    assert.equal(fadeIn.ranges[0].startOffset, 5);
-    assert.equal(fadeIn.ranges[0].endOffset, 10);
-    // The leaving sentence is presented by the fade highlight, the staying
-    // one (C) by static dim; the entering one is excluded from static dim.
+    assert.deepEqual(transitionStartOffsets(runtime), [0, 5]);
+    // The staying sentence (C) keeps static dim; neither A nor B is in it.
     assert.equal(runtime.highlights.get("zt-sentence-dim")?.ranges.length, 1);
+    assert.equal(runtime.highlights.get("zt-sentence-dim")?.ranges[0].startOffset, 10);
 
     const rootStyle = runtime.document.documentElement.style;
-    // Each flush advances the fade's own frame timeline, not the clock.
+    // Each flush advances the slot's own frame timeline, not the clock.
     const flushFade = (elapsedMs: number) => {
       runtime.raf.flushNext(runtime.clock.now + elapsedMs);
     };
 
-    // t=0 (first rAF): entering sits at dim, leaving at active color.
+    // t=0 (first rAF): the acquisition slot sits at dim, the release slot at
+    // the active color.
     flushFade(0);
-    assert.equal(rootStyle.getPropertyValue("--zt-sentence-fade-in-color"), "rgba(0,0,0,0.6)");
-    assert.equal(rootStyle.getPropertyValue("--zt-sentence-fade-out-color"), "rgba(0,0,0,1)");
+    assert.equal(transitionSlotColor(runtime, 5), "rgba(0,0,0,0.6)");
+    assert.equal(transitionSlotColor(runtime, 0), "rgba(0,0,0,1)");
 
-    // t=200ms: acquisition is around the 400ms easeInOut midpoint; release
-    // has barely left its start on the 600ms curve and is still brighter.
+    // t=200ms: acquisition is around the 400ms easeInOut midpoint; release has
+    // barely left its start on the 600ms curve and is still brighter.
     flushFade(200);
-    const aIn = alphaOf(rootStyle.getPropertyValue("--zt-sentence-fade-in-color"));
-    assert.ok(aIn > 0.6 && aIn < 1, `fade-in mid-flight, got alpha ${aIn}`);
-    const aOut = alphaOf(rootStyle.getPropertyValue("--zt-sentence-fade-out-color"));
-    assert.ok(aOut > 0.6 && aOut < 1, `fade-out mid-flight, got alpha ${aOut}`);
+    const aIn = alphaOf(transitionSlotColor(runtime, 5));
+    assert.ok(aIn > 0.6 && aIn < 1, `acquisition mid-flight, got alpha ${aIn}`);
+    const aOut = alphaOf(transitionSlotColor(runtime, 0));
+    assert.ok(aOut > 0.6 && aOut < 1, `release mid-flight, got alpha ${aOut}`);
     assert.ok(aOut > aIn, "release lags acquisition at 200ms");
 
-    // t=400ms: acquisition fully active; release tail still running.
+    // t=400ms: the acquisition completes and releases its slot; the release
+    // tail is still running on its own timeline.
     flushFade(400);
-    assert.equal(rootStyle.getPropertyValue("--zt-sentence-fade-in-color"), "rgba(0,0,0,1)");
-    assert.equal(runtime.highlights.has("zt-sentence-fade-in"), true, "cleanup waits for the release tail");
-    assert.equal(runtime.highlights.has("zt-sentence-fade-out"), true);
-    const aOutAt400 = alphaOf(rootStyle.getPropertyValue("--zt-sentence-fade-out-color"));
+    assert.deepEqual(transitionStartOffsets(runtime), [0]);
+    const aOutAt400 = alphaOf(transitionSlotColor(runtime, 0));
     assert.ok(aOutAt400 > 0.6, `release not finished at 400ms, got alpha ${aOutAt400}`);
 
-    // t=600ms: the shared lifecycle cleans up and rebuilds stable dim.
+    // t=600ms: the release completes and A rejoins the stable dim channel.
     flushFade(600);
-    assert.equal(runtime.highlights.has("zt-sentence-fade-in"), false);
-    assert.equal(runtime.highlights.has("zt-sentence-fade-out"), false);
+    assert.deepEqual(transitionStartOffsets(runtime), []);
     const stableDim = runtime.highlights.get("zt-sentence-dim");
     assert.ok(stableDim);
     assert.equal(stableDim.ranges.length, 2, "released sentence rejoins static dim");
@@ -3600,8 +3618,7 @@ test("sentence fade acquires at 400ms and releases at 600ms", () => {
     runtime.setCaret(fixture.text, 9, rect(20, 400));
     runtime.document.dispatch("selectionchange");
     runtime.raf.flushNext(runtime.clock.now);
-    assert.equal(runtime.highlights.has("zt-sentence-fade-in"), false);
-    assert.equal(runtime.highlights.has("zt-sentence-fade-out"), false);
+    assert.deepEqual(transitionStartOffsets(runtime), []);
   } finally {
     destroyRipple();
     inputMode.reset();
@@ -3632,26 +3649,26 @@ test("sentence fade anchors its timeline to the first rAF timestamp", () => {
     runtime.setCaret(fixture.text, 7, rect(20, 400));
     runtime.document.dispatch("selectionchange");
     runtime.raf.flushNext(runtime.clock.now);
-    const rootStyle = runtime.document.documentElement.style;
-    assert.equal(rootStyle.getPropertyValue("--zt-sentence-fade-in-color"), "rgba(0,0,0,0.6)");
-    assert.equal(rootStyle.getPropertyValue("--zt-sentence-fade-out-color"), "rgba(0,0,0,1)");
+    // Slot colors start at their endpoints (entering dim, leaving active).
+    assert.equal(transitionSlotColor(runtime, 5), "rgba(0,0,0,0.6)");
+    assert.equal(transitionSlotColor(runtime, 0), "rgba(0,0,0,1)");
 
-    // First fade callback: frame timestamp lags the performance clock by
-    // 250ms (vsync-style skew). elapsed must be 0 — start colors, no jump.
+    // First slot frame: frame timestamp lags the performance clock by 250ms
+    // (vsync-style skew). elapsed must be 0 — start colors, no jump.
     const firstFrame = runtime.clock.now - 250;
     runtime.raf.flushNext(firstFrame);
-    assert.equal(rootStyle.getPropertyValue("--zt-sentence-fade-in-color"), "rgba(0,0,0,0.6)");
-    assert.equal(rootStyle.getPropertyValue("--zt-sentence-fade-out-color"), "rgba(0,0,0,1)");
+    assert.equal(transitionSlotColor(runtime, 5), "rgba(0,0,0,0.6)");
+    assert.equal(transitionSlotColor(runtime, 0), "rgba(0,0,0,1)");
 
-    // From here the timeline follows frame timestamps only: 200ms of frame
-    // time is mid-flight, not 450ms of clock time (which would finish it).
+    // From here each slot timeline follows frame timestamps only: 200ms of
+    // frame time is mid-flight, not 450ms of clock time (which would finish).
     runtime.raf.flushNext(firstFrame + 200);
-    const fadeInColor = rootStyle.getPropertyValue("--zt-sentence-fade-in-color");
-    assert.notEqual(fadeInColor, "rgba(0,0,0,0.6)");
-    assert.notEqual(fadeInColor, "rgba(0,0,0,1)");
-    const fadeOutColor = rootStyle.getPropertyValue("--zt-sentence-fade-out-color");
-    assert.notEqual(fadeOutColor, "rgba(0,0,0,1)");
-    assert.notEqual(fadeOutColor, "rgba(0,0,0,0.6)");
+    const acquireColor = transitionSlotColor(runtime, 5);
+    assert.notEqual(acquireColor, "rgba(0,0,0,0.6)");
+    assert.notEqual(acquireColor, "rgba(0,0,0,1)");
+    const releaseColor = transitionSlotColor(runtime, 0);
+    assert.notEqual(releaseColor, "rgba(0,0,0,1)");
+    assert.notEqual(releaseColor, "rgba(0,0,0,0.6)");
   } finally {
     destroyRipple();
     inputMode.reset();
@@ -3682,12 +3699,12 @@ test("sentence focus survives text edits that extend the active sentence", () =>
     assert.equal(boundaryDim.ranges.length, 1);
     assert.equal(boundaryDim.ranges[0].startOffset, 10);
 
-    // Let the boundary acquisition fade complete so no stale fade frame is
+    // Let the boundary acquisition slot complete so no stale slot frame is
     // pending when the text edit lands.
-    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the fade at t=0
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the slot at t=0
     runtime.clock.advance(400);
     runtime.raf.flushNext(runtime.clock.now);
-    assert.equal(runtime.highlights.has("zt-sentence-fade-in"), false);
+    assert.deepEqual(transitionStartOffsets(runtime), []);
 
     // Type one character inside sentence B: B's end moves 10 -> 11 while its
     // start (and all of A) stay put; the caret lands inside B. B is still the
@@ -3697,16 +3714,12 @@ test("sentence focus survives text edits that extend the active sentence", () =>
     runtime.document.dispatch("selectionchange");
     runtime.raf.flushNext(runtime.clock.now);
 
-    const fadeOut = runtime.highlights.get("zt-sentence-fade-out");
-    assert.ok(fadeOut, "previous sentence A fades out across the text edit");
-    assert.equal(fadeOut.ranges.length, 1);
-    assert.equal(fadeOut.ranges[0].startOffset, 0);
-    assert.equal(fadeOut.ranges[0].endOffset, 5);
-    assert.equal(
-      runtime.highlights.has("zt-sentence-fade-in"),
-      false,
-      "the extended sentence continues as active without re-fading",
-    );
+    assert.deepEqual(transitionStartOffsets(runtime), [0], "previous sentence A fades out across the text edit");
+    // The release slot covers A on its current geometry [0,5).
+    const fadeOut = runtime.highlights.get(transitionSlotNameFor(runtime, 0));
+    assert.equal(fadeOut!.ranges.length, 1);
+    assert.equal(fadeOut!.ranges[0].startOffset, 0);
+    assert.equal(fadeOut!.ranges[0].endOffset, 5);
     // Static dim covers only C during the release, on current geometry.
     const dim = runtime.highlights.get("zt-sentence-dim");
     assert.ok(dim);
@@ -3714,10 +3727,10 @@ test("sentence focus survives text edits that extend the active sentence", () =>
     assert.equal(dim.ranges[0].startOffset, 11);
 
     // The release completes into stable dim over A and C.
-    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the fade at t=0
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the slot at t=0
     runtime.clock.advance(600);
     runtime.raf.flushNext(runtime.clock.now);
-    assert.equal(runtime.highlights.has("zt-sentence-fade-out"), false);
+    assert.deepEqual(transitionStartOffsets(runtime), []);
     const stableDim = runtime.highlights.get("zt-sentence-dim");
     assert.ok(stableDim);
     assert.equal(stableDim.ranges.length, 2);

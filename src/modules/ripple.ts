@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 涟漪聚焦模块 (Ripple Focus) — v2.5.0 重写 (CSS Custom Highlight API)
  *
  * 效果（DESIGN.md §4.1）：
@@ -17,6 +17,8 @@
  *   原因：span 包裹分裂文本节点，SiYuan 的 input/transaction 处理器在突变后重新查选区时
  *   选区语义改变 → 光标飘走 + 内容丢失。Highlight API 不修改 DOM，彻底消除此冲突。
  *   trade-off：::highlight 不支持 opacity/transition，句级切换用 color + rAF 插值模拟。
+ *   sentence presentation（stable dim + 逐句可中断 transition slot + 单一 rAF driver）
+ *   实现在 ripple/sentenceTransition.ts；本文件只负责把语义目标交给该 engine。
  */
 
 import { getCursorElement } from "../utils/getCursorElement";
@@ -55,31 +57,29 @@ import {
   type TransitionReleaseTimer,
 } from "./ripple/transitionRelease";
 import {
-  diffSentenceSets,
   getSentenceSegmenter,
   resolveActiveSentenceRanges,
-  sameSentenceRange,
-  sameSentenceRangeSet,
   splitSentences,
   type SentenceRange,
 } from "./ripple/sentenceModel";
+import {
+  createSentenceTransitionEngine,
+  parseRgbColor,
+  SENTENCE_DIM_HIGHLIGHT,
+  type Rgba,
+  type SentenceTransitionEngine,
+} from "./ripple/sentenceTransition";
 
 const { BLOCK_LEVELS, SENTENCE_DIM_ALPHA, TRANSITION_SEC, WEIGHT_MIN } = RIPPLE_CONFIG;
 
-/** CSS Custom Highlight API 注册名。 */
-const SENTENCE_DIM_HIGHLIGHT = "zt-sentence-dim";
+/** CSS Custom Highlight API 注册名（句子呈现全部由 sentenceTransition engine 写入）。 */
 const SENTENCE_OUTGOING_DIM_HIGHLIGHT = "zt-sentence-outgoing-dim";
-const SENTENCE_FADE_IN_HIGHLIGHT = "zt-sentence-fade-in";
-const SENTENCE_FADE_OUT_HIGHLIGHT = "zt-sentence-fade-out";
-// 句子聚焦非对称淡变：acquisition 保持 v2.6.3 的 400ms easeInOut 视觉语言
-//（用户实测 240ms ease-out 近似无过渡），release 延长到 600ms 同 easing 慢退场。
-const SENTENCE_FADE_IN_MS = 400;
-const SENTENCE_FADE_OUT_MS = 600;
 // 跨块 handoff 时旧块句级 dim 的静态保留时长：跟随块级 opacity 过渡（TRANSITION_SEC），
 // 目的是盖住 dim -> normal -> dim 亮度峰，与句子淡变时长无关。
 const SENTENCE_OUTGOING_HOLD_MS = Math.round(TRANSITION_SEC * 1000);
 const NESTED_RIPPLE_ENABLED = true;
 const nestedRippleEngine = createNestedRippleEngine();
+const sentenceTransitionEngine: SentenceTransitionEngine = createSentenceTransitionEngine();
 
 // --- State ---
 
@@ -91,7 +91,6 @@ const modifiedBlocks = new Set<HTMLElement>();
 const ownedBlockStyles = new WeakMap<HTMLElement, OwnedInlineStyle>();
 const ownedBlocks = new Set<HTMLElement>();
 const pendingBlockReleases = new Map<HTMLElement, TransitionReleaseTimer>();
-const ownedRootStyles = new Map<string, OwnedInlineStyle>();
 interface StructuralVisualSnapshot {
   source: HTMLElement;
   opacity: string;
@@ -124,9 +123,9 @@ let lastBlockOpacityChildCount: number | null = null;
 let lastBlockOpacitySkipCurrentTopBlock = false;
 let lastAppliedFocusBlockId: string | null = null;
 
-// P1-2: 句级 dim 色 CSS 变量仅在 OFF→ON 或主题切换时设置，避免每帧重写。
-let rippleColorActive = false;
-let lastThemeMode: string | null = null;
+// P1-2: 句级 dim 色 CSS 变量由 sentenceTransition engine 在主题/颜色变化时写入。
+// lastSentenceThemeMode 让主题切换绕过句子 short-circuit，强制 engine 重算颜色。
+let lastSentenceThemeMode: string | null = null;
 
 // --- Block helpers ---
 
@@ -362,7 +361,6 @@ export function isSameBlockOpacityCacheTarget(
 
 type TextNodeEntry = { node: Text; start: number; len: number };
 type TextNodeSnapshotEntry = { node: Text; len: number };
-type Rgba = { r: number; g: number; b: number; a: number };
 
 /** Single forward TreeWalker pass — collects all text nodes with cumulative offsets. */
 function buildTextNodeMap(root: HTMLElement): TextNodeEntry[] {
@@ -395,27 +393,7 @@ function textNodeMapMatchesSnapshot(
   return true;
 }
 
-/** Resolve a global char offset to a Text node + local offset via binary search on the map. */
-function resolveTextNodeAt(map: TextNodeEntry[], charOffset: number): { node: Text; localOffset: number } | null {
-  const n = map.length;
-  if (n === 0) return null;
-  const last = map[n - 1];
-  const total = last.start + last.len;
-  if (charOffset >= total) {
-    return charOffset === total ? { node: last.node, localOffset: last.len } : null;
-  }
-  let lo = 0;
-  let hi = n - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (map[mid].start + map[mid].len > charOffset) hi = mid;
-    else lo = mid + 1;
-  }
-  const e = map[lo];
-  return { node: e.node, localOffset: charOffset - e.start };
-}
-
-/** Get the caret's global character offset within root. Returns null if caret is not within root. */
+/** Resolve the caret's global character offset within root. Returns null if caret is not within root. */
 function getCaretOffset(root: HTMLElement, textNodeMap?: TextNodeEntry[]): number | null {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0) return null;
@@ -432,57 +410,21 @@ function getCaretOffset(root: HTMLElement, textNodeMap?: TextNodeEntry[]): numbe
   return null;
 }
 
-// --- Sentence highlight (CSS Custom Highlight API) ---
+// --- Sentence semantics → presentation engine ---
 
 // Cache for same-sentence short-circuit: selectionchange fires on cursor movement
-// (arrow keys / clicks) without text changes — dim ranges are identical, skip rebuild.
+// (arrow keys / clicks) without text changes — the semantic state is identical,
+// skip rebuild. The engine below owns every CSS.highlights write for sentences.
 let lastDimBlockId: string | null = null;
 let lastDimText = "";
 let lastActiveSentenceRanges: SentenceRange[] = [];
 let lastHadDimRanges = false;
 let lastDimTextNodes: TextNodeSnapshotEntry[] | null = null;
-let lastDimHighlightRanges: Range[] = [];
-let sentenceFadeFrame: number | null = null;
-let sentenceFadeToken = 0;
-let activeSentenceFade: {
-  block: HTMLElement;
-  blockId: string | null;
-  oldRanges: SentenceRange[];
-  newRanges: SentenceRange[];
-  targetRanges: SentenceRange[];
-  totalMs: number;
-} | null = null;
 let outgoingSentenceRanges: Range[] = [];
 let outgoingSentenceCleanupTimer: TransitionReleaseTimer | null = null;
 
 function sentenceHighlightSupported(): boolean {
   return "highlights" in CSS && typeof Highlight !== "undefined";
-}
-
-function rangeFromOffsets(textNodeMap: TextNodeEntry[], start: number, end: number): Range | null {
-  const startLoc = resolveTextNodeAt(textNodeMap, start);
-  const endLoc = resolveTextNodeAt(textNodeMap, end);
-  if (!startLoc || !endLoc) return null;
-
-  try {
-    const range = new Range();
-    range.setStart(startLoc.node, startLoc.localOffset);
-    range.setEnd(endLoc.node, endLoc.localOffset);
-    return range;
-  } catch {
-    return null;
-  }
-}
-
-function setSentenceHighlight(name: string, ranges: Range[]): void {
-  if (ranges.length > 0) {
-    CSS.highlights.set(name, new Highlight(...ranges));
-    if (name === SENTENCE_DIM_HIGHLIGHT) lastDimHighlightRanges = [...ranges];
-    visualStateDirty = true;
-  } else {
-    CSS.highlights.delete(name);
-    if (name === SENTENCE_DIM_HIGHLIGHT) lastDimHighlightRanges = [];
-  }
 }
 
 function clearOutgoingSentenceHighlight(): void {
@@ -501,7 +443,8 @@ function preserveOutgoingSentenceHighlight(): void {
     clearOutgoingSentenceHighlight();
     return;
   }
-  if (lastDimHighlightRanges.length === 0) {
+  const stableRanges = sentenceTransitionEngine.currentStableRanges();
+  if (stableRanges.length === 0) {
     return;
   }
 
@@ -512,7 +455,7 @@ function preserveOutgoingSentenceHighlight(): void {
 
   outgoingSentenceRanges = [
     ...outgoingSentenceRanges,
-    ...lastDimHighlightRanges,
+    ...stableRanges,
   ];
   CSS.highlights.set(
     SENTENCE_OUTGOING_DIM_HIGHLIGHT,
@@ -528,68 +471,13 @@ function preserveOutgoingSentenceHighlight(): void {
   }, SENTENCE_OUTGOING_HOLD_MS);
 }
 
-function buildDimRanges(
-  sentenceRanges: SentenceRange[],
-  textNodeMap: TextNodeEntry[],
-  excludedRanges: SentenceRange[],
-): Range[] {
-  const dimRanges: Range[] = [];
-  for (const sentenceRange of sentenceRanges) {
-    if (excludedRanges.some((excluded) => sentenceRange.start === excluded.start)) continue;
-    const range = rangeFromOffsets(textNodeMap, sentenceRange.start, sentenceRange.end);
-    if (range) dimRanges.push(range);
-  }
-  return dimRanges;
-}
-
 function resetSentenceCache(): void {
   lastDimBlockId = null;
   lastDimText = "";
   lastActiveSentenceRanges = [];
   lastHadDimRanges = false;
   lastDimTextNodes = null;
-  lastDimHighlightRanges = [];
-}
-
-function cancelSentenceFade(): void {
-  sentenceFadeToken += 1;
-  activeSentenceFade = null;
-  if (sentenceFadeFrame !== null) {
-    cancelAnimationFrame(sentenceFadeFrame);
-    sentenceFadeFrame = null;
-  }
-  if (sentenceHighlightSupported()) {
-    CSS.highlights.delete(SENTENCE_FADE_IN_HIGHLIGHT);
-    CSS.highlights.delete(SENTENCE_FADE_OUT_HIGHLIGHT);
-  }
-}
-
-function colorToCss(color: Rgba): string {
-  return `rgba(${Math.round(color.r)},${Math.round(color.g)},${Math.round(color.b)},${Math.max(0, Math.min(1, color.a))})`;
-}
-
-function mixColor(from: Rgba, to: Rgba, t: number): Rgba {
-  return {
-    r: from.r + (to.r - from.r) * t,
-    g: from.g + (to.g - from.g) * t,
-    b: from.b + (to.b - from.b) * t,
-    a: from.a + (to.a - from.a) * t,
-  };
-}
-
-function easeInOutCubic(t: number): number {
-  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-}
-
-function parseRgbColor(value: string): Rgba | null {
-  const match = value.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)$/);
-  if (!match) return null;
-  return {
-    r: Number(match[1]),
-    g: Number(match[2]),
-    b: Number(match[3]),
-    a: match[4] === undefined ? 1 : Number(match[4]),
-  };
+  lastSentenceThemeMode = null;
 }
 
 function getThemeDimColor(): Rgba {
@@ -603,180 +491,6 @@ function getBlockTextColor(block: HTMLElement): Rgba {
   if (parsed) return parsed;
   const fallback = document.documentElement.getAttribute("data-theme-mode") === "dark" ? 255 : 0;
   return { r: fallback, g: fallback, b: fallback, a: 1 };
-}
-
-function applyStableSentenceHighlight(block: HTMLElement): void {
-  const text = block.textContent ?? "";
-  if (!text) {
-    setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, []);
-    resetSentenceCache();
-    return;
-  }
-
-  const textNodeMap = buildTextNodeMap(block);
-  const caretOffset = getCaretOffset(block, textNodeMap);
-  if (caretOffset === null) {
-    setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, []);
-    resetSentenceCache();
-    return;
-  }
-
-  const sentenceRanges = splitSentences(text);
-  const activeRanges = resolveActiveSentenceRanges(sentenceRanges, caretOffset, text.length);
-  const dimRanges = buildDimRanges(sentenceRanges, textNodeMap, activeRanges);
-  setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, dimRanges);
-
-  lastDimBlockId = block.dataset?.nodeId ?? null;
-  lastDimText = text;
-  lastActiveSentenceRanges = activeRanges;
-  lastHadDimRanges = dimRanges.length > 0;
-  lastDimTextNodes = snapshotTextNodeMap(textNodeMap);
-}
-
-/** 把缓存中的 range 按当前切句结果重锚定（start 相同才算命中），失败返回 null。 */
-function snapSentenceRanges(
-  sentenceRanges: SentenceRange[],
-  sources: SentenceRange[],
-): SentenceRange[] | null {
-  const snapped: SentenceRange[] = [];
-  for (const source of sources) {
-    const match = sentenceRanges.find((range) => range.start === source.start);
-    if (!match) return null;
-    snapped.push(match);
-  }
-  return snapped;
-}
-
-function buildFadeRanges(textNodeMap: TextNodeEntry[], ranges: SentenceRange[]): Range[] | null {
-  const resolved: Range[] = [];
-  for (const range of ranges) {
-    const fadeRange = rangeFromOffsets(textNodeMap, range.start, range.end);
-    if (!fadeRange) return null;
-    resolved.push(fadeRange);
-  }
-  return resolved;
-}
-
-function refreshSentenceFadeRanges(
-  textNodeMap: TextNodeEntry[],
-  sentenceRanges: SentenceRange[],
-  oldRanges: SentenceRange[],
-  newRanges: SentenceRange[],
-): { oldRanges: SentenceRange[]; newRanges: SentenceRange[] } | null {
-  const fadeOutSource = snapSentenceRanges(sentenceRanges, oldRanges);
-  const fadeInSource = snapSentenceRanges(sentenceRanges, newRanges);
-  if (!fadeOutSource || !fadeInSource) return null;
-  const fadeOutRanges = buildFadeRanges(textNodeMap, fadeOutSource);
-  const fadeInRanges = buildFadeRanges(textNodeMap, fadeInSource);
-  if (!fadeOutRanges || !fadeInRanges) return null;
-
-  setSentenceHighlight(SENTENCE_FADE_OUT_HIGHLIGHT, fadeOutRanges);
-  setSentenceHighlight(SENTENCE_FADE_IN_HIGHLIGHT, fadeInRanges);
-  return { oldRanges: fadeOutSource, newRanges: fadeInSource };
-}
-
-function startSentenceFade(
-  block: HTMLElement,
-  textNodeMap: TextNodeEntry[],
-  sentenceRanges: SentenceRange[],
-  leavingRanges: SentenceRange[],
-  enteringRanges: SentenceRange[],
-  targetRanges: SentenceRange[],
-): boolean {
-  cancelSentenceFade();
-
-  if (SENTENCE_FADE_IN_MS <= 0 || SENTENCE_FADE_OUT_MS <= 0 || prefersReducedMotion()) return false;
-
-  const fadeOutSource = snapSentenceRanges(sentenceRanges, leavingRanges);
-  const fadeInSource = snapSentenceRanges(sentenceRanges, enteringRanges);
-  if (!fadeOutSource || !fadeInSource) return false;
-  const fadeOutRanges = buildFadeRanges(textNodeMap, fadeOutSource);
-  const fadeInRanges = buildFadeRanges(textNodeMap, fadeInSource);
-  if (!fadeOutRanges || !fadeInRanges) return false;
-
-  // 非对称时间线：rAF 生命周期只跑到实际参与方向的最大时长。双向切换时
-  // fade-in 先在 240ms 收敛为清晰色，fade-out 继续走到 600ms 才 cleanup。
-  const totalMs = Math.max(
-    fadeOutRanges.length > 0 ? SENTENCE_FADE_OUT_MS : 0,
-    fadeInRanges.length > 0 ? SENTENCE_FADE_IN_MS : 0,
-  );
-  if (totalMs <= 0) return false;
-
-  const token = sentenceFadeToken;
-  // Timeline 只用 rAF timestamp：首帧把起点锚在当前帧时间上（elapsed = 0），
-  // 不与 performance.now() 混用——后者与 vsync 对齐的帧时间存在偏移，
-  // 会让首帧直接推进（同 Typewriter scroll 121bb42 的 first-frame jump 教训）。
-  let startTime: number | null = null;
-  const blockId = block.dataset?.nodeId ?? null;
-  const textColor = getBlockTextColor(block);
-  const dimColor = getThemeDimColor();
-  setOwnedRootStyle("--zt-sentence-fade-out-color", colorToCss(textColor));
-  setOwnedRootStyle("--zt-sentence-fade-in-color", colorToCss(dimColor));
-  visualStateDirty = true;
-
-  setSentenceHighlight(SENTENCE_FADE_OUT_HIGHLIGHT, fadeOutRanges);
-  setSentenceHighlight(SENTENCE_FADE_IN_HIGHLIGHT, fadeInRanges);
-  activeSentenceFade = {
-    block,
-    blockId,
-    oldRanges: fadeOutSource,
-    newRanges: fadeInSource,
-    targetRanges: [...targetRanges],
-    totalMs,
-  };
-
-  const finish = () => {
-    if (token !== sentenceFadeToken) return;
-    sentenceFadeFrame = null;
-    const finishedFade = activeSentenceFade;
-    activeSentenceFade = null;
-    CSS.highlights.delete(SENTENCE_FADE_OUT_HIGHLIGHT);
-    CSS.highlights.delete(SENTENCE_FADE_IN_HIGHLIGHT);
-
-    if (active && finishedFade) {
-      const currentBlock = getCurrentBlock();
-      if (
-        currentBlock &&
-        currentBlock.isConnected &&
-        currentBlock.dataset?.nodeId === finishedFade.blockId
-      ) {
-        applyStableSentenceHighlight(currentBlock);
-      }
-    }
-  };
-
-  const step = (now: number) => {
-    if (token !== sentenceFadeToken) return;
-
-    if (startTime === null) startTime = now;
-    const elapsed = now - startTime;
-    const fadeState = activeSentenceFade;
-    if (!fadeState) return;
-    if (fadeState.oldRanges.length > 0) {
-      const rawOut = Math.min(1, elapsed / SENTENCE_FADE_OUT_MS);
-      setOwnedRootStyle(
-        "--zt-sentence-fade-out-color",
-        colorToCss(mixColor(textColor, dimColor, easeInOutCubic(rawOut))),
-      );
-    }
-    if (fadeState.newRanges.length > 0) {
-      const rawIn = Math.min(1, elapsed / SENTENCE_FADE_IN_MS);
-      setOwnedRootStyle(
-        "--zt-sentence-fade-in-color",
-        colorToCss(mixColor(dimColor, textColor, easeInOutCubic(rawIn))),
-      );
-    }
-
-    if (elapsed < fadeState.totalMs) {
-      sentenceFadeFrame = requestAnimationFrame(step);
-      return;
-    }
-
-    finish();
-  };
-
-  sentenceFadeFrame = requestAnimationFrame(step);
-  return true;
 }
 
 /**
@@ -801,25 +515,24 @@ function caretReproducesActiveSet(
 }
 
 /**
- * Apply sentence-level dimming via CSS Custom Highlight API.
- * Zero DOM mutation — builds Range objects on existing text nodes and registers
- * them in CSS.highlights. SiYuan's input/transaction handlers are unaffected.
+ * Route the current block's sentence semantics into the sentence transition
+ * engine, which owns the whole sentence presentation (stable dim channel,
+ * per-sentence transition slots, single rAF driver). Zero DOM mutation here:
+ * only Range registration happens, inside the engine, on existing text nodes.
  */
 function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNodeMap: TextNodeEntry[]): void {
   if (!sentenceHighlightSupported()) return; // CSS Custom Highlight API not supported
 
   if (getSentenceSegmenter() === null) {
     // Intl.Segmenter 不可用：句子聚焦整体禁用（无 regex fallback），块级 Ripple 不受影响。
-    cancelSentenceFade();
-    setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, []);
+    sentenceTransitionEngine.clear();
     resetSentenceCache();
     return;
   }
 
   const text = block.textContent ?? "";
   if (!text) {
-    cancelSentenceFade();
-    setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, []);
+    sentenceTransitionEngine.clear();
     resetSentenceCache();
     return;
   }
@@ -827,17 +540,17 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
   const blockId = block.dataset?.nodeId ?? null;
   if (lastDimBlockId !== null && blockId !== lastDimBlockId) {
     // Keep the previous block's dimmed sentences visible while its block
-    // opacity transitions to the new structural target. Replacing the single
-    // current highlight first would create a visible dim -> normal -> dim peak.
+    // opacity transitions to the new structural target. The stable ranges are
+    // snapshotted before the engine rebuilds state for the new block.
     preserveOutgoingSentenceHighlight();
   }
   const textNodesUnchanged = textNodeMapMatchesSnapshot(textNodeMap, lastDimTextNodes);
+  const themeMode = document.documentElement.getAttribute("data-theme-mode");
 
-  // Short-circuit: the caret still resolves to the cached active sentence set of
-  // the same block (no text change) — dim ranges are identical, skip rebuild.
-  // has() catches external Highlight clears (clearAll / destroyRipple); the text
-  // node snapshot catches SiYuan block re-renders that keep textContent unchanged
-  // but replace later Text nodes.
+  // Short-circuit: same block, same text, caret still resolving to the cached
+  // active set, same text nodes and same theme — nothing changed, skip. The
+  // has() catch guards external Highlight clears; the text node snapshot
+  // catches SiYuan re-renders that replace Text nodes without changing text.
   if (
     blockId !== null &&
     blockId === lastDimBlockId &&
@@ -845,153 +558,32 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
     lastActiveSentenceRanges.length > 0 &&
     textNodesUnchanged &&
     caretReproducesActiveSet(caretOffset, lastActiveSentenceRanges, text.length) &&
+    themeMode === lastSentenceThemeMode &&
     (!lastHadDimRanges || CSS.highlights.has(SENTENCE_DIM_HIGHLIGHT))
   ) {
     return;
   }
 
   const matches = splitSentences(text);
-
-  // Active sentence 是集合：句内 1 项；caret 精确落在相邻两句的公共边界时 2 项。
   const activeRanges = resolveActiveSentenceRanges(matches, caretOffset, text.length);
-  const previousRanges = lastActiveSentenceRanges;
 
-  // 文本编辑移动句子 end 但句子本身延续：把 previous active set 按 start
-  // 重锚定到当前 Segmenter geometry，让"同一句"不变成 leave+enter 硬切。
-  // 任一 start 消失（如删除句号造成真 merge）则放弃 rebase——本次不猜，
-  // 直接走稳定重建，不动画。
-  let diffPrevious = previousRanges;
-  if (text !== lastDimText && previousRanges.length > 0) {
-    const rebased: SentenceRange[] = [];
-    let rebaseOk = true;
-    for (const old of previousRanges) {
-      const current = matches.find((match) => match.start === old.start);
-      if (!current) {
-        rebaseOk = false;
-        break;
-      }
-      rebased.push(current);
-    }
-    if (rebaseOk) diffPrevious = rebased;
-  }
+  sentenceTransitionEngine.update({
+    blockKey: blockId,
+    sentenceRanges: matches,
+    activeRanges,
+    textChanged: text !== lastDimText,
+    textNodeMap,
+    textColor: getBlockTextColor(block),
+    dimColor: getThemeDimColor(),
+    animate: !prefersReducedMotion(),
+  });
 
-  // Keep an in-flight fade alive while ordinary text edits only move the
-  // target sentence's end boundary. Rebase the fade target to the current
-  // Segmenter geometry by the same stable start anchor used above for the
-  // semantic diff; refreshSentenceFadeRanges() then retargets the Highlight
-  // ranges without restarting the existing fade timeline.
-  // The fade target is the complete active set, not merely the entering
-  // highlight ranges. Rebase it by sentence start when text edits move ends.
-  let fadeTargetRanges = activeSentenceFade?.targetRanges ?? [];
-  let fadeTargetRebaseOk = true;
-  if (text !== lastDimText && activeSentenceFade !== null) {
-    const rebasedFadeTarget: SentenceRange[] = [];
-    for (const old of activeSentenceFade.targetRanges) {
-      const current = matches.find((match) => match.start === old.start);
-      if (!current) {
-        fadeTargetRebaseOk = false;
-        break;
-      }
-      rebasedFadeTarget.push(current);
-    }
-    if (fadeTargetRebaseOk) fadeTargetRanges = rebasedFadeTarget;
-  }
-
-  const targetMatchesActive = sameSentenceRangeSet(activeRanges, fadeTargetRanges);
-  const targetOverlapsActive = fadeTargetRanges.some((target) =>
-    activeRanges.some((current) => current.start === target.start),
-  );
-  const boundaryContinuation =
-    fadeTargetRebaseOk &&
-    targetOverlapsActive &&
-    (activeRanges.length === 2 || fadeTargetRanges.length === 2);
-
-  let continuingFade =
-    activeSentenceFade !== null &&
-    blockId === activeSentenceFade.blockId &&
-    fadeTargetRebaseOk &&
-    (targetMatchesActive || boundaryContinuation);
-
-  const { leaving, entering } = diffSentenceSets(diffPrevious, activeRanges);
-  const canAnimate =
-    !prefersReducedMotion() &&
-    SENTENCE_FADE_IN_MS > 0 &&
-    SENTENCE_FADE_OUT_MS > 0 &&
-    blockId !== null &&
-    blockId === lastDimBlockId &&
-    previousRanges.length > 0 &&
-    (leaving.length > 0 || entering.length > 0) &&
-    // 只有 leaving range 在当前切句结果中原样存在（start/end 全等）才可动画：
-    // 文本编辑导致的边界位移只做 dim 重建，不产生 fade（也不产生多余 rAF）。
-    leaving.every((range) => matches.some((match) => sameSentenceRange(match, range)));
-
-  if (continuingFade && activeSentenceFade !== null) {
-    let nextOldRanges = [...activeSentenceFade.oldRanges];
-    let nextNewRanges = [...activeSentenceFade.newRanges];
-
-    if (canAnimate) {
-      for (const range of leaving) {
-        nextNewRanges = nextNewRanges.filter((current) => current.start !== range.start);
-        if (!nextOldRanges.some((current) => current.start === range.start)) nextOldRanges.push(range);
-      }
-      for (const range of entering) {
-        nextOldRanges = nextOldRanges.filter((current) => current.start !== range.start);
-        if (!nextNewRanges.some((current) => current.start === range.start)) nextNewRanges.push(range);
-      }
-    }
-
-    const refreshed = refreshSentenceFadeRanges(
-      textNodeMap,
-      matches,
-      nextOldRanges,
-      nextNewRanges,
-    );
-    if (refreshed) {
-      activeSentenceFade.block = block;
-      activeSentenceFade.oldRanges = refreshed.oldRanges;
-      activeSentenceFade.newRanges = refreshed.newRanges;
-      activeSentenceFade.targetRanges = [...activeRanges];
-      if (refreshed.oldRanges.length > 0) {
-        activeSentenceFade.totalMs = Math.max(activeSentenceFade.totalMs, SENTENCE_FADE_OUT_MS);
-      }
-      if (refreshed.newRanges.length > 0) {
-        activeSentenceFade.totalMs = Math.max(activeSentenceFade.totalMs, SENTENCE_FADE_IN_MS);
-      }
-    } else {
-      continuingFade = false;
-    }
-  }
-
-  let excludedRanges: SentenceRange[] = [];
-  if (continuingFade && activeSentenceFade !== null) {
-    excludedRanges = [...activeSentenceFade.oldRanges, ...activeRanges];
-  } else if (canAnimate) {
-    // fade 期间 leaving 由 fade-out highlight 负责呈现，二者都不进静态 dim。
-    excludedRanges = [...previousRanges, ...activeRanges];
-  } else {
-    excludedRanges = activeRanges;
-  }
-
-  const dimRanges = buildDimRanges(matches, textNodeMap, excludedRanges);
-  setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, dimRanges);
-
-  // Update cache
   lastDimBlockId = blockId;
   lastDimText = text;
   lastActiveSentenceRanges = activeRanges;
-  lastHadDimRanges = dimRanges.length > 0;
+  lastHadDimRanges = sentenceTransitionEngine.hasStableDimRanges();
   lastDimTextNodes = snapshotTextNodeMap(textNodeMap);
-
-  if (!continuingFade && canAnimate) {
-    const started = startSentenceFade(block, textNodeMap, matches, leaving, entering, activeRanges);
-    if (!started) {
-      const fallbackRanges = buildDimRanges(matches, textNodeMap, activeRanges);
-      setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, fallbackRanges);
-      lastHadDimRanges = fallbackRanges.length > 0;
-    }
-  } else if (!continuingFade) {
-    cancelSentenceFade();
-  }
+  lastSentenceThemeMode = themeMode;
 }
 
 function refreshSentenceHighlightOnly(): void {
@@ -1186,19 +778,6 @@ function applyRippleNow(): void {
 
   bindMutationObserver(currentBlock, container);
 
-  // 句级 dim color：仅在 OFF→ON 或主题切换时设 CSS 变量（避免每帧重写）。
-  const themeMode = document.documentElement.getAttribute("data-theme-mode");
-  if (!rippleColorActive || themeMode !== lastThemeMode) {
-    const dimRgb = themeMode === "dark" ? "255,255,255" : "0,0,0";
-    setOwnedRootStyle(
-      "--zt-sentence-dim-color",
-      `rgba(${dimRgb},${SENTENCE_DIM_ALPHA})`,
-    );
-    visualStateDirty = true;
-    rippleColorActive = true;
-    lastThemeMode = themeMode;
-  }
-
   const nestedApplied = NESTED_RIPPLE_ENABLED
     ? nestedRippleEngine.apply(container, currentBlock, {
       preserveOnInvalid: false,
@@ -1213,8 +792,7 @@ function applyRippleNow(): void {
   if (caretOffset !== null) {
     applySentenceHighlight(currentBlock, caretOffset, textNodeMap);
   } else if (sentenceHighlightSupported()) {
-    cancelSentenceFade();
-    setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, []);
+    sentenceTransitionEngine.clear();
     resetSentenceCache();
   }
 
@@ -1258,11 +836,10 @@ function bindThemeObserver(): void {
   const root = document.documentElement;
   if (!root) return;
   themeObserver = new MutationObserver(() => {
-    // Theme changes must refresh sentence variables even when no input or
-    // selection event follows. The next scheduled action reads the new mode.
-    lastThemeMode = null;
-    rippleColorActive = false;
-    visualStateDirty = true;
+    // Theme changes must refresh sentence colors even when no input or
+    // selection event follows. Clearing lastSentenceThemeMode makes the next
+    // apply bypass the sentence short-circuit and re-sync engine colors.
+    lastSentenceThemeMode = null;
     if (active) applyRipple();
   });
   themeObserver.observe(root, {
@@ -1417,39 +994,24 @@ function onDomMutation(records: MutationRecord[]): void {
   scheduleMutationRefresh();
 }
 
-function setOwnedRootStyle(property: string, value: string): void {
-  const rootStyle = document.documentElement.style;
-  let owned = ownedRootStyles.get(property);
-  if (!owned) {
-    owned = claimInlineStyle(rootStyle, [property]);
-    ownedRootStyles.set(property, owned);
-  }
-  setOwnedInlineStyle(rootStyle, owned, property, value);
-}
-
 function clearAll(): void {
   disconnectMutationObserver();
   clearStructuralVisualState();
   nestedRippleEngine.clear();
   clearLegacyBlockOpacity();
+  const sentenceStateActive = sentenceTransitionEngine.hasActiveVisualState();
+  sentenceTransitionEngine.clear();
   if (
+    !sentenceStateActive &&
     !visualStateDirty &&
     ownedBlocks.size === 0 &&
-    ownedRootStyles.size === 0 &&
     outgoingSentenceRanges.length === 0 &&
     outgoingSentenceCleanupTimer === null
   ) return;
 
-  cancelSentenceFade();
-  setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, []);
   clearOutgoingSentenceHighlight();
-  for (const [property, owned] of ownedRootStyles) {
-    restoreOwnedInlineStyle(document.documentElement.style, owned);
-    ownedRootStyles.delete(property);
-  }
   resetSentenceCache();
   lastAppliedFocusBlockId = null;
-  rippleColorActive = false;
   visualStateDirty = false;
 }
 
