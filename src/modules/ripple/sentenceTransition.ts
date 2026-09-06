@@ -23,7 +23,10 @@
  * Sentence identity is deliberately simple (see ripple.ts docs):
  *   - no text change            → same geometry, same sentence keys;
  *   - text change, stable count → ordinal rebind keeps continuity;
- *   - count change (topology)   → settle to the final semantic state.
+ *   - count change (topology)   → identity by start anchor. In-flight slots
+ *     survive rebind (a running release never snaps), release/acquire between
+ *     persisted sentences keep animating, and typed or merged content snaps
+ *     bright — typing never dims what the user just wrote.
  */
 
 import {
@@ -215,29 +218,6 @@ export function createSentenceTransitionCore(
     return ordinals;
   }
 
-  function freeIndex(): number {
-    for (let index = 0; index < slotCount; index++) {
-      if (!slots.some((slot) => slot.index === index)) return index;
-    }
-    return -1;
-  }
-
-  /** Rebuild the stable dim set from scratch for the given geometry:
-   *  dim sentences that are not currently covered by an in-flight slot. */
-  function rebuildStable(
-    sentenceRanges: readonly SentenceRange[],
-    targetOf: (ordinal: number) => SentencePresentationTarget,
-    inFlight: (ordinal: number) => boolean,
-  ): SentenceRange[] {
-    const result: SentenceRange[] = [];
-    for (let index = 0; index < sentenceRanges.length; index++) {
-      if (targetOf(index) === "dim" && !inFlight(index)) {
-        result.push(sentenceRanges[index]);
-      }
-    }
-    return result;
-  }
-
   function settleUpdate(
     sentenceRanges: readonly SentenceRange[],
     newActiveKeys: Set<string>,
@@ -258,79 +238,169 @@ export function createSentenceTransitionCore(
     };
   }
 
-  function reconcileUpdate(
+  /**
+   * Reconcile the presentation against a new geometry. Identity across the
+   * change is ordinal when the sentence count is stable, otherwise by start
+   * anchor (a sentence persists while its first code unit stays put).
+   *
+   * Existing in-flight slots are kept and rebound whenever their sentence
+   * persists, so a running release never snaps to full dim on a later edit.
+   * A dim -> text ramp only starts when a persisting dim sentence becomes
+   * active without its own content changing (caret / boundary movement,
+   * backspace merges); text that was just typed or merged into the active
+   * sentence snaps bright — typing never dims what the user just wrote.
+   */
+  function remapUpdate(
     sentenceRanges: readonly SentenceRange[],
     newActiveKeys: Set<string>,
+    useStartIdentity: boolean,
   ): SentenceTransitionUpdateResult {
-    const targetOf = (ordinal: number): SentencePresentationTarget =>
-      newActiveKeys.has(keyOf(ordinal)) ? "active" : "dim";
+    const prevGeometry = geometry;
+    const prevActive = activeKeys;
+    const count = sentenceRanges.length;
 
-    const inFlight = (ordinal: number): boolean =>
-      slots.some((slot) => slot.key === keyOf(ordinal));
+    // identity[index] = previous ordinal this sentence continues, or -1 if it
+    // is newborn (its start anchor did not exist in the previous geometry).
+    const identity = new Array<number>(count).fill(-1);
+    if (useStartIdentity) {
+      const byStart = new Map<number, number>();
+      prevGeometry.forEach((range, index) => byStart.set(range.start, index));
+      sentenceRanges.forEach((range, index) => {
+        const prevIndex = byStart.get(range.start);
+        if (prevIndex !== undefined) identity[index] = prevIndex;
+      });
+    } else {
+      const limit = Math.min(count, prevGeometry.length);
+      for (let index = 0; index < limit; index++) identity[index] = index;
+    }
 
-    for (let index = 0; index < sentenceRanges.length; index++) {
+    const prevOrdinalToNew = new Map<number, number>();
+    sentenceRanges.forEach((_, index) => {
+      const prevOrdinal = identity[index];
+      if (prevOrdinal !== -1 && !prevOrdinalToNew.has(prevOrdinal)) {
+        prevOrdinalToNew.set(prevOrdinal, index);
+      }
+    });
+
+    // Keep in-flight slots whose sentence persisted; drop the vanished ones.
+    const kept = new Array<SentenceTransitionSlot | null>(count).fill(null);
+    for (const slot of slots) {
+      const prevOrdinal = ordinalOfKey(slot.key);
+      const newIndex = prevOrdinal === null ? undefined : prevOrdinalToNew.get(prevOrdinal);
+      if (newIndex === undefined) continue;
+      const key = keyOf(newIndex);
+      const target = newActiveKeys.has(key) ? "active" : "dim";
+      slot.key = key;
+      slot.range = sentenceRanges[newIndex];
+      if (slot.target !== target) {
+        // Retarget: resume from the last rendered color with a fresh,
+        // frame-anchored timeline. Never restart from an endpoint, never
+        // inherit the old start time.
+        slot.from = slot.current;
+        slot.target = target;
+        slot.to = targetColor(target);
+        slot.duration = durationFor(target);
+        slot.startTime = null;
+      }
+      kept[newIndex] = slot;
+    }
+
+    const usedIndexes = new Set<number>();
+    for (const slot of kept) {
+      if (slot !== null) usedIndexes.add(slot.index);
+    }
+    const created: SentenceTransitionSlot[] = [];
+
+    for (let index = 0; index < count; index++) {
+      if (kept[index] !== null) continue;
+      const prevOrdinal = identity[index];
       const key = keyOf(index);
-      const target = targetOf(index);
-      const wasActive = activeKeys.has(key);
-      const slot = slots.find((candidate) => candidate.key === key);
+      const target = newActiveKeys.has(key) ? "active" : "dim";
+      const wasActive = prevOrdinal !== -1 && prevActive.has(keyOf(prevOrdinal));
+      const prevRange = prevOrdinal === -1 ? null : prevGeometry[prevOrdinal];
 
-      if (slot) {
-        slot.range = sentenceRanges[index];
-        if (slot.target !== target) {
-          // Retarget: resume from the last rendered color with a fresh,
-          // frame-anchored timeline. Never restart from an endpoint, never
-          // inherit the old start time.
-          slot.from = slot.current;
-          slot.target = target;
-          slot.to = targetColor(target);
-          slot.duration = durationFor(target);
-          slot.startTime = null;
+      if (target === "dim") {
+        // Bright -> dim: a persisted active sentence left the active set.
+        if (wasActive) {
+          const slotIndex = nextFreeIndex(usedIndexes);
+          if (slotIndex !== -1) {
+            usedIndexes.add(slotIndex);
+            created.push({
+              index: slotIndex,
+              key,
+              range: sentenceRanges[index],
+              target: "dim",
+              from: textColor,
+              to: dimColor,
+              current: textColor,
+              duration: releaseMs,
+              startTime: null,
+            });
+          }
         }
         continue;
       }
 
-      const isActive = target === "active";
-      if (wasActive !== isActive) {
-        // Target flip from a settled state: start a slot from the settled
-        // endpoint color (text color if it was active, dim if it was dim).
-        const slotIndex = freeIndex();
+      // target === "active": only start a dim -> text ramp when a persisting
+      // dim sentence became active with unchanged content. Newborns and
+      // content that grew/changed while being typed or merged snap bright.
+      if (
+        !wasActive &&
+        prevRange !== null &&
+        sameRange(prevRange, sentenceRanges[index])
+      ) {
+        const slotIndex = nextFreeIndex(usedIndexes);
         if (slotIndex !== -1) {
-          const from = wasActive ? textColor : dimColor;
-          slots.push({
+          usedIndexes.add(slotIndex);
+          created.push({
             index: slotIndex,
             key,
             range: sentenceRanges[index],
-            target,
-            from,
-            to: targetColor(target),
-            current: from,
-            duration: durationFor(target),
+            target: "active",
+            from: dimColor,
+            to: textColor,
+            current: dimColor,
+            duration: acquireMs,
             startTime: null,
           });
         }
       }
     }
 
-    // Defensive: drop slots whose sentence no longer exists (geometry shrank
-    // without a topology flag reaching us).
-    const liveKeys = new Set<string>();
-    for (let index = 0; index < sentenceRanges.length; index++) {
-      liveKeys.add(keyOf(index));
-    }
-    if (slots.some((slot) => !liveKeys.has(slot.key))) {
-      slots = slots.filter((slot) => liveKeys.has(slot.key));
+    const nextSlots = kept
+      .filter((slot): slot is SentenceTransitionSlot => slot !== null)
+      .concat(created);
+    slots = nextSlots;
+
+    stable = [];
+    const inFlightKeys = new Set<string>();
+    for (const slot of slots) inFlightKeys.add(slot.key);
+    for (let index = 0; index < count; index++) {
+      const key = keyOf(index);
+      if (newActiveKeys.has(key) || inFlightKeys.has(key)) continue;
+      stable.push(sentenceRanges[index]);
     }
 
-    stable = rebuildStable(sentenceRanges, targetOf, inFlight);
     activeKeys = newActiveKeys;
     geometry = [...sentenceRanges];
     ready = true;
     return {
-      settled: false,
+      settled: slots.length === 0,
       anyTransition: slots.length > 0,
       slots: [...slots],
       stableRanges: [...stable],
     };
+  }
+
+  function sameRange(a: SentenceRange, b: SentenceRange): boolean {
+    return a.start === b.start && a.end === b.end;
+  }
+
+  function nextFreeIndex(used: Set<number>): number {
+    for (let index = 0; index < slotCount; index++) {
+      if (!used.has(index)) return index;
+    }
+    return -1;
   }
 
   function update(input: SentenceTransitionUpdate): SentenceTransitionUpdateResult {
@@ -359,21 +429,24 @@ export function createSentenceTransitionCore(
 
     const newActiveKeys = keysOfGeometry(input.sentenceRanges, input.activeRanges);
 
-    const prevCount = geometry.length;
-    const countStable = prevCount > 0 && prevCount === input.sentenceRanges.length;
-
     if (!input.animate) {
       return settleUpdate(input.sentenceRanges, newActiveKeys);
     }
 
-    // Topology change (sentence count moved while the text changed): settle /
-    // rebuild deterministically. No morph matching; no stale slots.
-    if (input.textChanged && !countStable) {
-      return settleUpdate(input.sentenceRanges, newActiveKeys);
-    }
+    // Ordinal identity when the sentence count is stable, start-anchor
+    // identity when the count moved (topology change).
+    const prevCount = geometry.length;
+    const countStable = prevCount > 0 && prevCount === input.sentenceRanges.length;
+    return remapUpdate(
+      input.sentenceRanges,
+      newActiveKeys,
+      input.textChanged && !countStable,
+    );
+  }
 
-    // Same geometry, or ordinal-stable text change: reconcile per sentence.
-    return reconcileUpdate(input.sentenceRanges, newActiveKeys);
+  function ordinalOfKey(key: string): number | null {
+    const parsed = /^o:(\d+)$/.exec(key);
+    return parsed ? Number(parsed[1]) : null;
   }
 
   function keysOfGeometry(

@@ -284,13 +284,13 @@ test("earlier-text offset shift keeps ordinal continuity (start 5 -> 4)", () => 
     activeRanges: [shifted[1]],
     textChanged: true,
   });
-  assert.equal(result.settled, false);
   assert.equal(result.slots.length, 0); // target unchanged, no transition
   assert.deepEqual(result.stableRanges, [shifted[0]]);
   assert.deepEqual(engine.stableRanges(), [shifted[0]]);
+  assert.equal(engine.hasAnimating(), false);
 });
 
-test("topology change settles deterministically and leaves no stale slots", () => {
+test("a topology merge keeps the persisting sentence's transition and leaves no stale slots", () => {
   const engine = core();
   const before = [range(0, 2), range(2, 4)]; // 甲。 乙。
   update(engine, { sentenceRanges: before, activeRanges: [before[0]] });
@@ -299,19 +299,38 @@ test("topology change settles deterministically and leaves no stale slots", () =
 
   engine.advance(0);
   engine.advance(120);
+  const sampled = engine.slots().find((slot) => slot.range.start === 0)?.current;
 
-  // Delete the 句号: 2 sentences merge into 1 (甲乙). Deterministic settle.
+  // Delete the 句号: 2 sentences merge into 1 (甲乙). The first sentence
+  // persists by its start anchor, so its in-flight release is kept and
+  // retargeted toward active instead of snapping; the vanished second
+  // sentence leaves no stale slot.
   const merged = [range(0, 3)];
   const result = update(engine, {
     sentenceRanges: merged,
     activeRanges: [merged[0]],
     textChanged: true,
   });
-  assert.equal(result.settled, true);
-  assert.equal(result.slots.length, 0); // no stale slots
+  assert.equal(result.slots.length, 1);
+  const kept = slotByRange(result.slots, 0);
+  assert.equal(kept.target, "active");
+  assert.equal(kept.duration, 400);
+  assert.equal(kept.startTime, null);
+  assert.ok(closeColor(kept.from, sampled!), "merge retargets from the sampled color");
+  assert.equal(
+    result.slots.some((slot) => slot.range.start === 2),
+    false,
+    "no stale slot for the merged-away sentence",
+  );
   assert.deepEqual(result.stableRanges, []);
+
+  // The retargeted acquisition completes back to natural text.
+  engine.advance(200);
+  assert.equal(engine.hasAnimating(), true);
+  engine.advance(700);
   assert.equal(engine.hasAnimating(), false);
   assert.equal(engine.hasStable(), false);
+  assert.deepEqual(engine.stableRanges(), []);
 });
 
 test("animate=false (reduced motion) settles to the final semantic state", () => {
@@ -407,6 +426,75 @@ test("block switch settles and a second update can transition within the block",
   });
   assert.equal(moved.slots.length, 2);
   assert.equal(slotByRange(moved.slots, 5).target, "dim");
+});
+
+test("typing past 。 at a block tail releases the finished sentence instead of hard dim", () => {
+  const engine = core();
+  // Cold settle: single sentence "中" [0,1) active.
+  update(engine, { sentenceRanges: [range(0, 1)], activeRanges: [range(0, 1)] });
+  assert.deepEqual(engine.stableRanges(), []);
+
+  // Type 。 + first char of the next sentence: text "中。X", two sentences,
+  // caret inside X. The finished "中。" persists by its start anchor and is no
+  // longer active → it gets a 600ms release slot instead of snapping dim.
+  const grown = [range(0, 2), range(2, 3)];
+  const result = update(engine, {
+    sentenceRanges: grown,
+    activeRanges: [grown[1]],
+    textChanged: true,
+  });
+  assert.equal(result.settled, false);
+  assert.equal(result.slots.length, 1);
+  const rel = slotByRange(result.slots, 0);
+  assert.equal(rel.target, "dim");
+  assert.equal(rel.duration, 600);
+  assert.equal(rel.from.a, TEXT.a); // starts from natural text color
+  assert.equal(rel.startTime, null);
+  assert.deepEqual(result.stableRanges, []); // covered by its release slot
+  assert.equal(result.slots.some((slot) => slot.target === "active"), false); // newborn never acquires
+
+  // The release completes into stable dim on the finished sentence.
+  engine.advance(0);
+  const done = engine.advance(600);
+  assert.equal(done.completed.some((c) => c.target === "dim" && c.range.start === 0), true);
+  assert.equal(engine.hasAnimating(), false);
+  assert.deepEqual(engine.stableRanges(), [grown[0]]);
+});
+
+test("a sentence that becomes active through typing snaps bright (no dim -> text ramp)", () => {
+  const engine = core();
+  update(engine, { sentenceRanges: [range(0, 1)], activeRanges: [range(0, 1)] });
+
+  // Stale-caret frame: text already contains X but the caret still resolves in
+  // the old sentence, so X is settled into stable dim (born dim under the race).
+  const two = [range(0, 2), range(2, 3)];
+  let result = update(engine, {
+    sentenceRanges: two,
+    activeRanges: [two[0]],
+    textChanged: true,
+  });
+  assert.equal(result.settled, true);
+  assert.deepEqual(result.stableRanges, [two[1]]);
+
+  // User keeps typing inside X (textChanged=true): X flips dim -> active on
+  // the same event that typed into it → no acquisition slot, snaps bright.
+  // The old sentence releases normally.
+  const grown = [range(0, 2), range(2, 4)];
+  result = update(engine, {
+    sentenceRanges: grown,
+    activeRanges: [grown[1]],
+    textChanged: true,
+  });
+  assert.equal(result.slots.length, 1);
+  const rel = slotByRange(result.slots, 0);
+  assert.equal(rel.target, "dim");
+  assert.equal(rel.range.start, 0);
+  assert.equal(result.slots.some((slot) => slot.target === "active"), false);
+  assert.equal(
+    result.stableRanges.some((range) => range.start === 2),
+    false,
+    "the typed-into sentence is neither stable-dim nor acquiring",
+  );
 });
 
 test("easing and color mixing helpers behave deterministically", () => {
