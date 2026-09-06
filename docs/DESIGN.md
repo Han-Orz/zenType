@@ -553,7 +553,12 @@ v2.5.0 废弃 span 包裹，改用 [CSS Custom Highlight API](https://developer.
   - 打断 / 反向 = retarget：`from` 取上一帧实际渲染颜色，`startTime` 重新锚定到下一帧——不继承旧 startTime、不从终点重来、不先 settle 再动；
   - 同句连续输入（文本变但句数稳定）：只 rebind 该 slot 的 geometry，timeline 不 restart / 不 cancel / 不重算 from；
   - slot 结束：active 方向直接移除（句子回到自然文字色）；dim 方向把 range 交回 stable `zt-sentence-dim`（在完成的那一帧内加入，无中间帧亮度跳变）。
-- 句 identity 用确定性规则而非永久 tracker：文本未变按 range 值相等；文本变但句数稳定按 ordinal 重绑定（同句延续）；句数变化（增删句号等 topology 变化）→ settle / rebuild 到最终语义状态——不闪、无残留 slot，允许该瞬间没有复杂 transition（有意识边界，非 TODO bug）。
+- 句 identity 用确定性规则而非永久 tracker：文本未变按 range 值相等；文本变但句数稳定按 ordinal 重绑定（同句延续）；句数变化（增删句号等 topology 变化）按 **start anchor** 判定延续：
+  - 仍在途的 slot 只要句子按 start 延续就**保留并 rebind 几何**（release 不被后续编辑打断到终点）；
+  - 持续存在、但离开/回到 active 集的句子继续走 600ms release / 400ms acquire（退格合并把原句带回当前句也有渐亮）；
+  - 只有真正被合并 / 删除（start 消失）的内容才瞬时落定；
+  - 被输入或合并**增长**的内容直接呈现亮色——打字永不把刚写出的字染暗再渐亮；
+  - dim→text 的 acquire 仅在句子自身内容未变（纯焦点/边界移动）时启动。
 - dual-focus（{A,B}）只是 semantic target：A/B 各自独立 retarget，不是动画 special case。
 
 ```typescript
