@@ -868,10 +868,30 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
     if (rebaseOk) diffPrevious = rebased;
   }
 
+  // Keep an in-flight fade alive while ordinary text edits only move the
+  // target sentence's end boundary. Rebase the fade target to the current
+  // Segmenter geometry by the same stable start anchor used above for the
+  // semantic diff; refreshSentenceFadeRanges() then retargets the Highlight
+  // ranges without restarting the existing fade timeline.
+  let fadeTargetRanges = activeSentenceFade?.newRanges ?? [];
+  if (text !== lastDimText && activeSentenceFade !== null) {
+    const rebasedFadeTarget: SentenceRange[] = [];
+    let fadeTargetRebaseOk = true;
+    for (const old of activeSentenceFade.newRanges) {
+      const current = matches.find((match) => match.start === old.start);
+      if (!current) {
+        fadeTargetRebaseOk = false;
+        break;
+      }
+      rebasedFadeTarget.push(current);
+    }
+    if (fadeTargetRebaseOk) fadeTargetRanges = rebasedFadeTarget;
+  }
+
   let continuingFade =
     activeSentenceFade !== null &&
     blockId === activeSentenceFade.blockId &&
-    sameSentenceRangeSet(activeRanges, activeSentenceFade.newRanges);
+    sameSentenceRangeSet(activeRanges, fadeTargetRanges);
   if (continuingFade && activeSentenceFade !== null) {
     const refreshed = refreshSentenceFadeRanges(
       textNodeMap,
