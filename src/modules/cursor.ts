@@ -82,9 +82,11 @@ const CURSOR_ID = "zentype-cursor";
 export type CursorDebugEventName =
   | "cursor-click"
   | "cursor-update"
+  | "cursor-update-skipped"
   | "cursor-frame"
   | "cursor-scroll-policy"
-  | "cursor-transition-restored";
+  | "cursor-transition-restored"
+  | "cursor-switch-settle";
 
 export interface CursorDebugEvent {
   name: CursorDebugEventName;
@@ -201,6 +203,11 @@ export function setDebugSink(next: CursorDebugSink | null): void {
 function restoreNativeCaretAndHideCustom(): void {
   nativeCaretOwner = restoreNativeCaretOwner(nativeCaretOwner);
   cursorEl?.classList.add("hidden");
+}
+
+/** Dev-only: doUpdateCursor gave up before producing visible geometry. */
+function emitUpdateSkipped(reason: string): void {
+  if (DEBUG_ENABLED) emitDebugState("cursor-update-skipped", { reason });
 }
 
 /** Hide the native caret only on the editable owner currently being rendered. */
@@ -327,6 +334,9 @@ const switchSettleContext: SwitchSettleContext = {
   pauseBreathe,
   queueUpdate,
   scheduleResumeBreathe,
+  emitDebug: (details) => {
+    if (DEBUG_ENABLED) emitDebugState("cursor-switch-settle", details);
+  },
 };
 
 const cursorEventContext: CursorEventContext = {
@@ -377,6 +387,7 @@ function doUpdateCursor(frameTimestamp?: number): void {
   try {
     rect = getCursorRect();
   } catch {
+    emitUpdateSkipped("selection-read-threw");
     restoreNativeCaretAndHideCustom();
     pauseBreathe();
     return;
@@ -384,6 +395,7 @@ function doUpdateCursor(frameTimestamp?: number): void {
   if (!rect || rect.height === 0) {
     // No reliable geometry means the native caret is the only trustworthy
     // fallback; never leave the previous custom caret parked on old content.
+    emitUpdateSkipped("no-caret-rect");
     restoreNativeCaretAndHideCustom();
     pauseBreathe();
     return;
@@ -397,6 +409,7 @@ function doUpdateCursor(frameTimestamp?: number): void {
   try {
     allowed = isInAllowElements({ x: rect.x, y: rect.y });
   } catch {
+    emitUpdateSkipped("bounds-check-threw");
     restoreNativeCaretAndHideCustom();
     pauseBreathe();
     return;
@@ -407,6 +420,7 @@ function doUpdateCursor(frameTimestamp?: number): void {
     // A rejected boundary is not a reliable custom-caret location. Restore
     // native caret visibility and hide the stale global caret instead of
     // leaving it at the last successful position.
+    emitUpdateSkipped("bounds-rejected");
     restoreNativeCaretAndHideCustom();
     pauseBreathe();
     return;
@@ -416,12 +430,14 @@ function doUpdateCursor(frameTimestamp?: number): void {
   if (isMobile() && allowed.cursorElement?.closest(".protyle-title__input")) {
     // Mobile title editing keeps the host's native caret. The previous code
     // skipped custom rendering while a global CSS rule still hid this caret.
+    emitUpdateSkipped("mobile-title");
     restoreNativeCaretAndHideCustom();
     pauseBreathe();
     return;
   }
 
   if (!allowed.cursorElement || !activateCustomCaret(allowed.cursorElement)) {
+    emitUpdateSkipped("caret-activation-failed");
     pauseBreathe();
     return;
   }

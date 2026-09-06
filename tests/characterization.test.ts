@@ -2088,6 +2088,53 @@ test("cursor switch settle hides until stable, cancels stale settle, and reveals
   }
 });
 
+test("cursor switch settle reveals on frame stability without a fixed delay floor", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const cursor = new FakeElement();
+  cursor.classList.add("hidden");
+  const target = { x: 4, y: 6, height: 20 };
+  let queueUpdates = 0;
+
+  try {
+    stopSwitchSettle();
+    runtime.clock.now = 0;
+    startSwitchSettle({
+      getCursorElement: () => cursor as unknown as HTMLDivElement,
+      sampleTarget: () => target,
+      cancelRemoveTransitionFrame: () => undefined,
+      pauseBreathe: () => undefined,
+      queueUpdate: () => { queueUpdates++; },
+      scheduleResumeBreathe: () => undefined,
+    });
+
+    // Seven stable frames (112ms at 16ms/frame): stability window not yet met,
+    // so the cursor must stay hidden regardless of how early the target settled.
+    for (let index = 1; index <= 7; index++) {
+      runtime.clock.now = index * 16;
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+    assert.equal(isSwitchHiddenActive(), true);
+    assert.equal(isSwitchRevealPending(), false);
+
+    // Eighth stable frame (~128ms total): readiness met — the old 240ms floor
+    // would have kept the cursor hidden for another seven frames.
+    runtime.clock.now = 128;
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(isSwitchHiddenActive(), false);
+    assert.equal(isSwitchRevealPending(), true);
+    assert.equal(queueUpdates, 1);
+
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(isSwitchRevealPending(), false);
+    assert.equal(cursor.style.opacity, "");
+    assert.equal(cursor.classList.contains("no-transition"), false);
+  } finally {
+    stopSwitchSettle();
+    runtime.restore();
+  }
+});
+
 test("module lifecycle releases owned resources and reinitializes cleanly", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
