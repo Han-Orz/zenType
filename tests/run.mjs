@@ -15,6 +15,7 @@ const testEntries = [
   "ripple-dom-adapter.test.ts",
   "ripple-style-applier.test.ts",
   "ripple-nested-engine.test.ts",
+  "ripple-sentence-transition.test.ts",
   "structural-edit.test.ts",
   "debug-hook.test.ts",
   "debug-summary.test.mjs",
