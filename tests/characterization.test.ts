@@ -891,8 +891,11 @@ function createRippleFixture(runtime: FakeRuntime): RippleFixture {
     return { item, block, text };
   };
 
-  const focus = makeItem("focus", "one. two!");
-  const alternate = makeItem("alternate", "alternate. branch!");
+  // Sentence fixtures use capital letters after the period: Intl.Segmenter
+  // (UAX #29) does not break before lowercase, so "one. two!" would stay a
+  // single sentence and the two-sentence dim scenario would not exist.
+  const focus = makeItem("focus", "one. Two!");
+  const alternate = makeItem("alternate", "alternate. Branch!");
   const sibling = makeItem("sibling", "sibling");
   const childList = new FakeElement({ dataType: "NodeList" });
   append(childList, alternate.item, sibling.item);
@@ -2813,7 +2816,7 @@ test("structural replacement carries dim visual state until normal Ripple owners
       dataNodeId: "block:alternate",
       contentEditable: true,
     });
-    const replacementText = new FakeText("alternate. branch!");
+    const replacementText = new FakeText("alternate. Branch!");
     append(replacement, replacementText);
 
     const newItem = new FakeElement({
@@ -3032,6 +3035,137 @@ test("ripple retains outgoing sentence dim through a block handoff", () => {
 
     inputMode.setBothOff();
     assert.equal(runtime.highlights.size, 0, "OFF clears current and outgoing sentence highlights");
+  } finally {
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("sentence focus activates both sentences on the shared boundary", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+  const fadeMs = Math.round(RIPPLE_CONFIG.TRANSITION_SEC * 1000);
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+
+    // "one. Two!" segments: [0,5) and [5,9). Caret inside the first sentence.
+    runtime.setCaret(fixture.focusText, 2, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    const firstDim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(firstDim);
+    assert.equal(firstDim.ranges.length, 1);
+    assert.equal(firstDim.ranges[0].startOffset, 5);
+    assert.equal(firstDim.ranges[0].endOffset, 9);
+
+    // Exact shared boundary: both sentences active, nothing left to dim.
+    runtime.setCaret(fixture.focusText, 5, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.highlights.has("zt-sentence-dim"), false);
+    // Entering sentence fades in; the staying one does not fade out.
+    const fadeIn = runtime.highlights.get("zt-sentence-fade-in");
+    assert.ok(fadeIn);
+    assert.equal(fadeIn.ranges.length, 1);
+    assert.equal(fadeIn.ranges[0].startOffset, 5);
+    assert.equal(fadeIn.ranges[0].endOffset, 9);
+    assert.equal(runtime.highlights.has("zt-sentence-fade-out"), false);
+
+    runtime.clock.advance(fadeMs);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.highlights.has("zt-sentence-fade-in"), false);
+
+    // Leaving the boundary into the second sentence fades the first out.
+    runtime.setCaret(fixture.focusText, 6, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    const fadeOut = runtime.highlights.get("zt-sentence-fade-out");
+    assert.ok(fadeOut);
+    assert.equal(fadeOut.ranges.length, 1);
+    assert.equal(fadeOut.ranges[0].startOffset, 0);
+    assert.equal(fadeOut.ranges[0].endOffset, 5);
+    assert.equal(runtime.highlights.has("zt-sentence-fade-in"), false);
+
+    runtime.clock.advance(fadeMs);
+    runtime.raf.flushNext(runtime.clock.now);
+    const stableDim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(stableDim);
+    assert.equal(stableDim.ranges.length, 1);
+    assert.equal(stableDim.ranges[0].startOffset, 0);
+    assert.equal(stableDim.ranges[0].endOffset, 5);
+  } finally {
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("sentence fade covers direct sentence jumps at BOF and EOF", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+  const fadeMs = Math.round(RIPPLE_CONFIG.TRANSITION_SEC * 1000);
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+
+    runtime.setCaret(fixture.focusText, 2, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+
+    // EOF jump: caret at text.length keeps the last sentence active.
+    runtime.setCaret(fixture.focusText, 9, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    const eofFadeOut = runtime.highlights.get("zt-sentence-fade-out");
+    const eofFadeIn = runtime.highlights.get("zt-sentence-fade-in");
+    assert.ok(eofFadeOut);
+    assert.ok(eofFadeIn);
+    assert.equal(eofFadeOut.ranges[0].startOffset, 0);
+    assert.equal(eofFadeOut.ranges[0].endOffset, 5);
+    assert.equal(eofFadeIn.ranges[0].startOffset, 5);
+    assert.equal(eofFadeIn.ranges[0].endOffset, 9);
+    assert.equal(runtime.highlights.has("zt-sentence-dim"), false);
+
+    runtime.clock.advance(fadeMs);
+    runtime.raf.flushNext(runtime.clock.now);
+    const eofDim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(eofDim);
+    assert.equal(eofDim.ranges.length, 1);
+    assert.equal(eofDim.ranges[0].startOffset, 0);
+    assert.equal(eofDim.ranges[0].endOffset, 5);
+
+    // BOF jump back: caret 0 keeps the first sentence active.
+    runtime.setCaret(fixture.focusText, 0, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    const bofFadeOut = runtime.highlights.get("zt-sentence-fade-out");
+    const bofFadeIn = runtime.highlights.get("zt-sentence-fade-in");
+    assert.ok(bofFadeOut);
+    assert.ok(bofFadeIn);
+    assert.equal(bofFadeOut.ranges[0].startOffset, 5);
+    assert.equal(bofFadeOut.ranges[0].endOffset, 9);
+    assert.equal(bofFadeIn.ranges[0].startOffset, 0);
+    assert.equal(bofFadeIn.ranges[0].endOffset, 5);
+
+    runtime.clock.advance(fadeMs);
+    runtime.raf.flushNext(runtime.clock.now);
+    const bofDim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(bofDim);
+    assert.equal(bofDim.ranges.length, 1);
+    assert.equal(bofDim.ranges[0].startOffset, 5);
+    assert.equal(bofDim.ranges[0].endOffset, 9);
   } finally {
     destroyRipple();
     inputMode.reset();
