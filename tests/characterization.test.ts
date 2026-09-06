@@ -2748,6 +2748,8 @@ test("Tab list intent FLIPs the reparented item on both axes", () => {
     flip.reset();
 
     // Focused item at (100, 300); SiYuan's indent moves it to (124, 340).
+    // The paragraph inside rides along with the same painted delta — the
+    // nested-dedupe must transform the item only, never both.
     fixture.alternateItem.rect = rect(100, 300, 700, 20);
     fixture.alternateContent.rect = rect(124, 300, 676, 20);
     runtime.setCaret(fixture.alternateText, 1, rect(150, 305, 1, 20));
@@ -2778,6 +2780,7 @@ test("Tab list intent FLIPs the reparented item on both axes", () => {
     oldList.removeChild(fixture.alternateItem);
     append(newList, fixture.alternateItem);
     fixture.alternateItem.rect = rect(124, 340, 676, 20);
+    fixture.alternateContent.rect = rect(148, 340, 652, 20);
 
     // The coordinator's settle frame is queued ahead of the FLIP readiness
     // frame; run both until the Invert/Play task has written the transform.
@@ -2790,11 +2793,82 @@ test("Tab list intent FLIPs the reparented item on both axes", () => {
     assert.deepEqual(transformWrites.slice(0, 2), ["translate(-24px, -40px)", ""]);
     assert.equal(fixture.alternateItem.style.getPropertyValue("transition"), plainTransition);
     assert.equal(fixture.alternateItem.style.transform, "");
+    assert.equal(
+      fixture.alternateContent.style.transform,
+      "",
+      "the nested paragraph must not receive a second identical transform",
+    );
 
     runtime.clock.advance(400);
     assert.equal(fixture.alternateItem.style.getPropertyValue("transition"), "");
     assert.equal(fixture.alternateItem.style.transform, "");
   } finally {
+    destroyTypewriter();
+    destroyStructuralEditCoordinator();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("structural FLIP drives the motion sink per frame and settles once at cleanup", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initTypewriter();
+    flip.reset();
+
+    fixture.alternateItem.rect = rect(100, 300, 700, 20);
+    fixture.alternateContent.rect = rect(124, 300, 676, 20);
+    runtime.setCaret(fixture.alternateText, 1, rect(150, 305, 1, 20));
+
+    let followCalls = 0;
+    flip.setMotionFrameSink(() => {
+      followCalls += 1;
+    });
+
+    runtime.document.dispatch("keydown", eventFor(fixture.alternateContent, {
+      key: "Tab",
+      isComposing: false,
+      defaultPrevented: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      metaKey: false,
+    }));
+
+    const oldList = fixture.alternateItem.parentElement;
+    const newList = new FakeElement({ dataType: "NodeList" });
+    append(fixture.focusItem, newList);
+    oldList.removeChild(fixture.alternateItem);
+    append(newList, fixture.alternateItem);
+    fixture.alternateItem.rect = rect(124, 340, 676, 20);
+
+    let settleFrames = 0;
+    while (followCalls === 0 && settleFrames < 20) {
+      runtime.clock.now += 16;
+      runtime.raf.flushNext(runtime.clock.now);
+      settleFrames += 1;
+    }
+    const callsDuringMotion = followCalls;
+    assert.ok(callsDuringMotion >= 1, "the sink must be driven during the motion window");
+
+    // Cleanup (300ms) stops the per-frame loop and fires exactly one settle call.
+    runtime.clock.advance(400);
+    const callsAfterCleanup = followCalls;
+    assert.equal(callsAfterCleanup, callsDuringMotion + 1, "cleanup fires exactly one settle refresh");
+
+    for (let frame = 0; frame < 4; frame++) {
+      runtime.clock.now += 16;
+      if (runtime.raf.pending.size > 0) runtime.raf.flushNext(runtime.clock.now);
+    }
+    assert.equal(followCalls, callsAfterCleanup, "no sink calls after the motion window closes");
+  } finally {
+    flip.setMotionFrameSink(null);
     destroyTypewriter();
     destroyStructuralEditCoordinator();
     inputMode.reset();

@@ -26,6 +26,25 @@ let lastFLIPElements: HTMLElement[] = [];
 const ownedFLIPStyles = new WeakMap<HTMLElement, OwnedInlineStyle>();
 let flipGeneration = 0;
 
+// Structural motion frame sink: invoked per animation frame between Play and
+// Cleanup so the event-driven Cursor can follow the caret's visual geometry
+// while the FLIP transform interpolates (otherwise it freezes at whatever
+// position the last pre-settle event sampled). Null unregisters.
+type MotionFrameSink = () => void;
+let motionFrameSink: MotionFrameSink | null = null;
+let motionFollowFrame: number | null = null;
+
+export function setMotionFrameSink(sink: MotionFrameSink | null): void {
+  motionFrameSink = sink;
+}
+
+function stopMotionFollow(): void {
+  if (motionFollowFrame !== null) {
+    cancelAnimationFrame(motionFollowFrame);
+    motionFollowFrame = null;
+  }
+}
+
 // ── Development-only FLIP forensics (production builds are no-ops) ──────
 
 const DEBUG_ENABLED = __ZENTYPE_DEV__;
@@ -533,6 +552,7 @@ export function reset(): void {
   }
   flipGeneration += 1;
   clearActiveFLIPTimer();
+  stopMotionFollow();
   clearLastFLIPElements();
 }
 
@@ -759,9 +779,33 @@ export function start(
       deltas.set(el, { dx, dy });
     }
 
-    // Then batch every invert write together.
+    // Then batch every invert write together. Nested dedupe first: when an
+    // element and its ancestor both moved, the ancestor's transform already
+    // carries the descendant (the descendant's measured painted delta includes
+    // the ancestor's layout shift). Writing both double-displaces the subtree —
+    // on list Tab the text slid 34px underneath its own marker while the item
+    // slid 34px. The descendant's effective invert is its own delta minus the
+    // nearest transformed ancestor's delta; zero nets out to no transform.
+    const effectiveDeltas = new Map<HTMLElement, { dx: number; dy: number }>();
+    for (const [el, delta] of deltas) {
+      let ancestor: HTMLElement | null = el.parentElement;
+      let inherited: { dx: number; dy: number } | null = null;
+      while (ancestor) {
+        const ancestorDelta = deltas.get(ancestor);
+        if (ancestorDelta) {
+          inherited = ancestorDelta;
+          break;
+        }
+        ancestor = ancestor.parentElement;
+      }
+      const dx = delta.dx - (inherited?.dx ?? 0);
+      const dy = delta.dy - (inherited?.dy ?? 0);
+      if (Math.abs(dx) < 2 && Math.abs(dy) < 2) continue;
+      effectiveDeltas.set(el, { dx, dy });
+    }
+
     const modifiedElements: HTMLElement[] = [];
-    for (const [el, { dx, dy }] of deltas) {
+    for (const [el, { dx, dy }] of effectiveDeltas) {
       setOwnedFLIPStyle(el, "transform", formatInvertTransform(dx, dy));
       setOwnedFLIPStyle(el, "transition", "none");
       modifiedElements.push(el);
@@ -860,7 +904,7 @@ export function start(
         invertToPlayMs: Math.round(performance.now() - invertStartedAt),
         commitToPlayMs: Math.round(performance.now() - layoutCommittedAt),
         blocks: modifiedElements.slice(0, 40).map((el) => {
-          const delta = deltas.get(el);
+          const delta = effectiveDeltas.get(el);
           return {
             id: el.getAttribute("data-node-id"),
             elToken: elementToken(el),
@@ -878,9 +922,21 @@ export function start(
       if (DEBUG_ENABLED) {
         emitDebug({ name: "flip-cleanup", token, releasedCount: modifiedElements.length });
       }
+      stopMotionFollow();
       modifiedElements.forEach(releaseFLIPElement);
       lastFLIPElements = [];
+      // 动画落位后 cursor 的常规驱动（事件）可能早已停止，补一次刷新让它
+      // 从最后跟随帧滑到最终静止位置。
+      motionFrameSink?.();
     }, 300);
+    if (motionFrameSink !== null) {
+      const followTick = (): void => {
+        if (token !== flipGeneration) return;
+        motionFrameSink?.();
+        motionFollowFrame = requestAnimationFrame(followTick);
+      };
+      motionFollowFrame = requestAnimationFrame(followTick);
+    }
   };
 
   const readinessTick = (): void => {

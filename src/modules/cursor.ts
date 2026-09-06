@@ -76,6 +76,7 @@ import {
 } from "./cursor/switchSettle";
 import * as inputMode from "./inputMode";
 import * as typewriterScroll from "./typewriter/scroll";
+import * as structuralFlip from "./typewriter/flip";
 
 const CURSOR_ID = "zentype-cursor";
 
@@ -613,12 +614,20 @@ export function initCursor(): void {
   // P2: WS 监听已迁移到 ws-main EventBus（由 index.ts 订阅，destroy 时由 eventBusOffFns 清理）
   // 不再手动 addEventListener("message", ...) + JSON.parse。
 
+  // structural FLIP 动画期间（Play→Cleanup）逐帧跟随 caret 的 visual geometry：
+  // cursor 是事件驱动的，动画期间没有事件触发更新，会在中间帧位置停格，
+  // 直到下一次输入/点击（Tab/Shift+Tab 实测停格偏差 ~36-45px）。
+  structuralFlip.setMotionFrameSink(() => queueUpdate());
+
   // 首次定位
   queueUpdate();
 }
 
 export function destroyCursor(): void {
   initialized = false;
+
+  // structural FLIP 的逐帧跟随回调随 cursor 生命周期注销
+  structuralFlip.setMotionFrameSink(null);
 
   // round 4 fix（capture + cooldown）：清理键盘冷却定时器
   if (keyboardCooldownTimer !== null) {
