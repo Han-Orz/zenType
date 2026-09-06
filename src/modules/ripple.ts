@@ -849,6 +849,25 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
   const activeRanges = resolveActiveSentenceRanges(matches, caretOffset, text.length);
   const previousRanges = lastActiveSentenceRanges;
 
+  // 文本编辑移动句子 end 但句子本身延续：把 previous active set 按 start
+  // 重锚定到当前 Segmenter geometry，让"同一句"不变成 leave+enter 硬切。
+  // 任一 start 消失（如删除句号造成真 merge）则放弃 rebase——本次不猜，
+  // 直接走稳定重建，不动画。
+  let diffPrevious = previousRanges;
+  if (text !== lastDimText && previousRanges.length > 0) {
+    const rebased: SentenceRange[] = [];
+    let rebaseOk = true;
+    for (const old of previousRanges) {
+      const current = matches.find((match) => match.start === old.start);
+      if (!current) {
+        rebaseOk = false;
+        break;
+      }
+      rebased.push(current);
+    }
+    if (rebaseOk) diffPrevious = rebased;
+  }
+
   let continuingFade =
     activeSentenceFade !== null &&
     blockId === activeSentenceFade.blockId &&
@@ -869,7 +888,7 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
     }
   }
 
-  const { leaving, entering } = diffSentenceSets(previousRanges, activeRanges);
+  const { leaving, entering } = diffSentenceSets(diffPrevious, activeRanges);
   const canAnimate =
     !prefersReducedMotion() &&
     SENTENCE_FADE_IN_MS > 0 &&

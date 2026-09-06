@@ -3660,6 +3660,79 @@ test("sentence fade anchors its timeline to the first rAF timestamp", () => {
   }
 });
 
+test("sentence focus survives text edits that extend the active sentence", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  // "One. Two. Three." segments: [0,5), [5,10), [10,16).
+  const fixture = createEditorFixture(runtime, "One. Two. Three.");
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+
+    // Caret on the A|B shared boundary: {A,B} both active, nothing dimmed.
+    runtime.setCaret(fixture.text, 5, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    // With {A,B} dual-active, only C sits in static dim.
+    const boundaryDim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(boundaryDim);
+    assert.equal(boundaryDim.ranges.length, 1);
+    assert.equal(boundaryDim.ranges[0].startOffset, 10);
+
+    // Let the boundary acquisition fade complete so no stale fade frame is
+    // pending when the text edit lands.
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the fade at t=0
+    runtime.clock.advance(400);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.highlights.has("zt-sentence-fade-in"), false);
+
+    // Type one character inside sentence B: B's end moves 10 -> 11 while its
+    // start (and all of A) stay put; the caret lands inside B. B is still the
+    // same sentence, so A releases with a fade and B must not re-fade.
+    fixture.text.data = "One. Twxo. Three.";
+    runtime.setCaret(fixture.text, 7, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+
+    const fadeOut = runtime.highlights.get("zt-sentence-fade-out");
+    assert.ok(fadeOut, "previous sentence A fades out across the text edit");
+    assert.equal(fadeOut.ranges.length, 1);
+    assert.equal(fadeOut.ranges[0].startOffset, 0);
+    assert.equal(fadeOut.ranges[0].endOffset, 5);
+    assert.equal(
+      runtime.highlights.has("zt-sentence-fade-in"),
+      false,
+      "the extended sentence continues as active without re-fading",
+    );
+    // Static dim covers only C during the release, on current geometry.
+    const dim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(dim);
+    assert.equal(dim.ranges.length, 1);
+    assert.equal(dim.ranges[0].startOffset, 11);
+
+    // The release completes into stable dim over A and C.
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the fade at t=0
+    runtime.clock.advance(600);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.highlights.has("zt-sentence-fade-out"), false);
+    const stableDim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(stableDim);
+    assert.equal(stableDim.ranges.length, 2);
+    assert.deepEqual(
+      stableDim.ranges.map((range) => range.startOffset).sort((a, b) => a - b),
+      [0, 11],
+    );
+  } finally {
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
 test("FLIP interruption freezes the rendered position and rebases the next edit", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
