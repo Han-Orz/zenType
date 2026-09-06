@@ -3381,8 +3381,9 @@ test("sentence focus activates both sentences on the shared boundary", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
   const fixture = createRippleFixture(runtime);
-  // Non-asymmetric fade contract (ripple.ts): acquisition 240ms, release 600ms.
-  const fadeInMs = 240;
+  // Asymmetric fade contract (ripple.ts): acquisition keeps the v2.6.3
+  // 400ms easeInOut language, release runs a 600ms slow tail.
+  const fadeInMs = 400;
   const fadeOutMs = 600;
 
   try {
@@ -3414,7 +3415,8 @@ test("sentence focus activates both sentences on the shared boundary", () => {
     assert.equal(fadeIn.ranges[0].endOffset, 9);
     assert.equal(runtime.highlights.has("zt-sentence-fade-out"), false);
 
-    // Entering-only fade runs on the fast acquisition timeline.
+    // Entering-only fade runs on the 400ms acquisition timeline.
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the fade at t=0
     runtime.clock.advance(fadeInMs);
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(runtime.highlights.has("zt-sentence-fade-in"), false);
@@ -3430,7 +3432,8 @@ test("sentence focus activates both sentences on the shared boundary", () => {
     assert.equal(fadeOut.ranges[0].endOffset, 5);
     assert.equal(runtime.highlights.has("zt-sentence-fade-in"), false);
 
-    // Leaving-only fade runs on the slow release timeline.
+    // Leaving-only fade runs on the slow 600ms release timeline.
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the fade at t=0
     runtime.clock.advance(fadeOutMs);
     runtime.raf.flushNext(runtime.clock.now);
     const stableDim = runtime.highlights.get("zt-sentence-dim");
@@ -3477,6 +3480,7 @@ test("sentence fade covers direct sentence jumps at BOF and EOF", () => {
     assert.equal(eofFadeIn.ranges[0].endOffset, 9);
     assert.equal(runtime.highlights.has("zt-sentence-dim"), false);
 
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the fade at t=0
     runtime.clock.advance(fadeTotalMs);
     runtime.raf.flushNext(runtime.clock.now);
     const eofDim = runtime.highlights.get("zt-sentence-dim");
@@ -3498,6 +3502,7 @@ test("sentence fade covers direct sentence jumps at BOF and EOF", () => {
     assert.equal(bofFadeIn.ranges[0].startOffset, 0);
     assert.equal(bofFadeIn.ranges[0].endOffset, 5);
 
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the fade at t=0
     runtime.clock.advance(fadeTotalMs);
     runtime.raf.flushNext(runtime.clock.now);
     const bofDim = runtime.highlights.get("zt-sentence-dim");
@@ -3513,11 +3518,16 @@ test("sentence fade covers direct sentence jumps at BOF and EOF", () => {
   }
 });
 
-test("sentence fade acquires focus fast and releases focus slowly", () => {
+test("sentence fade acquires at 400ms and releases at 600ms", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
   // "One. Two. Three." segments: [0,5), [5,10), [10,16).
   const fixture = createEditorFixture(runtime, "One. Two. Three.");
+  const alphaOf = (color: string): number => {
+    const match = color.match(/^rgba\(\d+,\d+,\d+,([\d.]+)\)$/);
+    assert.ok(match, `unexpected color format: ${color}`);
+    return Number(match![1]);
+  };
 
   try {
     inputMode.reset();
@@ -3546,26 +3556,40 @@ test("sentence fade acquires focus fast and releases focus slowly", () => {
     assert.equal(fadeOut.ranges[0].endOffset, 5);
     assert.equal(fadeIn.ranges[0].startOffset, 5);
     assert.equal(fadeIn.ranges[0].endOffset, 10);
-    const rootStyle = runtime.document.documentElement.style;
-    assert.equal(rootStyle.getPropertyValue("--zt-sentence-fade-in-color"), "rgba(0,0,0,0.6)");
-    assert.equal(rootStyle.getPropertyValue("--zt-sentence-fade-out-color"), "rgba(0,0,0,1)");
-    // The leaving sentence is presented by the fade highlight, the staying one
-    // (C) by static dim; the entering one is excluded from static dim.
+    // The leaving sentence is presented by the fade highlight, the staying
+    // one (C) by static dim; the entering one is excluded from static dim.
     assert.equal(runtime.highlights.get("zt-sentence-dim")?.ranges.length, 1);
 
-    // 240ms: acquisition has fully converged while release is still running.
-    runtime.clock.advance(240);
-    runtime.raf.flushNext(runtime.clock.now);
+    const rootStyle = runtime.document.documentElement.style;
+    // Each flush advances the fade's own frame timeline, not the clock.
+    const flushFade = (elapsedMs: number) => {
+      runtime.raf.flushNext(runtime.clock.now + elapsedMs);
+    };
+
+    // t=0 (first rAF): entering sits at dim, leaving at active color.
+    flushFade(0);
+    assert.equal(rootStyle.getPropertyValue("--zt-sentence-fade-in-color"), "rgba(0,0,0,0.6)");
+    assert.equal(rootStyle.getPropertyValue("--zt-sentence-fade-out-color"), "rgba(0,0,0,1)");
+
+    // t=200ms: acquisition is around the 400ms easeInOut midpoint; release
+    // has barely left its start on the 600ms curve and is still brighter.
+    flushFade(200);
+    const aIn = alphaOf(rootStyle.getPropertyValue("--zt-sentence-fade-in-color"));
+    assert.ok(aIn > 0.6 && aIn < 1, `fade-in mid-flight, got alpha ${aIn}`);
+    const aOut = alphaOf(rootStyle.getPropertyValue("--zt-sentence-fade-out-color"));
+    assert.ok(aOut > 0.6 && aOut < 1, `fade-out mid-flight, got alpha ${aOut}`);
+    assert.ok(aOut > aIn, "release lags acquisition at 200ms");
+
+    // t=400ms: acquisition fully active; release tail still running.
+    flushFade(400);
     assert.equal(rootStyle.getPropertyValue("--zt-sentence-fade-in-color"), "rgba(0,0,0,1)");
-    const releasing = rootStyle.getPropertyValue("--zt-sentence-fade-out-color");
-    assert.notEqual(releasing, "rgba(0,0,0,1)");
-    assert.notEqual(releasing, "rgba(0,0,0,0.6)");
     assert.equal(runtime.highlights.has("zt-sentence-fade-in"), true, "cleanup waits for the release tail");
     assert.equal(runtime.highlights.has("zt-sentence-fade-out"), true);
+    const aOutAt400 = alphaOf(rootStyle.getPropertyValue("--zt-sentence-fade-out-color"));
+    assert.ok(aOutAt400 > 0.6, `release not finished at 400ms, got alpha ${aOutAt400}`);
 
-    // 600ms total: the shared lifecycle cleans up and rebuilds stable dim.
-    runtime.clock.advance(360);
-    runtime.raf.flushNext(runtime.clock.now);
+    // t=600ms: the shared lifecycle cleans up and rebuilds stable dim.
+    flushFade(600);
     assert.equal(runtime.highlights.has("zt-sentence-fade-in"), false);
     assert.equal(runtime.highlights.has("zt-sentence-fade-out"), false);
     const stableDim = runtime.highlights.get("zt-sentence-dim");
@@ -3578,6 +3602,56 @@ test("sentence fade acquires focus fast and releases focus slowly", () => {
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(runtime.highlights.has("zt-sentence-fade-in"), false);
     assert.equal(runtime.highlights.has("zt-sentence-fade-out"), false);
+  } finally {
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("sentence fade anchors its timeline to the first rAF timestamp", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  // "One. Two. Three." segments: [0,5), [5,10), [10,16).
+  const fixture = createEditorFixture(runtime, "One. Two. Three.");
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+
+    runtime.setCaret(fixture.text, 2, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+
+    // Jump sentences with the performance clock far ahead of frame time: a
+    // schedule-time anchor would consume this offset on the first callback.
+    runtime.clock.now = 5_000_000;
+    runtime.setCaret(fixture.text, 7, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    const rootStyle = runtime.document.documentElement.style;
+    assert.equal(rootStyle.getPropertyValue("--zt-sentence-fade-in-color"), "rgba(0,0,0,0.6)");
+    assert.equal(rootStyle.getPropertyValue("--zt-sentence-fade-out-color"), "rgba(0,0,0,1)");
+
+    // First fade callback: frame timestamp lags the performance clock by
+    // 250ms (vsync-style skew). elapsed must be 0 — start colors, no jump.
+    const firstFrame = runtime.clock.now - 250;
+    runtime.raf.flushNext(firstFrame);
+    assert.equal(rootStyle.getPropertyValue("--zt-sentence-fade-in-color"), "rgba(0,0,0,0.6)");
+    assert.equal(rootStyle.getPropertyValue("--zt-sentence-fade-out-color"), "rgba(0,0,0,1)");
+
+    // From here the timeline follows frame timestamps only: 200ms of frame
+    // time is mid-flight, not 450ms of clock time (which would finish it).
+    runtime.raf.flushNext(firstFrame + 200);
+    const fadeInColor = rootStyle.getPropertyValue("--zt-sentence-fade-in-color");
+    assert.notEqual(fadeInColor, "rgba(0,0,0,0.6)");
+    assert.notEqual(fadeInColor, "rgba(0,0,0,1)");
+    const fadeOutColor = rootStyle.getPropertyValue("--zt-sentence-fade-out-color");
+    assert.notEqual(fadeOutColor, "rgba(0,0,0,1)");
+    assert.notEqual(fadeOutColor, "rgba(0,0,0,0.6)");
   } finally {
     destroyRipple();
     inputMode.reset();

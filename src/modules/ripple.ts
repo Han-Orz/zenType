@@ -71,8 +71,9 @@ const SENTENCE_DIM_HIGHLIGHT = "zt-sentence-dim";
 const SENTENCE_OUTGOING_DIM_HIGHLIGHT = "zt-sentence-outgoing-dim";
 const SENTENCE_FADE_IN_HIGHLIGHT = "zt-sentence-fade-in";
 const SENTENCE_FADE_OUT_HIGHLIGHT = "zt-sentence-fade-out";
-// 句子聚焦非对称淡变：获得焦点快（ease-out 快速收敛），释放焦点慢（ease-in-out 柔和退场）。
-const SENTENCE_FADE_IN_MS = 240;
+// 句子聚焦非对称淡变：acquisition 保持 v2.6.3 的 400ms easeInOut 视觉语言
+//（用户实测 240ms ease-out 近似无过渡），release 延长到 600ms 同 easing 慢退场。
+const SENTENCE_FADE_IN_MS = 400;
 const SENTENCE_FADE_OUT_MS = 600;
 // 跨块 handoff 时旧块句级 dim 的静态保留时长：跟随块级 opacity 过渡（TRANSITION_SEC），
 // 目的是盖住 dim -> normal -> dim 亮度峰，与句子淡变时长无关。
@@ -578,11 +579,6 @@ function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
 
-/** ease-out：起步快、收尾慢——新句快速进入清晰状态。 */
-function easeOutCubic(t: number): number {
-  return 1 - Math.pow(1 - t, 3);
-}
-
 function parseRgbColor(value: string): Rgba | null {
   const match = value.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)$/);
   if (!match) return null;
@@ -704,7 +700,10 @@ function startSentenceFade(
   if (totalMs <= 0) return false;
 
   const token = sentenceFadeToken;
-  const startTime = performance.now();
+  // Timeline 只用 rAF timestamp：首帧把起点锚在当前帧时间上（elapsed = 0），
+  // 不与 performance.now() 混用——后者与 vsync 对齐的帧时间存在偏移，
+  // 会让首帧直接推进（同 Typewriter scroll 121bb42 的 first-frame jump 教训）。
+  let startTime: number | null = null;
   const blockId = block.dataset?.nodeId ?? null;
   const textColor = getBlockTextColor(block);
   const dimColor = getThemeDimColor();
@@ -744,6 +743,7 @@ function startSentenceFade(
   const step = (now: number) => {
     if (token !== sentenceFadeToken) return;
 
+    if (startTime === null) startTime = now;
     const elapsed = now - startTime;
     if (fadeOutRanges.length > 0) {
       const rawOut = Math.min(1, elapsed / SENTENCE_FADE_OUT_MS);
@@ -756,7 +756,7 @@ function startSentenceFade(
       const rawIn = Math.min(1, elapsed / SENTENCE_FADE_IN_MS);
       setOwnedRootStyle(
         "--zt-sentence-fade-in-color",
-        colorToCss(mixColor(dimColor, textColor, easeOutCubic(rawIn))),
+        colorToCss(mixColor(dimColor, textColor, easeInOutCubic(rawIn))),
       );
     }
 
