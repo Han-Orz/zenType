@@ -92,10 +92,14 @@ function findScrollContainer(editor: HTMLElement): HTMLElement | null {
   return null;
 }
 
-function scrollTopOf(editor: HTMLElement): { container: number | null; scrollTop: number } | null {
+function scrollTopOf(editor: HTMLElement): { container: number | null; scrollTop: number; scrollLeft: number } | null {
   const container = findScrollContainer(editor);
   if (!container) return null;
-  return { container: elementToken(container), scrollTop: Math.round(container.scrollTop * 100) / 100 };
+  return {
+    container: elementToken(container),
+    scrollTop: Math.round(container.scrollTop * 100) / 100,
+    scrollLeft: Math.round(container.scrollLeft * 100) / 100,
+  };
 }
 
 function blockSample(
@@ -111,7 +115,18 @@ function blockSample(
     contentTop: viewportTop === null || !scroll
       ? null
       : Math.round((viewportTop + scroll.scrollTop) * 100) / 100,
+    viewportLeft: Math.round(el.getBoundingClientRect().left * 100) / 100,
   };
+}
+
+/**
+ * Enter/Backspace 的结构位移只有 Y 分量，保持 translateY 写法（既有视觉与测试
+ * 依赖该形态）；list indent 的位移以 X 为主，才写双轴 translate。
+ */
+function formatInvertTransform(dx: number, dy: number): string {
+  return Math.abs(dx) < 0.5
+    ? `translateY(${dy}px)`
+    : `translate(${dx}px, ${dy}px)`;
 }
 
 function caretBlockId(): string | null {
@@ -146,6 +161,8 @@ function startGeometrySampler(
   token: number,
   first: Map<HTMLElement, number>,
   firstViewport: Map<HTMLElement, number>,
+  firstLeft: Map<HTMLElement, number>,
+  firstViewportLeft: Map<HTMLElement, number>,
 ): void {
   const round2 = (value: number): number => Math.round(value * 100) / 100;
   // `first` already stores content-space tops; the sampler re-derives the same
@@ -200,22 +217,32 @@ function startGeometrySampler(
     const container = findScrollContainer(editor);
     const containerRect = container ? container.getBoundingClientRect() : null;
     const scrollTop = container ? container.scrollTop : 0;
+    const scrollLeft = container ? container.scrollLeft : 0;
     const blocks: Array<Record<string, unknown>> = [];
     for (const [el, contentBase] of first) {
-      const viewportTop = el.getBoundingClientRect().top;
+      const rect = el.getBoundingClientRect();
       const contentTop = containerRect
-        ? viewportTop - containerRect.top + scrollTop
+        ? rect.top - containerRect.top + scrollTop
+        : null;
+      const contentLeft = containerRect
+        ? rect.left - containerRect.left + scrollLeft
         : null;
       blocks.push({
         id: el.getAttribute("data-node-id"),
         elToken: elementToken(el),
         connected: el.isConnected,
-        viewportTop: round2(viewportTop),
+        viewportTop: round2(rect.top),
         contentTop: contentTop === null ? null : round2(contentTop),
-        dViewportFromFirst: round2(viewportTop - (firstViewport.get(el) ?? viewportTop)),
+        dViewportFromFirst: round2(rect.top - (firstViewport.get(el) ?? rect.top)),
         dContentFromFirst: contentTop === null
           ? null
           : round2(contentTop - contentBase),
+        viewportLeft: round2(rect.left),
+        contentLeft: contentLeft === null ? null : round2(contentLeft),
+        dViewportFromFirstX: round2(rect.left - (firstViewportLeft.get(el) ?? rect.left)),
+        dContentFromFirstX: contentLeft === null
+          ? null
+          : round2(contentLeft - (firstLeft.get(el) ?? rect.left)),
         offsetTop: el.offsetTop,
       });
     }
@@ -229,7 +256,9 @@ function startGeometrySampler(
         ? {
           token: elementToken(container),
           scrollTop: round2(scrollTop),
+          scrollLeft: round2(scrollLeft),
           rectTop: round2(containerRect.top),
+          rectLeft: round2(containerRect.left),
         }
         : null,
       mutations: [...mutationLog],
@@ -266,6 +295,7 @@ function transitionProbeSample(el: HTMLElement): Record<string, unknown> {
     computedTransitionTimingFunction: computed.transitionTimingFunction,
     computedTransform: computed.transform,
     viewportTop: Math.round(el.getBoundingClientRect().top * 100) / 100,
+    viewportLeft: Math.round(el.getBoundingClientRect().left * 100) / 100,
   };
 }
 
@@ -468,17 +498,26 @@ export function start(
 
   // Capture nearby blocks before SiYuan's bubble handler changes the DOM.
   // First is stored in content space (block rect relative to the scroll
-  // container's own origin plus its scrollTop), so Typewriter viewport
-  // scrolling cancels out and only structural movement changes the value.
+  // container's own origin plus its scrollTop/scrollLeft), so Typewriter
+  // viewport scrolling cancels out and only structural movement changes the
+  // value. X is tracked in parallel because list indent moves primarily
+  // horizontally.
   const container0 = findScrollContainer(editor);
-  const containerTop0 = container0 ? container0.getBoundingClientRect().top : 0;
+  const containerRect0 = container0 ? container0.getBoundingClientRect() : null;
+  const containerTop0 = containerRect0 ? containerRect0.top : 0;
+  const containerLeft0 = containerRect0 ? containerRect0.left : 0;
   const scrollTop0 = container0 ? container0.scrollTop : 0;
+  const scrollLeft0 = container0 ? container0.scrollLeft : 0;
   const first = new Map<HTMLElement, number>();
+  const firstLeft = new Map<HTMLElement, number>();
   const firstViewport = new Map<HTMLElement, number>();
+  const firstViewportLeft = new Map<HTMLElement, number>();
   blocks.forEach((el) => {
-    const top = el.getBoundingClientRect().top;
-    firstViewport.set(el, top);
-    first.set(el, top - containerTop0 + scrollTop0);
+    const rect = el.getBoundingClientRect();
+    firstViewport.set(el, rect.top);
+    first.set(el, rect.top - containerTop0 + scrollTop0);
+    firstViewportLeft.set(el, rect.left);
+    firstLeft.set(el, rect.left - containerLeft0 + scrollLeft0);
   });
 
   // If an earlier FLIP is still visible, freeze each element at its rendered
@@ -486,20 +525,26 @@ export function start(
   // restoring the old animation to its logical endpoint during interruption.
   const interruptedElements = new Set<HTMLElement>();
   const interruptedVisualTops = new Map<HTMLElement, number>();
+  const interruptedVisualLefts = new Map<HTMLElement, number>();
   // Dev-only freeze bookkeeping: the rebase delta FLIP itself just writes, so
   // readiness samples can derive the logical position the freeze transform
   // hides (logical = rendered − rebaseDelta) and compare it against the
   // rendered geometry. Null in production builds.
   const interruptedRebaseDeltas = DEBUG_ENABLED ? new Map<HTMLElement, number>() : null;
+  const interruptedRebaseDeltasX = DEBUG_ENABLED ? new Map<HTMLElement, number>() : null;
   for (const el of lastFLIPElements) {
     if (!el.isConnected) {
       releaseFLIPElement(el);
       continue;
     }
     interruptedElements.add(el);
-    const visualTop = firstViewport.get(el) ?? el.getBoundingClientRect().top;
+    const rect = el.getBoundingClientRect();
+    const visualTop = firstViewport.get(el) ?? rect.top;
     interruptedVisualTops.set(el, visualTop);
     first.set(el, visualTop - containerTop0 + scrollTop0);
+    const visualLeft = firstViewportLeft.get(el) ?? rect.left;
+    interruptedVisualLefts.set(el, visualLeft);
+    firstLeft.set(el, visualLeft - containerLeft0 + scrollLeft0);
   }
 
   if (DEBUG_ENABLED) {
@@ -543,8 +588,12 @@ export function start(
     void editor.offsetHeight;
   }
   const interruptedLogicalTops = new Map<HTMLElement, number>();
+  const interruptedLogicalLefts = new Map<HTMLElement, number>();
   for (const el of interruptedElements) {
-    if (el.isConnected) interruptedLogicalTops.set(el, el.getBoundingClientRect().top);
+    if (!el.isConnected) continue;
+    const rect = el.getBoundingClientRect();
+    interruptedLogicalTops.set(el, rect.top);
+    interruptedLogicalLefts.set(el, rect.left);
   }
   for (const [el, visualTop] of interruptedVisualTops) {
     const logicalTop = interruptedLogicalTops.get(el);
@@ -552,13 +601,18 @@ export function start(
       releaseFLIPElement(el);
       continue;
     }
-    const rebaseDelta = visualTop - logicalTop;
-    interruptedRebaseDeltas?.set(el, rebaseDelta);
-    setOwnedFLIPStyle(el, "transform", `translateY(${rebaseDelta}px)`);
+    const rebaseDeltaY = visualTop - logicalTop;
+    const logicalLeft = interruptedLogicalLefts.get(el);
+    const rebaseDeltaX = logicalLeft === undefined
+      ? 0
+      : (interruptedVisualLefts.get(el) ?? logicalLeft) - logicalLeft;
+    interruptedRebaseDeltas?.set(el, rebaseDeltaY);
+    interruptedRebaseDeltasX?.set(el, rebaseDeltaX);
+    setOwnedFLIPStyle(el, "transform", formatInvertTransform(rebaseDeltaX, rebaseDeltaY));
   }
 
   if (DEBUG_ENABLED) {
-    startGeometrySampler(editor, token, first, firstViewport);
+    startGeometrySampler(editor, token, first, firstViewport, firstLeft, firstViewportLeft);
   }
 
   // Wait for SiYuan's structural change to actually reach geometry instead of
@@ -590,38 +644,48 @@ export function start(
     }
 
     const container = container0 && container0.isConnected ? container0 : null;
-    const containerTop = container ? container.getBoundingClientRect().top : 0;
+    const containerRect = container ? container.getBoundingClientRect() : null;
+    const containerTop = containerRect ? containerRect.top : 0;
+    const containerLeft = containerRect ? containerRect.left : 0;
     const scrollTop = container ? container.scrollTop : 0;
-    const deltas = new Map<HTMLElement, number>();
+    const scrollLeft = container ? container.scrollLeft : 0;
+    const deltas = new Map<HTMLElement, { dx: number; dy: number }>();
     const scrollAtInvert = DEBUG_ENABLED ? scrollTopOf(editor) : null;
     if (DEBUG_ENABLED) invertDebugBlocks = [];
 
     // Phase 1 (Invert): read every new position before writing any invert.
-    // The structural delta is First contentTop − current contentTop; viewport
-    // motion owned by the Typewriter cancels out of the comparison.
+    // The structural delta is First content position − current content
+    // position; viewport motion owned by the Typewriter cancels out of the
+    // comparison. X covers list indent, Y covers block shifts.
     for (const [el, y0] of first) {
       if (!el.isConnected) continue;
-      const rectTop = el.getBoundingClientRect().top;
-      const y1 = container ? rectTop - containerTop + scrollTop : rectTop;
-      const delta = y0 - y1;
+      const rect = el.getBoundingClientRect();
+      const y1 = container ? rect.top - containerTop + scrollTop : rect.top;
+      const x0 = firstLeft.get(el) ?? rect.left;
+      const x1 = container ? rect.left - containerLeft + scrollLeft : rect.left;
+      const dy = y0 - y1;
+      const dx = x0 - x1;
       if (DEBUG_ENABLED && invertDebugBlocks && invertDebugBlocks.length < 80) {
         invertDebugBlocks.push({
-          ...blockSample(el, rectTop, scrollAtInvert),
-          viewportDelta: Math.round((rectTop - (firstViewport.get(el) ?? rectTop)) * 100) / 100,
-          contentDelta: Math.round(delta * 100) / 100,
-          skipped: Math.abs(delta) < 2,
+          ...blockSample(el, rect.top, scrollAtInvert),
+          viewportDelta: Math.round((rect.top - (firstViewport.get(el) ?? rect.top)) * 100) / 100,
+          contentDelta: Math.round(dy * 100) / 100,
+          viewportDeltaX: Math.round((rect.left - (firstViewportLeft.get(el) ?? rect.left)) * 100) / 100,
+          contentDeltaX: Math.round(dx * 100) / 100,
+          skipped: Math.abs(dx) < 2 && Math.abs(dy) < 2,
           capturedContentTop: Math.round(y0 * 100) / 100,
+          capturedContentLeft: Math.round(x0 * 100) / 100,
         });
       }
-      if (Math.abs(delta) < 2) continue;
+      if (Math.abs(dx) < 2 && Math.abs(dy) < 2) continue;
 
-      deltas.set(el, delta);
+      deltas.set(el, { dx, dy });
     }
 
     // Then batch every invert write together.
     const modifiedElements: HTMLElement[] = [];
-    for (const [el, delta] of deltas) {
-      setOwnedFLIPStyle(el, "transform", `translateY(${delta}px)`);
+    for (const [el, { dx, dy }] of deltas) {
+      setOwnedFLIPStyle(el, "transform", formatInvertTransform(dx, dy));
       setOwnedFLIPStyle(el, "transition", "none");
       modifiedElements.push(el);
     }
@@ -718,11 +782,14 @@ export function start(
         rippleComposedTransition,
         invertToPlayMs: Math.round(performance.now() - invertStartedAt),
         commitToPlayMs: Math.round(performance.now() - layoutCommittedAt),
-        blocks: modifiedElements.slice(0, 40).map((el) => ({
-          id: el.getAttribute("data-node-id"),
-          elToken: elementToken(el),
-          transformFrom: `translateY(${deltas.get(el)}px)`,
-        })),
+        blocks: modifiedElements.slice(0, 40).map((el) => {
+          const delta = deltas.get(el);
+          return {
+            id: el.getAttribute("data-node-id"),
+            elToken: elementToken(el),
+            transformFrom: formatInvertTransform(delta?.dx ?? 0, delta?.dy ?? 0),
+          };
+        }),
       });
       emitTransitionProbe(token, "play", modifiedElements);
       startTransitionPostProbe(token, modifiedElements);
@@ -748,8 +815,11 @@ export function start(
     }
     readinessFrames += 1;
     const container = container0 && container0.isConnected ? container0 : null;
-    const containerTop = container ? container.getBoundingClientRect().top : 0;
+    const containerRect = container ? container.getBoundingClientRect() : null;
+    const containerTop = containerRect ? containerRect.top : 0;
+    const containerLeft = containerRect ? containerRect.left : 0;
     const scrollTop = container ? container.scrollTop : 0;
+    const scrollLeft = container ? container.scrollLeft : 0;
     let movedCount = 0;
     let movedInterrupted = 0;
     let maskedInterrupted = 0;
@@ -760,11 +830,15 @@ export function start(
         skippedDisconnected += 1;
         continue;
       }
-      const top = el.getBoundingClientRect().top;
-      const contentTop = container ? top - containerTop + scrollTop : top;
+      const rect = el.getBoundingClientRect();
+      const contentTop = container ? rect.top - containerTop + scrollTop : rect.top;
+      const contentLeft = container ? rect.left - containerLeft + scrollLeft : rect.left;
       const rebaseDelta = interruptedRebaseDeltas?.get(el);
+      const rebaseDeltaX = interruptedRebaseDeltasX?.get(el);
       const dRendered = contentTop - y0;
+      const dRenderedX = contentLeft - (firstLeft.get(el) ?? contentLeft);
       let dLogical = dRendered;
+      let dLogicalX = dRenderedX;
       if (rebaseDelta !== undefined) {
         // Derived logical movement strips the freeze transform FLIP wrote and
         // compares against the logical baseline the interruption preparation
@@ -775,22 +849,30 @@ export function start(
         if (logicalTop0 !== undefined) {
           dLogical = (contentTop - rebaseDelta) - (logicalTop0 - containerTop0 + scrollTop0);
         }
-        if (DEBUG_ENABLED && Math.abs(dLogical) >= 2 && tickSamples.length < 8) {
+        const logicalLeft0 = interruptedLogicalLefts.get(el);
+        if (logicalLeft0 !== undefined && rebaseDeltaX !== undefined) {
+          dLogicalX = (contentLeft - rebaseDeltaX) - (logicalLeft0 - containerLeft0 + scrollLeft0);
+        }
+        if (DEBUG_ENABLED && (Math.abs(dLogical) >= 2 || Math.abs(dLogicalX) >= 2) && tickSamples.length < 8) {
           tickSamples.push({
             id: el.getAttribute("data-node-id"),
             elToken: elementToken(el),
             rebaseDelta: Math.round(rebaseDelta * 100) / 100,
+            rebaseDeltaX: Math.round((rebaseDeltaX ?? 0) * 100) / 100,
             renderedContentTop: Math.round(contentTop * 100) / 100,
             derivedLogicalContentTop: Math.round((contentTop - rebaseDelta) * 100) / 100,
             dRenderedFromFirst: Math.round(dRendered * 100) / 100,
             dLogicalFromLogicalFirst: Math.round(dLogical * 100) / 100,
+            renderedContentLeft: Math.round(contentLeft * 100) / 100,
+            dRenderedFromFirstX: Math.round(dRenderedX * 100) / 100,
+            dLogicalFromLogicalFirstX: Math.round(dLogicalX * 100) / 100,
           });
         }
       }
-      if (Math.abs(dRendered) >= 2) {
+      if (Math.abs(dRendered) >= 2 || Math.abs(dRenderedX) >= 2) {
         movedCount += 1;
         if (rebaseDelta !== undefined) movedInterrupted += 1;
-      } else if (Math.abs(dLogical) >= 2) {
+      } else if (Math.abs(dLogical) >= 2 || Math.abs(dLogicalX) >= 2) {
         maskedInterrupted += 1;
       }
     }

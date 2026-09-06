@@ -560,6 +560,14 @@ export function initTypewriter(): void {
         const listEditor = listStructuralIntentEditorForKey(ke);
         if (listEditor) {
           structuralEdit.beginStructuralEdit("list-change", listEditor);
+          // Tab/Shift+Tab 的 reparent 与 Enter/Backspace 共用同一条 FLIP 通道：
+          // capture 阶段先采样 First，list-change mutation 落地后 readiness 循环
+          // 在 paint 前完成 Invert/Play。indent 位移以 X 为主，flip 内部双轴处理；
+          // 只做 transform 连续性，不触碰 Ripple 的 opacity ownership。
+          const sel = window.getSelection();
+          if (sel && sel.rangeCount) {
+            flip.start(listEditor, sel.getRangeAt(0), requestDeferredFrame);
+          }
           return;
         }
         if (!shouldHandleTypewriterEditKey(ke)) return;

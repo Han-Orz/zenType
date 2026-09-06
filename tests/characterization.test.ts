@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setActiveEditor } from "siyuan";
-import { RIPPLE_CONFIG } from "../src/config";
+import { RIPPLE_CONFIG, TYPEWRITER_CONFIG } from "../src/config";
 import * as inputMode from "../src/modules/inputMode";
 import * as inputModeTriggers from "../src/modules/inputModeTriggers";
 import {
@@ -202,6 +202,7 @@ class FakeElement extends FakeEventTarget {
   parentNode: FakeElement | null = null;
   isContentEditable = false;
   scrollTop = 0;
+  scrollLeft = 0;
   scrollHeight = 0;
   clientHeight = 0;
   scrollWidth = 0;
@@ -2694,13 +2695,15 @@ test("Tab list intent stays authoritative through nested-list reparent and stabl
     assert.equal(afterReparent.phase, "mutating", "the semantic mutation has no idle gap");
     assert.equal(afterReparent.activityVersion > started.activityVersion, true);
 
-    runtime.clock.now = 16;
-    runtime.raf.flushNext(runtime.clock.now);
-    runtime.clock.now = 32;
-    runtime.raf.flushNext(runtime.clock.now);
-    runtime.raf.flushNext(runtime.clock.now);
-    runtime.clock.now = 48;
-    runtime.raf.flushNext(runtime.clock.now);
+    // The Tab FLIP readiness loop and the coordinator's settle chain now share
+    // the frame queue; drive both to quiescence instead of a fixed flush count.
+    let settleFrames = 0;
+    while ((isStructuralEditPending() || runtime.raf.pending.size > 0) && settleFrames < 60) {
+      runtime.clock.now += 16;
+      runtime.raf.flushNext(runtime.clock.now);
+      settleFrames += 1;
+    }
+    assert.ok(settleFrames < 60, "list-change must settle in a bounded number of frames");
 
     assert.deepEqual(
       finishes.map(({ generation: finishedGeneration, kind, stable }) => ({
@@ -2724,6 +2727,74 @@ test("Tab list intent stays authoritative through nested-list reparent and stabl
     assert.equal(Math.round(fixture.content.scrollTop), 70);
   } finally {
     unsubscribe();
+    destroyTypewriter();
+    destroyStructuralEditCoordinator();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("Tab list intent FLIPs the reparented item on both axes", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+  const plainTransition = `transform 250ms ${TYPEWRITER_CONFIG.SCROLL_CURVE}`;
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initTypewriter();
+    flip.reset();
+
+    // Focused item at (100, 300); SiYuan's indent moves it to (124, 340).
+    fixture.alternateItem.rect = rect(100, 300, 700, 20);
+    fixture.alternateContent.rect = rect(124, 300, 676, 20);
+    runtime.setCaret(fixture.alternateText, 1, rect(150, 305, 1, 20));
+
+    const transformWrites: string[] = [];
+    const itemSetProperty = fixture.alternateItem.style.setProperty.bind(fixture.alternateItem.style);
+    fixture.alternateItem.style.setProperty = (property: string, value: string, priority = "") => {
+      if (property === "transform") transformWrites.push(value);
+      itemSetProperty(property, value, priority);
+    };
+
+    runtime.document.dispatch("keydown", eventFor(fixture.alternateContent, {
+      key: "Tab",
+      isComposing: false,
+      defaultPrevented: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      metaKey: false,
+    }));
+    assert.equal(getStructuralEditSnapshot().kind, "list-change");
+    assert.equal(runtime.raf.pending.size >= 1, true, "FLIP arms a readiness frame at keydown");
+
+    // The Tab reparent: the same item element moves under a new sublist wrapper.
+    const oldList = fixture.alternateItem.parentElement;
+    const newList = new FakeElement({ dataType: "NodeList" });
+    append(fixture.focusItem, newList);
+    oldList.removeChild(fixture.alternateItem);
+    append(newList, fixture.alternateItem);
+    fixture.alternateItem.rect = rect(124, 340, 676, 20);
+
+    // The coordinator's settle frame is queued ahead of the FLIP readiness
+    // frame; run both until the Invert/Play task has written the transform.
+    let armFrames = 0;
+    while (transformWrites.length < 2 && armFrames < 20) {
+      runtime.clock.now += 16;
+      runtime.raf.flushNext(runtime.clock.now);
+      armFrames += 1;
+    }
+    assert.deepEqual(transformWrites.slice(0, 2), ["translate(-24px, -40px)", ""]);
+    assert.equal(fixture.alternateItem.style.getPropertyValue("transition"), plainTransition);
+    assert.equal(fixture.alternateItem.style.transform, "");
+
+    runtime.clock.advance(400);
+    assert.equal(fixture.alternateItem.style.getPropertyValue("transition"), "");
+    assert.equal(fixture.alternateItem.style.transform, "");
+  } finally {
     destroyTypewriter();
     destroyStructuralEditCoordinator();
     inputMode.reset();
