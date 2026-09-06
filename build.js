@@ -1,5 +1,6 @@
 const esbuild = require('esbuild');
 const { sassPlugin } = require('esbuild-sass-plugin');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -11,6 +12,25 @@ const isZip = process.argv.includes('--zip');
 const OUT_DIR_NAME = isDev ? 'dev' : 'dist';
 const OUT_DIR = path.join(ROOT_DIR, OUT_DIR_NAME);
 const OUT_FILE = path.join(OUT_DIR, 'index.js');
+
+function resolveBuildSha(runGit = execFileSync) {
+  try {
+    const value = runGit(
+      'git',
+      ['rev-parse', 'HEAD'],
+      {
+        cwd: ROOT_DIR,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      },
+    ).trim();
+    return /^[0-9a-f]{40,64}$/i.test(value) ? value : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+const buildSha = resolveBuildSha();
 
 // Static plugin files are intentionally explicit. Keeping this list shared by
 // copy and watch prevents a changed README/icon from being omitted in dev.
@@ -41,6 +61,7 @@ const buildOptions = {
   minify: false,
   define: {
     __ZENTYPE_DEV__: JSON.stringify(isDev),
+    __ZENTYPE_BUILD_SHA__: JSON.stringify(buildSha),
   },
   external: ['siyuan'],
   loader: { '.ts': 'ts' },
@@ -193,8 +214,10 @@ if (require.main === module) {
 }
 
 module.exports = {
+  buildSha,
   STATIC_ASSETS,
   PACKAGE_FILES,
+  resolveBuildSha,
   cleanOutputDir,
   copyAssets,
   watchStaticAssets,

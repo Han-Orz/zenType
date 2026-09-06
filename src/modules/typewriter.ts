@@ -7,6 +7,7 @@ import * as inputModeTriggers from "./inputModeTriggers";
 import * as structuralEdit from "./structuralEdit";
 import * as flip from "./typewriter/flip";
 import * as scroll from "./typewriter/scroll";
+import { resolveScrollTarget } from "./typewriter/targetResolver";
 import { isInAllowElements } from "../utils/boundary";
 import {
   isCurrentSelectionEditable,
@@ -15,7 +16,7 @@ import {
   isReadonlyEditorTarget,
 } from "../utils/editorScope";
 
-const { COMFORT_ZONE, TYPING_GAP_MS, CLICK_CENTER_LOW, CLICK_CENTER_HIGH } = TYPEWRITER_CONFIG;
+const { TYPING_GAP_MS, CLICK_CENTER_LOW, CLICK_CENTER_HIGH } = TYPEWRITER_CONFIG;
 
 let eventListeners: Array<[string, EventListener, AddEventListenerOptions?]> = [];
 let windowEventListeners: Array<[string, EventListener, AddEventListenerOptions?]> = [];
@@ -26,6 +27,7 @@ const deferredFrames = new Set<number>();
 
 // debounce / IME 状态（修复 3a/3b/3c）
 let lastInputAt = 0;                                       // 最近一次 input 事件时间戳；0 = 空闲
+let lastInputDebugType = "";                               // dev-only：最近一次 input 的 inputType
 let composing = false;                                     // IME composition 进行中
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;  // 停顿后触发一次舒适区对齐的定时器
 let firstCharAfterIdle = false;                            // Option i：空闲后的首个输入立即滚（input 监听器设置，checkAndScroll 消费）
@@ -114,6 +116,33 @@ function scheduleScrollResync(): void {
 
 type ScrollCheckAuthority = "ordinary" | "structural";
 
+// Dev-only visibility investigation: one event per checkAndScroll gate block,
+// recording the caret trajectory and debounce state without any text content.
+function reportCheckGate(gate: string, data: Record<string, unknown>): void {
+  if (!__ZENTYPE_DEV__) return;
+  scroll.reportDebugEvent({ name: "typewriter-check-gate", gate, ...data });
+}
+
+// Hard visibility margin: the caret counts as "at risk" once it is within this
+// distance of the editor viewport edge. Real-machine gate data showed unsafe
+// observations clustered at 0-26px with ~38px lines, so about one line and a
+// quarter of margin starts the follow before the caret is visually clipped,
+// while mid-editor checks never come close to the boundary.
+export const CARET_VISIBILITY_MARGIN_PX = 48;
+
+// 舒适区修正可以 debounce；caret 可见性不能 debounce。该判定只用于让
+// empty-block 守卫和打字 debounce 为视口安全让位，不影响 structural
+// pending / 暂停 / scroll ownership 等更早的 gate。
+export function isCaretNearVisibilityBoundary(
+  caretRect: { y: number; height: number },
+  editorRect: { top: number; bottom: number },
+): boolean {
+  return (
+    caretRect.y - CARET_VISIBILITY_MARGIN_PX <= editorRect.top
+    || caretRect.y + caretRect.height + CARET_VISIBILITY_MARGIN_PX >= editorRect.bottom
+  );
+}
+
 function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
   // 打字机模式关闭时：不自动滚动
   if (!inputMode.isTypewriterActive()) return;
@@ -127,6 +156,11 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
   // The coordinator's stable finish is the authoritative geometry sample; do
   // not let a transient range start, restart, or cancel that motion.
   if (structuralEdit.isStructuralEditPending()) {
+    reportCheckGate("structural-pending", {
+      authority,
+      scrolling: scroll.isScrolling(),
+      structural: structuralEdit.getStructuralEditSnapshot(),
+    });
     if (scroll.isScrolling()) scroll.requestResync(scheduleScrollResync);
     return;
   }
@@ -136,6 +170,7 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
   // single resync; only a coordinator stable finish may explicitly opt into a
   // structural target at its safe point.
   if (scroll.isScrolling() && authority !== "structural") {
+    reportCheckGate("scroll-active", { authority });
     scroll.requestResync(scheduleScrollResync);
     return;
   }
@@ -160,6 +195,7 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
     Math.abs(rect.width - lastCheckRect.width) < 1 &&
     Math.abs(rect.height - lastCheckRect.height) < 1
   ) {
+    reportCheckGate("unchanged-caret", { authority });
     return;
   }
   lastCheckRect = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
@@ -170,6 +206,7 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
   // equality check（原 bug：deferred check 被 equality check 吞掉 → 首字不滚）。
   if (prevY !== undefined && Math.abs(rect.y - prevY) > 3) {
     lastCheckRect = null;
+    reportCheckGate("vertical-jump-defer", { authority, prevY, caretY: rect.y });
     scheduleCheck();
     return;
   }
@@ -183,6 +220,8 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
   // （标题区域由 boundary.ts 提供 editorRect fallback；若仍不可用，此处会被过滤）
   if (!result.editorRect) return;
   if (!result.cursorElement) return;
+
+  const visibilityBypass = isCaretNearVisibilityBoundary(rect, result.editorRect);
 
   // 新增：空块守卫。光标在空块时 typewriter scroll 无意义（块高近 0，cursor
   // 在块顶），且 getCursorRect 已走非突变 fallback 也无 cursorPct 可言。
@@ -200,11 +239,19 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
       // 空块时清除 lastCheckRect，使下次（首字符）checkAndScroll 的 prevY=undefined
       // 避免 |firstCharY - emptyBlockY| > 3 触发 defer 级联导致滚动丢失（TODO-6）
       lastCheckRect = null;
-      // Enter 新建空块时绕过守卫 —— 块虽空但用户需要看到它被带入舒适区
-      if (bypassEmptyBlock) {
+      // Enter 新建空块时绕过守卫 —— 块虽空但用户需要看到它被带入舒适区；
+      // caret 已处于视口边缘时同样必须放行（可见性不能被守卫吞掉）
+      if (bypassEmptyBlock || visibilityBypass) {
         bypassEmptyBlock = false;
         // fall through（不 return）
       } else {
+        reportCheckGate("empty-block", {
+          authority,
+          caret: { y: Math.round(rect.y), height: Math.round(rect.height) },
+          editorTop: Math.round(result.editorRect.top),
+          editorBottom: Math.round(result.editorRect.bottom),
+          scrollTop: cachedContainer && cachedContainer.isConnected ? Math.round(cachedContainer.scrollTop) : null,
+        });
         return;
       }
     }
@@ -217,10 +264,29 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
   if (firstCharAfterIdle) {
     // Option i：空闲后的首个输入立即滚（input 监听器检测到 wasIdle 并设置此标志）
     firstCharAfterIdle = false;
-  } else {
+  } else if (!visibilityBypass) {
     const now = Date.now();
     const sinceInput = now - lastInputAt;
     if (sinceInput < TYPING_GAP_MS) {
+      const debugContainer = cachedContainer && cachedContainer.isConnected ? cachedContainer : null;
+      reportCheckGate("typing-debounce", {
+        authority,
+        caret: { y: Math.round(rect.y), height: Math.round(rect.height) },
+        editorTop: Math.round(result.editorRect.top),
+        editorBottom: Math.round(result.editorRect.bottom),
+        caretTopGapPx: Math.round(rect.y - result.editorRect.top),
+        caretBottomGapPx: Math.round(result.editorRect.bottom - (rect.y + rect.height)),
+        cursorPct: result.editorRect.bottom > result.editorRect.top
+          ? Math.round(((rect.y - result.editorRect.top) / (result.editorRect.bottom - result.editorRect.top)) * 1000) / 1000
+          : null,
+        sinceInputMs: sinceInput,
+        debounceRemainingMs: TYPING_GAP_MS - sinceInput,
+        lastInputType: lastInputDebugType,
+        firstCharAfterIdle,
+        scrolling: scroll.isScrolling(),
+        scrollTop: debugContainer ? Math.round(debugContainer.scrollTop) : null,
+        maxScrollTop: debugContainer ? debugContainer.scrollHeight - debugContainer.clientHeight : null,
+      });
       // 连续键入中：延后到停顿后再滚一次
       if (debounceTimer !== null) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
@@ -249,30 +315,35 @@ function checkAndScroll(authority: ScrollCheckAuthority = "ordinary"): void {
   }
   if (!container) return;
 
-  // 使用 editorRect（protyle-content 的 bounding rect）作为滚动锚点
-  // 而非 container.getBoundingClientRect()（可能是更大的祖先元素）
-  // 注：AllowResult.editorRect 只有 top/bottom/left/right，无 height 字段（不像 DOMRect）
-  const editorHeight = result.editorRect.bottom - result.editorRect.top;
-  const cursorPct = (rect.y - result.editorRect.top) / editorHeight;
+  // The resolver receives the already-trusted caret/editor geometry and
+  // returns an absolute endpoint. The existing scroll controller still
+  // consumes a delta adapter so its motion timeline remains unchanged.
+  const resolution = resolveScrollTarget({
+    cursorY: rect.y,
+    editorTop: result.editorRect.top,
+    editorBottom: result.editorRect.bottom,
+    currentScrollTop: container.scrollTop,
+    maxScrollTop: container.scrollHeight - container.clientHeight,
+  });
 
-  // v2.3.0：舒适区间 [COMFORT_ZONE[0], COMFORT_ZONE[1]]，区间内不滚
-  // 符号约定：scroll controller 中 deltaY > 0 = scrollTop 增加 = 页面/视口向下滚
-  // 因此要让 cursor 在视口里"下移"（cursor 在顶部时），需要 deltaY < 0（向上滚）
-  let deltaY = 0;
-  if (cursorPct < COMFORT_ZONE[0]) {
-    // 光标在舒适区上方 → deltaY 负（向上滚）→ cursor 在视口里下移到 COMFORT_ZONE[0]
-    deltaY = (cursorPct - COMFORT_ZONE[0]) * editorHeight;
-  } else if (cursorPct > COMFORT_ZONE[1]) {
-    // 光标在舒适区下方 → deltaY 正（向下滚）→ cursor 在视口里上移到 COMFORT_ZONE[1]
-    deltaY = (cursorPct - COMFORT_ZONE[1]) * editorHeight;
+  if (__ZENTYPE_DEV__) {
+    scroll.reportDebugEvent({
+      name: "typewriter-scroll-resolve",
+      target: container,
+      caretY: rect.y,
+      editorTop: result.editorRect.top,
+      editorBottom: result.editorRect.bottom,
+      currentScrollTop: container.scrollTop,
+      maxScrollTop: container.scrollHeight - container.clientHeight,
+      ...resolution,
+    });
   }
-  // else: 舒适区内，deltaY = 0，不滚
 
-  if (Math.abs(deltaY) >= 1) {
-    scroll.scrollTo(container, { deltaY }, scheduleScrollResync);
+  if (resolution.action === "move") {
+    scroll.scrollTo(container, { deltaY: resolution.deltaY }, scheduleScrollResync);
   } else if (scroll.isScrolling()) {
-    // Keep the active motion alive through a temporary comfort-zone result.
-    // Its completion will schedule one fresh geometry check when requested.
+    // Keep the active motion alive through a temporary hold result. Its
+    // completion will schedule one fresh geometry check when requested.
     scroll.requestResync(scheduleScrollResync);
   }
 }
@@ -421,6 +492,7 @@ export function initTypewriter(): void {
         // 仅 insert 类输入设置 firstCharAfterIdle（Backspace delete 不应绕过 debounce）
         if (wasIdle && ie.inputType?.startsWith("insert")) firstCharAfterIdle = true;
         lastInputAt = Date.now();
+        if (__ZENTYPE_DEV__) lastInputDebugType = ie.inputType ?? "";
       },
       { capture: true },
     ],
@@ -488,6 +560,14 @@ export function initTypewriter(): void {
         const listEditor = listStructuralIntentEditorForKey(ke);
         if (listEditor) {
           structuralEdit.beginStructuralEdit("list-change", listEditor);
+          // Tab/Shift+Tab 的 reparent 与 Enter/Backspace 共用同一条 FLIP 通道：
+          // capture 阶段先采样 First，list-change mutation 落地后 readiness 循环
+          // 在 paint 前完成 Invert/Play。indent 位移以 X 为主，flip 内部双轴处理；
+          // 只做 transform 连续性，不触碰 Ripple 的 opacity ownership。
+          const sel = window.getSelection();
+          if (sel && sel.rangeCount) {
+            flip.start(listEditor, sel.getRangeAt(0), requestDeferredFrame);
+          }
           return;
         }
         if (!shouldHandleTypewriterEditKey(ke)) return;

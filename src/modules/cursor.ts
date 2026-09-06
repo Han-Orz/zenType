@@ -27,12 +27,14 @@
 
 import type { IProtyle, IWebSocketData } from "siyuan/types";
 import { CURSOR_CONFIG, EDGE_FADE, TRANSITION } from "../config";
-import { getCursorRect } from "../utils/getCursorRect";
+import { cursorRectPerf, getCursorRect } from "../utils/getCursorRect";
 import { isInAllowElements } from "../utils/boundary";
 import { isMobile } from "../utils/isMobile";
 import { getEffectiveZIndex } from "../utils/getEffectiveZIndex";
 import { getEdgeProximity } from "../utils/edgeProximity";
 import { prefersReducedMotion } from "../utils/reducedMotion";
+import { findClosestScrollableElement } from "../utils/scroll";
+import type { CursorRect } from "../types";
 import {
   activateNativeCaretOwner,
   restoreNativeCaretOwner,
@@ -62,6 +64,8 @@ import {
   bindCursorDocumentEvents,
   destroyCursorDocumentEvents,
   type CursorEventContext,
+  type CursorScrollSource,
+  shouldUseManualScrollPolicy,
 } from "./cursor/events";
 import {
   startSwitchSettle,
@@ -71,8 +75,43 @@ import {
   type SwitchSettleContext,
 } from "./cursor/switchSettle";
 import * as inputMode from "./inputMode";
+import * as typewriterScroll from "./typewriter/scroll";
+import * as structuralFlip from "./typewriter/flip";
+import {
+  buildCursorPerfSummary,
+  cursorPerf,
+  CURSOR_PERF_FLUSH_CALLS,
+  CURSOR_PERF_FLUSH_MS,
+  pushPerfRing,
+  resetCursorPerf,
+} from "./cursor/perf";
 
 const CURSOR_ID = "zentype-cursor";
+
+export type CursorDebugEventName =
+  | "cursor-click"
+  | "cursor-update"
+  | "cursor-update-skipped"
+  | "cursor-frame"
+  | "cursor-scroll-policy"
+  | "cursor-transition-restored"
+  | "cursor-switch-settle"
+  | "cursor-reacquire-reveal"
+  | "cursor-perf-summary";
+
+export interface CursorDebugEvent {
+  name: CursorDebugEventName;
+  cursorElement?: HTMLDivElement | null;
+  caretElement?: Element | null;
+  scrollContainer?: HTMLElement | null;
+  caretRect?: CursorRect | null;
+  [key: string]: unknown;
+}
+
+export type CursorDebugSink = (event: CursorDebugEvent) => void;
+
+const DEBUG_ENABLED = __ZENTYPE_DEV__;
+const DEBUG_CURSOR_FRAME_LIMIT = 72;
 
 let cursorEl: HTMLDivElement | null = null;
 let pendingFrame: number | null = null;
@@ -87,11 +126,173 @@ let cachedZIndexElement: Element | null = null;
 let cachedEffectiveZIndex = 0;
 let cachedFullscreenElement: Element | null = null;
 let nativeCaretOwner: HTMLElement | null = null;
+let debugSink: CursorDebugSink | null = null;
+let debugFrameRequest: number | null = null;
+let debugFrameToken = 0;
+let debugCaretElement: Element | null = null;
+let debugCaretRect: CursorRect | null = null;
+
+function emitDebug(event: CursorDebugEvent): void {
+  if (!DEBUG_ENABLED) return;
+  debugSink?.(event);
+}
+
+function debugScrollContainer(): HTMLElement | null {
+  if (!DEBUG_ENABLED || !debugCaretElement) return null;
+  try {
+    return findClosestScrollableElement(debugCaretElement);
+  } catch {
+    return null;
+  }
+}
+
+function emitDebugState(
+  name: CursorDebugEventName,
+  details: Record<string, unknown> = {},
+): void {
+  if (!DEBUG_ENABLED || !debugSink) return;
+  emitDebug({
+    name,
+    ...details,
+    cursorElement: cursorEl,
+    caretElement: debugCaretElement,
+    scrollContainer: debugScrollContainer(),
+    caretRect: debugCaretRect,
+    caretViewportY: debugCaretRect?.y ?? null,
+  });
+}
+
+function stopDebugFrameBurst(): void {
+  debugFrameToken += 1;
+  if (debugFrameRequest !== null) {
+    cancelAnimationFrame(debugFrameRequest);
+    debugFrameRequest = null;
+  }
+}
+
+function startDebugFrameBurst(reason: string): void {
+  if (
+    !DEBUG_ENABLED
+    || !debugSink
+    || !cursorEl
+    || typeof requestAnimationFrame !== "function"
+  ) return;
+
+  stopDebugFrameBurst();
+  const token = debugFrameToken;
+  let frameIndex = 0;
+  const sample = (timestamp: number) => {
+    debugFrameRequest = null;
+    if (token !== debugFrameToken || !debugSink) return;
+
+    emitDebugState("cursor-frame", {
+      reason,
+      frameIndex,
+      frameTimestamp: timestamp,
+    });
+    frameIndex += 1;
+    if (frameIndex < DEBUG_CURSOR_FRAME_LIMIT && debugSink) {
+      debugFrameRequest = requestAnimationFrame(sample);
+    }
+  };
+  debugFrameRequest = requestAnimationFrame(sample);
+}
+
+function reportDebugClick(): void {
+  if (!DEBUG_ENABLED || !debugSink) return;
+  emitDebugState("cursor-click");
+  startDebugFrameBurst("click");
+}
+
+export function setDebugSink(next: CursorDebugSink | null): void {
+  if (!DEBUG_ENABLED) return;
+  debugSink = next;
+  if (!next) stopDebugFrameBurst();
+}
 
 /** Fail open whenever the custom caret cannot be positioned reliably. */
 function restoreNativeCaretAndHideCustom(): void {
   nativeCaretOwner = restoreNativeCaretOwner(nativeCaretOwner);
   cursorEl?.classList.add("hidden");
+  // 标记"可靠不可见"：下次成功定位时用一次轻量 opacity fade 恢复存在感。
+  reacquirePending = true;
+}
+
+// Reacquire reveal：custom caret 从可靠不可见（.hidden）恢复到可靠可见时，
+// 位置先在 .hidden 的 transition:none 下 snap 提交，存在感用一次 120ms
+// opacity fade 恢复。只做一次位置提交 + 一次 rAF handoff，无持续 rAF loop。
+const REACQUIRE_REVEAL_MS = 120;
+let reacquirePending = false;
+let reacquireRevealToken = 0;
+let reacquireRevealFrame: number | null = null;
+
+function cancelReacquireReveal(): void {
+  reacquireRevealToken += 1;
+  if (reacquireRevealFrame !== null) {
+    cancelAnimationFrame(reacquireRevealFrame);
+    reacquireRevealFrame = null;
+  }
+}
+
+/**
+ * 恢复可见：.hidden 已让新位置在上一段同步代码里提交（transition:none snap）。
+ * 先保持不可见并强制布局一次，再交给 opacity-only inline transition 从 0 淡入。
+ */
+function startReacquireReveal(targetOpacity: string): void {
+  const el = cursorEl;
+  if (!el) return;
+  reacquirePending = false;
+  el.classList.remove("hidden");
+  // reveal 期间 transition 必须真正生效：清掉可能残留的 no-transition
+  // （例如滚动策略在 skip 路径上留下 no-transition 后才转 hidden）。
+  el.classList.remove("no-transition");
+  el.style.opacity = "0";
+  el.style.transition = `opacity ${REACQUIRE_REVEAL_MS}ms ease-out`;
+  void el.offsetHeight;
+  lastCursorDur = null; // 下一次正常更新按移动距离重写完整 transition
+  const token = ++reacquireRevealToken;
+  if (DEBUG_ENABLED) emitDebugState("cursor-reacquire-reveal", { phase: "start", targetOpacity });
+  reacquireRevealFrame = requestAnimationFrame(() => {
+    reacquireRevealFrame = null;
+    if (token !== reacquireRevealToken || !cursorEl) return;
+    // switch settle 用自己的 inline opacity 生命周期揭示，这里让位避免双重 reveal。
+    if (isSwitchHiddenActive() || isSwitchRevealPending()) return;
+    cursorEl.style.opacity = targetOpacity;
+    if (DEBUG_ENABLED) emitDebugState("cursor-reacquire-reveal", { phase: "revealed", targetOpacity });
+  });
+}
+
+/** Dev-only: doUpdateCursor gave up before producing visible geometry. */
+function emitUpdateSkipped(reason: string): void {
+  if (DEBUG_ENABLED) {
+    emitDebugState("cursor-update-skipped", { reason });
+    cursorPerf.skips[reason] = (cursorPerf.skips[reason] ?? 0) + 1;
+    recordCursorUpdateDuration();
+    maybeFlushCursorPerf();
+  }
+}
+
+// Dev-only profiling: start timestamp of the doUpdateCursor invocation in
+// flight; consumed by recordCursorUpdateDuration at every exit path.
+let cursorUpdateStartAt = 0;
+
+function recordCursorUpdateDuration(): void {
+  const duration = performance.now() - cursorUpdateStartAt;
+  pushPerfRing(cursorPerf.durations, duration);
+}
+
+function maybeFlushCursorPerf(): void {
+  const now = performance.now();
+  if (cursorPerf.windowStartedAt === 0) {
+    resetCursorPerf(now);
+    return;
+  }
+  const elapsed = now - cursorPerf.windowStartedAt;
+  if (cursorPerf.updates > 0 && (cursorPerf.updates >= CURSOR_PERF_FLUSH_CALLS || elapsed >= CURSOR_PERF_FLUSH_MS)) {
+    const summary = buildCursorPerfSummary(now, cursorRectPerf);
+    if (summary) emitDebugState("cursor-perf-summary", summary);
+    resetCursorPerf(now);
+  }
 }
 
 /** Hide the native caret only on the editable owner currently being rendered. */
@@ -99,6 +300,7 @@ function activateCustomCaret(element: Element): boolean {
   nativeCaretOwner = activateNativeCaretOwner(nativeCaretOwner, element);
   if (!nativeCaretOwner) {
     cursorEl?.classList.add("hidden");
+    reacquirePending = true;
     return false;
   }
   return true;
@@ -155,6 +357,7 @@ function createCursorElement(): HTMLDivElement {
 /**
  * commit 1：写 inline opacity + transform(含 scale) + height 三个属性。
  * 离屏/边缘淡出态专用，正常态继续走原生 transform 写入（不带 scale）。
+ * 返回实际写入的 opacity 字符串，供 reacquire reveal 决定淡入目标。
  */
 function applyFadeAndScale(
   el: HTMLDivElement,
@@ -162,11 +365,13 @@ function applyFadeAndScale(
   scale: number,
   pos: { x: number; y: number; height: number },
   yOffset: number = 2,
-): void {
-  el.style.opacity = String(Math.round(opacity * 1000) / 1000);
+): string {
+  const opacityValue = String(Math.round(opacity * 1000) / 1000);
+  el.style.opacity = opacityValue;
   el.style.transform =
     `translate3d(${pos.x}px, ${pos.y - yOffset}px, 0) scale(${scale})`;
   el.style.height = `${pos.height}px`;
+  return opacityValue;
 }
 
 export function flushCursorTransitionIfNeeded(el: HTMLDivElement): boolean {
@@ -183,16 +388,21 @@ export function flushCursorTransitionIfNeeded(el: HTMLDivElement): boolean {
 
 /** rAF 节流入口：每帧最多执行一次 doUpdateCursor() */
 function queueUpdate(): void {
+  if (DEBUG_ENABLED) {
+    cursorPerf.queueRequests++;
+    if (pendingFrame !== null) cursorPerf.queueDeduped++;
+  }
   if (pendingFrame !== null) return;
-  pendingFrame = requestAnimationFrame(() => {
+  pendingFrame = requestAnimationFrame((timestamp) => {
     pendingFrame = null;
-    doUpdateCursor();
+    doUpdateCursor(timestamp);
   });
 }
 
 const scrollBindingContext = {
   getCursorElement: () => cursorEl,
   isKeyboardUpdatePending: () => pendingKeyboardUpdate,
+  isOwnedScrollTarget: (target: EventTarget | null) => typewriterScroll.ownsActiveScroll(target),
   pauseBreathe,
   queueUpdate,
 };
@@ -217,12 +427,16 @@ const switchSettleContext: SwitchSettleContext = {
   pauseBreathe,
   queueUpdate,
   scheduleResumeBreathe,
+  emitDebug: (details) => {
+    if (DEBUG_ENABLED) emitDebugState("cursor-switch-settle", details);
+  },
 };
 
 const cursorEventContext: CursorEventContext = {
   clearKeyboardPending,
   markKeyboardPending,
   onScrollOrWheel,
+  onMouseClick: reportDebugClick,
   queueUpdate,
 };
 
@@ -249,8 +463,22 @@ const popoverDragContext: PopoverDragContext = {
  *   7. no-transition 生效时同步布局 → rAF 移除 no-transition
  *   8. scheduleBreathe() 延迟恢复呼吸（边缘附近不恢复，保持暂停）
  */
-function doUpdateCursor(): void {
+function doUpdateCursor(frameTimestamp?: number): void {
   if (!cursorEl) return;
+
+  if (DEBUG_ENABLED) {
+    cursorPerf.updates++;
+    cursorUpdateStartAt = performance.now();
+    // C1 keyboard chain: event → outer rAF → queueUpdate → this run.
+    if (pendingKeyboardUpdate && cursorPerf.keyboardEventAt !== null && frameTimestamp !== undefined) {
+      pushPerfRing(cursorPerf.keyboardLatencies, frameTimestamp - cursorPerf.keyboardEventAt);
+      if (cursorPerf.keyboardOuterRafAt !== null && frameTimestamp > cursorPerf.keyboardOuterRafAt + 0.5) {
+        cursorPerf.keyboardTwoFrame++;
+      }
+      cursorPerf.keyboardEventAt = null;
+      cursorPerf.keyboardOuterRafAt = null;
+    }
+  }
 
   const reducedMotion = prefersReducedMotion();
   if (reducedMotion) {
@@ -258,21 +486,29 @@ function doUpdateCursor(): void {
     cursorEl.classList.add("no-transition", "no-animation");
   }
 
+  // 在途的 reacquire reveal handoff 一律由本次更新接管（任何出口都安全：
+  // 成功路径自己决定是否开新 reveal，skip 路径转 hidden，fade 中断即取消）。
+  cancelReacquireReveal();
+
   // 1) 暂停呼吸（操作中不需要呼吸感）
   pauseBreathe();
 
   // 2) 读取选区 → 显示矩形
   let rect: ReturnType<typeof getCursorRect>;
+  const rectStart = DEBUG_ENABLED ? performance.now() : 0;
   try {
     rect = getCursorRect();
   } catch {
+    emitUpdateSkipped("selection-read-threw");
     restoreNativeCaretAndHideCustom();
     pauseBreathe();
     return;
   }
+  if (DEBUG_ENABLED) cursorPerf.getCursorRectMs += performance.now() - rectStart;
   if (!rect || rect.height === 0) {
     // No reliable geometry means the native caret is the only trustworthy
     // fallback; never leave the previous custom caret parked on old content.
+    emitUpdateSkipped("no-caret-rect");
     restoreNativeCaretAndHideCustom();
     pauseBreathe();
     return;
@@ -283,12 +519,18 @@ function doUpdateCursor(): void {
   // 传 editorRect 把淡出边界对齐到"编辑器内容区"而不是"裸视口"，让顶部对称底部。
   // 注意：必须先算 allowed（拿到 editorRect）再调 getEdgeProximity。
   let allowed: ReturnType<typeof isInAllowElements>;
+  const boundsStart = DEBUG_ENABLED ? performance.now() : 0;
   try {
     allowed = isInAllowElements({ x: rect.x, y: rect.y });
   } catch {
+    emitUpdateSkipped("bounds-check-threw");
     restoreNativeCaretAndHideCustom();
     pauseBreathe();
     return;
+  }
+  if (DEBUG_ENABLED) {
+    cursorPerf.boundsMs += performance.now() - boundsStart;
+    cursorPerf.boundsCalls++;
   }
   const edge = getEdgeProximity(rect, allowed.editorRect);
 
@@ -296,6 +538,7 @@ function doUpdateCursor(): void {
     // A rejected boundary is not a reliable custom-caret location. Restore
     // native caret visibility and hide the stale global caret instead of
     // leaving it at the last successful position.
+    emitUpdateSkipped("bounds-rejected");
     restoreNativeCaretAndHideCustom();
     pauseBreathe();
     return;
@@ -305,14 +548,21 @@ function doUpdateCursor(): void {
   if (isMobile() && allowed.cursorElement?.closest(".protyle-title__input")) {
     // Mobile title editing keeps the host's native caret. The previous code
     // skipped custom rendering while a global CSS rule still hid this caret.
+    emitUpdateSkipped("mobile-title");
     restoreNativeCaretAndHideCustom();
     pauseBreathe();
     return;
   }
 
   if (!allowed.cursorElement || !activateCustomCaret(allowed.cursorElement)) {
+    emitUpdateSkipped("caret-activation-failed");
     pauseBreathe();
     return;
+  }
+
+  if (DEBUG_ENABLED) {
+    debugCaretElement = allowed.cursorElement;
+    debugCaretRect = rect;
   }
 
   updateEdgeArrow(edge, allowed.isOuterElement, allowed.allowed);
@@ -329,11 +579,13 @@ function doUpdateCursor(): void {
     cachedZIndexElement.isConnected
   ) {
     effectiveZ = cachedEffectiveZIndex;
+    if (DEBUG_ENABLED) cursorPerf.zIndexHits++;
   } else {
     effectiveZ = getEffectiveZIndex(allowed.cursorElement!);
     cachedZIndexElement = allowed.cursorElement;
     cachedFullscreenElement = fullscreenElement;
     cachedEffectiveZIndex = effectiveZ;
+    if (DEBUG_ENABLED) cursorPerf.zIndexMisses++;
   }
   cursorEl.style.zIndex = String(effectiveZ + 1);
 
@@ -341,14 +593,16 @@ function doUpdateCursor(): void {
   //   yOffset：光标上移 N 像素，让光标视觉重心偏到行中线之上（用户偏好）。
   //   HEIGHT_RATIO > 1 时光标下沿超出 lineHeight，光标看起来仍偏下；微调上移抵消。
   const yOffset = 2;
+  // 本帧解析出的可见 opacity（"" = 交回 CSS / 呼吸动画），reacquire reveal 的淡入目标。
+  let resolvedOpacity = "";
   if (edge.isOffScreen) {
     // 完全离屏：opacity=0, scale=MIN_SCALE
-    applyFadeAndScale(cursorEl, 0, EDGE_FADE.MIN_SCALE, rect, yOffset);
+    resolvedOpacity = applyFadeAndScale(cursorEl, 0, EDGE_FADE.MIN_SCALE, rect, yOffset);
   } else if (edge.distance < EDGE_FADE.ZONE) {
     // FADE_ZONE 内：opacity = factor, scale = lerp(MIN_SCALE, 1, factor)
     const scale =
       EDGE_FADE.MIN_SCALE + (1 - EDGE_FADE.MIN_SCALE) * edge.factor;
-    applyFadeAndScale(cursorEl, edge.factor, scale, rect, yOffset);
+    resolvedOpacity = applyFadeAndScale(cursorEl, edge.factor, scale, rect, yOffset);
   } else {
     // 远离边缘：清 inline opacity 让 CSS / 呼吸动画接管；transform 不带 scale
     // Q7：长距离 = 长时长。查表 TRANSITION.TIERS（config.ts），用户可自行调整。
@@ -379,15 +633,34 @@ function doUpdateCursor(): void {
   }
 
   // 显示光标（commit 1：可能仍带 .hidden 残留，离屏分支不再加 .hidden 但清理一次保险）
-  cursorEl.classList.remove("hidden");
+  // Reacquire reveal：从可靠 hidden 恢复时，上面的位置写入在 .hidden 的
+  // transition:none 下必然 snap（不会从旧位置飞过来），这里只做 opacity 淡入。
+  const switchOwnsVisibility = isSwitchHiddenActive() || isSwitchRevealPending();
+  if (switchOwnsVisibility) {
+    // switch settle 有自己的 inline opacity 生命周期，不叠加 reacquire fade。
+    reacquirePending = false;
+    cursorEl.classList.remove("hidden");
+  } else if (
+    reacquirePending &&
+    cursorEl.classList.contains("hidden") &&
+    !reducedMotion &&
+    resolvedOpacity !== "0"
+  ) {
+    startReacquireReveal(resolvedOpacity);
+  } else {
+    reacquirePending = false;
+    cursorEl.classList.remove("hidden");
+  }
 
   // 7) 仅在 no-transition 生效时同步一次布局，让瞬移位置先提交，再恢复过渡。
   if (!reducedMotion && flushCursorTransitionIfNeeded(cursorEl)) {
+    if (DEBUG_ENABLED) cursorPerf.forcedLayouts++;
     // 下一帧恢复 transition（transform / height / opacity 过渡）
     if (removeTransitionFrame !== null) cancelAnimationFrame(removeTransitionFrame);
     removeTransitionFrame = requestAnimationFrame(() => {
       removeTransitionFrame = null;
       cursorEl?.classList.remove("no-transition");
+      if (DEBUG_ENABLED) emitDebugState("cursor-transition-restored");
     });
   }
 
@@ -403,6 +676,14 @@ function doUpdateCursor(): void {
   bindPopoverDrag(allowed.cursorElement, popoverDragContext);
   bindScrollContainerEvents(allowed.cursorElement, scrollBindingContext);
 
+  if (DEBUG_ENABLED) {
+    emitDebugState("cursor-update", {
+      frameTimestamp,
+    });
+    recordCursorUpdateDuration();
+    maybeFlushCursorPerf();
+  }
+
   // round 4 fix（capture + cooldown）：键盘标志由 markKeyboardPending 启动的 300ms 倒计时负责清零，
   // 不再在 doUpdateCursor 末尾同步清掉——倒计时窗口内 SiYuan 同步触发的 scroll/ResizeObserver
   // 仍能读到 pendingKeyboardUpdate=true，从而跳过 .no-transition 保留按距离分档的过渡动画
@@ -413,14 +694,37 @@ function scheduleResumeBreathe(): void {
 }
 
 /** 滚动 / 滚轮处理：暂停呼吸 + 停止过渡 + 立即更新 */
-function onScrollOrWheel(): void {
+function onScrollOrWheel(source: CursorScrollSource, target: EventTarget | null): void {
   if (!cursorEl) return;
   pauseBreathe();
+  const noTransitionBefore = DEBUG_ENABLED && cursorEl.classList.contains("no-transition");
+  const noAnimationBefore = DEBUG_ENABLED && cursorEl.classList.contains("no-animation");
+  const ownedScroll = source === "scroll" && typewriterScroll.ownsActiveScroll(target);
+  const useManualScrollPolicy = shouldUseManualScrollPolicy(
+    source,
+    pendingKeyboardUpdate,
+    ownedScroll,
+  );
   // round 4 fix：Enter 触发的 SiYuan 自动滚动会同步到这里；
   // 此时 pendingKeyboardUpdate=true，跳过加 .no-transition 保留按距离分档的过渡动画
-  if (!pendingKeyboardUpdate) {
+  if (useManualScrollPolicy) {
     cursorEl.classList.add("no-transition");
     cursorEl.classList.add("no-animation");
+  }
+  if (DEBUG_ENABLED) {
+    emitDebugState("cursor-scroll-policy", {
+      policy: pendingKeyboardUpdate
+        ? "keyboard-preserve-transition"
+        : "manual-scroll-no-transition",
+      source,
+      ownedScroll,
+      manualPolicy: useManualScrollPolicy,
+      pendingKeyboardUpdate,
+      noTransitionBefore,
+      noTransitionAfter: cursorEl.classList.contains("no-transition"),
+      noAnimationBefore,
+      noAnimationAfter: cursorEl.classList.contains("no-animation"),
+    });
   }
   queueUpdate();
 }
@@ -449,12 +753,20 @@ export function initCursor(): void {
   // P2: WS 监听已迁移到 ws-main EventBus（由 index.ts 订阅，destroy 时由 eventBusOffFns 清理）
   // 不再手动 addEventListener("message", ...) + JSON.parse。
 
+  // structural FLIP 动画期间（Play→Cleanup）逐帧跟随 caret 的 visual geometry：
+  // cursor 是事件驱动的，动画期间没有事件触发更新，会在中间帧位置停格，
+  // 直到下一次输入/点击（Tab/Shift+Tab 实测停格偏差 ~36-45px）。
+  structuralFlip.setMotionFrameSink(() => queueUpdate());
+
   // 首次定位
   queueUpdate();
 }
 
 export function destroyCursor(): void {
   initialized = false;
+
+  // structural FLIP 的逐帧跟随回调随 cursor 生命周期注销
+  structuralFlip.setMotionFrameSink(null);
 
   // round 4 fix（capture + cooldown）：清理键盘冷却定时器
   if (keyboardCooldownTimer !== null) {
@@ -486,6 +798,8 @@ export function destroyCursor(): void {
     cancelAnimationFrame(removeTransitionFrame);
     removeTransitionFrame = null;
   }
+  cancelReacquireReveal();
+  reacquirePending = false;
   stopSwitchSettle();
 
   // 移除 DOM 元素
@@ -509,6 +823,9 @@ export function destroyCursor(): void {
   prevCursorY = null;
   lastCursorDur = null;
   nativeCaretOwner = restoreNativeCaretOwner(nativeCaretOwner);
+  if (DEBUG_ENABLED) stopDebugFrameBurst();
+  debugCaretElement = null;
+  debugCaretRect = null;
 
   destroyEdgeArrow();
 }

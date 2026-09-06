@@ -8,12 +8,14 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outdir = mkdtempSync(path.join(root, ".tmp-tests-"));
 const testEntries = [
   "immediate-fixes.test.ts",
+  "target-resolver.test.ts",
   "characterization.test.ts",
   "input-session-ownership.test.ts",
   "ripple-semantic.test.ts",
   "ripple-dom-adapter.test.ts",
   "ripple-style-applier.test.ts",
   "ripple-nested-engine.test.ts",
+  "ripple-sentence-transition.test.ts",
   "structural-edit.test.ts",
   "debug-hook.test.ts",
   "debug-summary.test.mjs",
@@ -39,6 +41,9 @@ try {
           }));
         },
       }],
+      define: {
+        __ZENTYPE_DEV__: "false",
+      },
     });
   }
 

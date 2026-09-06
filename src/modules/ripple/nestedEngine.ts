@@ -19,7 +19,7 @@ export interface NestedRippleEngine {
   ): boolean;
   hasActiveStyles(): boolean;
   invalidateStructure(): void;
-  clear(): void;
+  clear(animate?: boolean): void;
 }
 
 interface SnapshotCache {
@@ -72,7 +72,7 @@ export function createNestedRippleEngine(): NestedRippleEngine {
     const snapshot = getSnapshot(wysiwyg, focusElement);
     if (!snapshot) {
       if (!options.preserveOnInvalid) {
-        styleApplier.clear();
+        styleApplier.clear(false);
         activeStyles = false;
       }
       discardSnapshot();
@@ -82,7 +82,7 @@ export function createNestedRippleEngine(): NestedRippleEngine {
     const plan = planSnapshot(snapshot);
     if (!plan) {
       if (!options.preserveOnInvalid) {
-        styleApplier.clear();
+        styleApplier.clear(false);
         activeStyles = false;
       }
       discardSnapshot();
@@ -102,8 +102,8 @@ export function createNestedRippleEngine(): NestedRippleEngine {
     structureDirty = true;
   }
 
-  function clear(): void {
-    styleApplier.clear();
+  function clear(animate = true): void {
+    styleApplier.clear(animate);
     activeStyles = false;
     discardSnapshot();
   }

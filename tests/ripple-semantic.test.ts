@@ -12,6 +12,12 @@ import {
   type RippleTargetPlan,
   type RippleTargetRole,
 } from "../src/modules/ripple/semanticPlanner";
+import {
+  diffSentenceSets,
+  resolveActiveSentenceRanges,
+  sameSentenceRangeSet,
+  splitSentences,
+} from "../src/modules/ripple/sentenceModel";
 
 interface ItemOptions {
   markerId?: string | null;
@@ -261,4 +267,93 @@ test("missing focus and invalid model return null", () => {
     ],
   );
   assert.equal(planRippleTargets(cyclic, "item-a"), null);
+});
+
+// --- Sentence model (Intl.Segmenter is the single boundary source) ---
+
+test("splitSentences delegates to Intl.Segmenter with UTF-16 offsets", () => {
+  const text = "第一句话。第二句话。";
+  assert.deepEqual(splitSentences(text), [
+    { start: 0, end: 5 },
+    { start: 5, end: 10 },
+  ]);
+
+  // 😀 occupies two code units; boundaries stay in UTF-16 coordinate space.
+  const astral = "你好😀。下一句。";
+  const astralRanges = splitSentences(astral);
+  assert.deepEqual(astralRanges, [
+    { start: 0, end: 5 },
+    { start: 5, end: 9 },
+  ]);
+  for (const { start, end } of astralRanges) {
+    assert.equal(astral.slice(start, end).length, end - start);
+  }
+});
+
+test("splitSentences keeps decimals, domains and ellipses intact", () => {
+  assert.deepEqual(splitSentences("价格是 3.14 元。下一句。"), [
+    { start: 0, end: 11 },
+    { start: 11, end: 15 },
+  ]);
+  assert.deepEqual(splitSentences("Node.js works. Next."), [
+    { start: 0, end: 15 },
+    { start: 15, end: 20 },
+  ]);
+  // Locked runtime behavior: an ellipsis run does not split the sentence.
+  assert.deepEqual(splitSentences("我想……还是算了。"), [{ start: 0, end: 9 }]);
+  // Closing quote stays attached to the quoted sentence.
+  assert.deepEqual(splitSentences("他说：“你好。”然后走了。"), [
+    { start: 0, end: 8 },
+    { start: 8, end: 13 },
+  ]);
+});
+
+test("splitSentences covers empty and unterminated text", () => {
+  assert.deepEqual(splitSentences(""), []);
+  assert.deepEqual(splitSentences("Hello"), [{ start: 0, end: 5 }]);
+  assert.deepEqual(splitSentences("。"), [{ start: 0, end: 1 }]);
+});
+
+test("resolveActiveSentenceRanges activates both sentences on the shared boundary", () => {
+  const ranges = splitSentences("第一句话。第二句话。");
+  const [a, b] = ranges;
+
+  assert.deepEqual(resolveActiveSentenceRanges(ranges, 2, 10), [a]); // 句内
+  assert.deepEqual(resolveActiveSentenceRanges(ranges, 5, 10), [a, b]); // 公共边界
+  assert.deepEqual(resolveActiveSentenceRanges(ranges, 4, 10), [a]); // 边界前一字符
+  assert.deepEqual(resolveActiveSentenceRanges(ranges, 6, 10), [b]); // 边界后一字符
+  assert.deepEqual(resolveActiveSentenceRanges(ranges, 0, 10), [a]); // BOF
+  assert.deepEqual(resolveActiveSentenceRanges(ranges, 10, 10), [b]); // EOF
+  assert.deepEqual(resolveActiveSentenceRanges(ranges, 99, 10), [b]); // 越界防御
+  assert.deepEqual(resolveActiveSentenceRanges(ranges, -1, 10), [a]);
+});
+
+test("resolveActiveSentenceRanges keeps a lone sentence active at every offset", () => {
+  const ranges = splitSentences("Hello");
+  assert.deepEqual(resolveActiveSentenceRanges(ranges, 0, 5), ranges);
+  assert.deepEqual(resolveActiveSentenceRanges(ranges, 3, 5), ranges);
+  assert.deepEqual(resolveActiveSentenceRanges(ranges, 5, 5), ranges);
+  assert.deepEqual(resolveActiveSentenceRanges([], 3, 5), []);
+});
+
+test("diffSentenceSets classifies leaving and entering ranges", () => {
+  const a = { start: 0, end: 5 };
+  const b = { start: 5, end: 10 };
+  assert.deepEqual(diffSentenceSets([a], [b]), { leaving: [a], entering: [b] });
+  assert.deepEqual(diffSentenceSets([a], [a, b]), { leaving: [], entering: [b] });
+  assert.deepEqual(diffSentenceSets([a, b], [b]), { leaving: [a], entering: [] });
+  assert.deepEqual(diffSentenceSets([a, b], [a, b]), { leaving: [], entering: [] });
+});
+
+test("sameSentenceRangeSet compares by start/end values, not identity", () => {
+  assert.equal(sameSentenceRangeSet([{ start: 0, end: 5 }], [{ start: 0, end: 5 }]), true);
+  assert.equal(sameSentenceRangeSet([{ start: 0, end: 5 }], [{ start: 0, end: 6 }]), false);
+  assert.equal(sameSentenceRangeSet([{ start: 0, end: 5 }], []), false);
+  assert.equal(
+    sameSentenceRangeSet(
+      [{ start: 0, end: 5 }, { start: 5, end: 9 }],
+      [{ start: 0, end: 5 }, { start: 5, end: 9 }],
+    ),
+    true,
+  );
 });

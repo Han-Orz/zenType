@@ -7,6 +7,8 @@ export interface SwitchSettleContext {
   pauseBreathe: () => void;
   queueUpdate: () => void;
   scheduleResumeBreathe: () => void;
+  /** Dev-only DebugKit channel for the settle lifecycle; absent in production. */
+  emitDebug?: (details: Record<string, unknown>) => void;
 }
 
 let switchSettleFrame: number | null = null;
@@ -66,6 +68,7 @@ function finishAnimatedSwitch(ctx: SwitchSettleContext): void {
     current.classList.remove("no-animation");
     current.style.opacity = "";
     ctx.scheduleResumeBreathe();
+    ctx.emitDebug?.({ phase: "revealed" });
   });
 }
 
@@ -76,10 +79,28 @@ export function startSwitchSettle(ctx: SwitchSettleContext): void {
   let lastTarget = ctx.sampleTarget();
   let stableFrames = 0;
   const startedAt = performance.now();
-  const minDurationMs = 240;
   const maxDurationMs = 700;
   const stableFrameTarget = 8;
   const epsilonPx = 0.35;
+  let firstValidTargetMs: number | null = lastTarget ? 0 : null;
+  ctx.emitDebug?.({
+    phase: "start",
+    maxDurationMs,
+    stableFrameTarget,
+    epsilonPx,
+    hadInitialTarget: lastTarget !== null,
+  });
+
+  const finishSettle = (reason: string) => {
+    ctx.emitDebug?.({
+      phase: "finish",
+      reason,
+      elapsedMs: Math.round(performance.now() - startedAt),
+      stableFrames,
+      firstValidTargetMs: firstValidTargetMs === null ? null : Math.round(firstValidTargetMs),
+    });
+    finishAnimatedSwitch(ctx);
+  };
 
   const tick = () => {
     switchSettleFrame = null;
@@ -88,12 +109,13 @@ export function startSwitchSettle(ctx: SwitchSettleContext): void {
     const target = ctx.sampleTarget();
     if (!target) {
       if (elapsedMs >= maxDurationMs) {
-        finishAnimatedSwitch(ctx);
+        finishSettle("max-duration-no-target");
         return;
       }
       switchSettleFrame = requestAnimationFrame(tick);
       return;
     }
+    if (firstValidTargetMs === null) firstValidTargetMs = elapsedMs;
 
     const targetMoved =
       lastTarget === null ||
@@ -104,11 +126,14 @@ export function startSwitchSettle(ctx: SwitchSettleContext): void {
     stableFrames = targetMoved ? 0 : stableFrames + 1;
     lastTarget = target;
 
+    // Readiness = the sampled caret target has held still for a full
+    // stability window (any layout or selection shift resets the count);
+    // the elapsed cap stays as the fail-open. No fixed delay floor.
     if (
       elapsedMs >= maxDurationMs ||
-      (elapsedMs >= minDurationMs && stableFrames >= stableFrameTarget)
+      stableFrames >= stableFrameTarget
     ) {
-      finishAnimatedSwitch(ctx);
+      finishSettle(elapsedMs >= maxDurationMs ? "max-duration" : "stable");
       return;
     }
 

@@ -171,6 +171,46 @@ function opacity(elementToRead: FakeElement): string {
   return elementToRead.style.getPropertyValue(OPACITY_PROPERTY);
 }
 
+class FakeTimers {
+  private readonly originalSetTimeout = globalThis.setTimeout;
+  private readonly originalClearTimeout = globalThis.clearTimeout;
+  private nextId = 1;
+  readonly pending = new Map<number, () => void>();
+
+  install(): void {
+    Object.defineProperty(globalThis, "setTimeout", {
+      configurable: true,
+      value: (callback: () => void) => {
+        const id = this.nextId++;
+        this.pending.set(id, callback);
+        return id;
+      },
+    });
+    Object.defineProperty(globalThis, "clearTimeout", {
+      configurable: true,
+      value: (id: number) => this.pending.delete(id),
+    });
+  }
+
+  flushAll(): void {
+    for (const [id, callback] of [...this.pending]) {
+      this.pending.delete(id);
+      callback();
+    }
+  }
+
+  restore(): void {
+    Object.defineProperty(globalThis, "setTimeout", {
+      configurable: true,
+      value: this.originalSetTimeout,
+    });
+    Object.defineProperty(globalThis, "clearTimeout", {
+      configurable: true,
+      value: this.originalClearTimeout,
+    });
+  }
+}
+
 test("applies nested plan through adapter, planner, and style applier", () => {
   const fixture = buildFixture({ attributeReads: 0 });
   const engine = createNestedRippleEngine();
@@ -226,26 +266,33 @@ test("invalidateStructure forces a fresh snapshot after a DOM structure change",
 });
 
 test("focus and root identity changes rebuild and release old target styles", () => {
-  const stats = { attributeReads: 0 };
-  const fixture = buildFixture(stats);
-  const engine = createNestedRippleEngine();
-  const wysiwyg = asHTMLElement(fixture.wysiwyg);
+  const timers = new FakeTimers();
+  timers.install();
+  try {
+    const stats = { attributeReads: 0 };
+    const fixture = buildFixture(stats);
+    const engine = createNestedRippleEngine();
+    const wysiwyg = asHTMLElement(fixture.wysiwyg);
 
-  assert.equal(engine.apply(wysiwyg, asHTMLElement(fixture.focusB1)), true);
-  assert.equal(engine.apply(wysiwyg, asHTMLElement(fixture.focusB2)), true);
-  assert.equal(opacity(fixture.itemB2.children[1]), "1");
-  assert.equal(opacity(fixture.itemB1.children[1]), "");
-  assert.equal(fixture.itemB1.classList.contains(RIPPLE_CLASS), true);
+    assert.equal(engine.apply(wysiwyg, asHTMLElement(fixture.focusB1)), true);
+    assert.equal(engine.apply(wysiwyg, asHTMLElement(fixture.focusB2)), true);
+    assert.equal(opacity(fixture.itemB2.children[1]), "1");
+    assert.equal(opacity(fixture.itemB1.children[1]), "");
+    assert.equal(fixture.itemB1.classList.contains(RIPPLE_CLASS), true);
 
-  const otherStats = { attributeReads: 0 };
-  const other = buildFixture(otherStats);
-  assert.equal(
-    engine.apply(asHTMLElement(other.wysiwyg), asHTMLElement(other.focusB1)),
-    true,
-  );
-  assert.equal(opacity(fixture.itemB2.children[1]), "");
-  assert.equal(fixture.itemB1.classList.contains(RIPPLE_CLASS), false);
-  assert.equal(fixture.itemB2.classList.contains(RIPPLE_CLASS), false);
+    const otherStats = { attributeReads: 0 };
+    const other = buildFixture(otherStats);
+    assert.equal(
+      engine.apply(asHTMLElement(other.wysiwyg), asHTMLElement(other.focusB1)),
+      true,
+    );
+    timers.flushAll();
+    assert.equal(opacity(fixture.itemB2.children[1]), "");
+    assert.equal(fixture.itemB1.classList.contains(RIPPLE_CLASS), false);
+    assert.equal(fixture.itemB2.classList.contains(RIPPLE_CLASS), false);
+  } finally {
+    timers.restore();
+  }
 });
 
 test("non-list focus falls back with clear semantics and clear is idempotent", () => {

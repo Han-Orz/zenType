@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setActiveEditor } from "siyuan";
+import { RIPPLE_CONFIG, TYPEWRITER_CONFIG } from "../src/config";
 import * as inputMode from "../src/modules/inputMode";
 import * as inputModeTriggers from "../src/modules/inputModeTriggers";
 import {
   bindCursorDocumentEvents,
   destroyCursorDocumentEvents,
+  shouldUseManualScrollPolicy,
+  type CursorScrollSource,
 } from "../src/modules/cursor/events";
 import {
   destroyTypewriter,
   initTypewriter,
+  isCaretNearVisibilityBoundary,
 } from "../src/modules/typewriter";
 import * as flip from "../src/modules/typewriter/flip";
 import * as scroll from "../src/modules/typewriter/scroll";
@@ -198,6 +202,7 @@ class FakeElement extends FakeEventTarget {
   parentNode: FakeElement | null = null;
   isContentEditable = false;
   scrollTop = 0;
+  scrollLeft = 0;
   scrollHeight = 0;
   clientHeight = 0;
   scrollWidth = 0;
@@ -887,8 +892,11 @@ function createRippleFixture(runtime: FakeRuntime): RippleFixture {
     return { item, block, text };
   };
 
-  const focus = makeItem("focus", "one. two!");
-  const alternate = makeItem("alternate", "alternate. branch!");
+  // Sentence fixtures use capital letters after the period: Intl.Segmenter
+  // (UAX #29) does not break before lowercase, so "one. two!" would stay a
+  // single sentence and the two-sentence dim scenario would not exist.
+  const focus = makeItem("focus", "one. Two!");
+  const alternate = makeItem("alternate", "alternate. Branch!");
   const sibling = makeItem("sibling", "sibling");
   const childList = new FakeElement({ dataType: "NodeList" });
   append(childList, alternate.item, sibling.item);
@@ -1107,6 +1115,9 @@ test("typewriter gives an idle first character an immediate scroll opportunity",
     assert.equal(runtime.raf.pending.size, 1, "check must start scroll without waiting for debounce");
     assert.equal(fixture.content.scrollTop, 0);
 
+    const firstScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstScrollFrame);
+    runtime.raf.flush(firstScrollFrame, runtime.clock.now);
     runtime.clock.advance(600);
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(fixture.content.scrollTop > 0, true);
@@ -1153,6 +1164,313 @@ test("typewriter coalesces continuous typing and scrolls when its debounce expir
     runtime.clock.advance(401);
     assert.equal(runtime.raf.pending.size, 1, "debounce expiry must schedule the current scroll");
     assert.equal(fixture.content.scrollTop, 0);
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("typewriter uses the outer trigger band and inner settle target", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  runtime.clock.now = 25_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+
+    runtime.setCaret(fixture.text, 1, rect(20, 520));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "insertText",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 0, "caret inside the trigger band must hold");
+    assert.equal(fixture.content.scrollTop, 0);
+
+    runtime.clock.advance(401);
+    runtime.setCaret(fixture.text, 1, rect(20, 550));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 1, "caret below the trigger band must start one scroll");
+    runtime.raf.flushNext(runtime.clock.now);
+    const firstScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstScrollFrame);
+    runtime.raf.flush(firstScrollFrame, runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 1);
+
+    const scrollFrame = [...runtime.raf.pending.keys()][0];
+    runtime.clock.advance(1000);
+    runtime.raf.flush(scrollFrame, runtime.clock.now);
+    assert.equal(
+      Math.round(fixture.content.scrollTop),
+      70,
+      "ordinary following settles at 48% instead of the old 50% boundary",
+    );
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("typewriter click relocation keeps its existing 50% center target", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  runtime.clock.now = 26_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+    runtime.setCaret(fixture.text, 1, rect(20, 800));
+    runtime.document.dispatch("click", eventFor(fixture.block));
+    runtime.raf.flushNext(runtime.clock.now);
+
+    assert.equal(runtime.raf.pending.size, 1, "an explicit far click starts its own motion");
+    const firstScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstScrollFrame);
+    runtime.raf.flush(firstScrollFrame, runtime.clock.now);
+    const scrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(scrollFrame);
+    runtime.clock.advance(1000);
+    runtime.raf.flush(scrollFrame, runtime.clock.now);
+    assert.equal(Math.round(fixture.content.scrollTop), 300);
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("isCaretNearVisibilityBoundary uses a hard margin at both editor edges", () => {
+  const editorRect = { top: 100, bottom: 1100 };
+  assert.equal(isCaretNearVisibilityBoundary({ y: 400, height: 20 }, editorRect), false);
+  assert.equal(
+    isCaretNearVisibilityBoundary({ y: 149, height: 20 }, editorRect),
+    false,
+    "one px outside the top margin is still safe",
+  );
+  assert.equal(
+    isCaretNearVisibilityBoundary({ y: 148, height: 20 }, editorRect),
+    true,
+    "the top margin edge is at risk",
+  );
+  assert.equal(
+    isCaretNearVisibilityBoundary({ y: 1031, height: 20 }, editorRect),
+    false,
+    "one px inside the bottom margin is still safe",
+  );
+  assert.equal(
+    isCaretNearVisibilityBoundary({ y: 1032, height: 20 }, editorRect),
+    true,
+    "the bottom margin edge is at risk",
+  );
+});
+
+test("continuous backspace mid-editor keeps the typing debounce", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  runtime.clock.now = 30_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+
+    runtime.setCaret(fixture.text, 1, rect(20, 400));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 0, "mid-editor deletion holds without scrolling");
+
+    runtime.clock.advance(100);
+    runtime.setCaret(fixture.text, 1, rect(20, 403));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(runtime.clock.delays(), [401], "comfort correction stays debounced");
+    assert.equal(fixture.content.scrollTop, 0);
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("caret entering the top visibility zone bypasses the typing debounce", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  runtime.clock.now = 30_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+    fixture.content.scrollTop = 300;
+
+    runtime.setCaret(fixture.text, 1, rect(20, 400));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 0);
+    assert.deepEqual(runtime.clock.delays(), [401], "comfort debounce armed while the caret is safe");
+
+    runtime.clock.advance(100);
+    runtime.setCaret(fixture.text, 1, rect(20, 30));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(
+      runtime.clock.delays(),
+      [401],
+      "the bypass must not re-arm the debounce (a re-arm would show 301ms)",
+    );
+    assert.equal(runtime.raf.pending.size, 1, "the resolver starts the visibility follow");
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("caret beyond the editor viewport edge also bypasses the debounce", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  runtime.clock.now = 30_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+    fixture.content.scrollTop = 300;
+
+    runtime.setCaret(fixture.text, 1, rect(20, 400));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(runtime.clock.delays(), [401], "comfort debounce armed while the caret is safe");
+
+    runtime.clock.advance(100);
+    runtime.setCaret(fixture.text, 1, rect(20, -20));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(
+      runtime.clock.delays(),
+      [401],
+      "an out-of-viewport caret cannot wait for debounce",
+    );
+    assert.equal(runtime.raf.pending.size, 1, "the resolver starts the visibility follow");
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("caret entering the bottom visibility zone bypasses the typing debounce", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  runtime.clock.now = 30_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+
+    runtime.setCaret(fixture.text, 1, rect(20, 500));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 0);
+    assert.deepEqual(runtime.clock.delays(), [401], "comfort debounce armed while the caret is safe");
+
+    runtime.clock.advance(100);
+    runtime.setCaret(fixture.text, 1, rect(20, 970));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(
+      runtime.clock.delays(),
+      [401],
+      "the bypass must not re-arm the debounce (a re-arm would show 301ms)",
+    );
+    assert.equal(runtime.raf.pending.size, 1, "the resolver starts the visibility follow");
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("empty block at the visibility boundary still follows the caret", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime, "");
+  runtime.clock.now = 30_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+    fixture.content.scrollTop = 300;
+
+    runtime.setCaret(fixture.text, 0, rect(20, 500));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 0, "mid-editor empty blocks stay guarded");
+
+    runtime.clock.advance(100);
+    runtime.setCaret(fixture.text, 0, rect(20, 30));
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "deleteContentBackward",
+      isComposing: false,
+    }));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(runtime.clock.delays(), [], "the visibility boundary must bypass the guard and the debounce");
+    assert.equal(runtime.raf.pending.size, 1, "an empty block at the viewport edge still follows");
   } finally {
     destroyTypewriter();
     inputMode.reset();
@@ -1225,7 +1543,11 @@ test("typewriter defers transient caret changes until active scroll settles", ()
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(runtime.raf.pending.size, 1);
 
+    const initialScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(initialScrollFrame);
+    runtime.raf.flush(initialScrollFrame, runtime.clock.now);
     const firstScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstScrollFrame);
     runtime.clock.advance(401);
     runtime.setCaret(fixture.text, 1, rect(20, 850));
     runtime.document.dispatch("selectionchange");
@@ -1237,17 +1559,139 @@ test("typewriter defers transient caret changes until active scroll settles", ()
 
     runtime.clock.advance(600);
     runtime.raf.flush(firstScrollFrame, runtime.clock.now);
-    assert.equal(Math.round(fixture.content.scrollTop), 300, "the current motion finishes naturally");
+    assert.equal(Math.round(fixture.content.scrollTop), 320, "the current motion finishes naturally");
     assert.equal(runtime.raf.pending.size, 1, "completion schedules one final geometry resync");
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(runtime.raf.pending.size, 1, "the resync starts one follow-up loop at the safe point");
     const resyncScrollFrame = [...runtime.raf.pending.keys()][0];
-    runtime.clock.advance(600);
     runtime.raf.flush(resyncScrollFrame, runtime.clock.now);
+    const resyncProgressFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(resyncProgressFrame);
+    runtime.clock.advance(600);
+    runtime.raf.flush(resyncProgressFrame, runtime.clock.now);
     assert.equal(fixture.content.scrollTop > 300, true, "the latest caret target is eventually adopted");
     assert.equal(runtime.raf.pending.size, 0);
   } finally {
     destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("scroll starts its timeline from the first rAF timestamp", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  runtime.clock.now = 1_000;
+  fixture.content.scrollTop = 100;
+
+  try {
+    scroll.reset();
+    scroll.scrollTo(fixture.content, { deltaY: 400, duration: 400 });
+    const firstFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstFrame);
+
+    // Model the SiYuan runtime's distinct performance/rAF clock origins:
+    // performance.now() at request time is 1000, while the first rAF callback
+    // receives 1100. The first renderable frame must still be the baseline.
+    runtime.raf.flush(firstFrame, 1_100);
+    assert.equal(fixture.content.scrollTop, 100);
+
+    const secondFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(secondFrame);
+    runtime.raf.flush(secondFrame, 1_200);
+    assert.equal(
+      fixture.content.scrollTop,
+      331.25,
+      "progress is based on the difference between rAF timestamps",
+    );
+
+    const finalFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(finalFrame);
+    runtime.raf.flush(finalFrame, 1_500);
+    assert.equal(fixture.content.scrollTop, 500);
+    assert.equal(runtime.raf.pending.size, 0);
+  } finally {
+    scroll.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("cursor routes Typewriter-owned scrolls separately from manual input", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  const routed: Array<{ source: CursorScrollSource; target: EventTarget | null }> = [];
+
+  try {
+    inputMode.reset();
+    scroll.reset();
+    bindCursorDocumentEvents({
+      clearKeyboardPending: () => undefined,
+      markKeyboardPending: () => undefined,
+      onScrollOrWheel: (source, target) => routed.push({ source, target }),
+      queueUpdate: () => undefined,
+    });
+
+    scroll.scrollTo(fixture.content, { deltaY: 100, duration: 100 });
+    assert.equal(scroll.ownsActiveScroll(fixture.content), true);
+    assert.equal(scroll.ownsActiveScroll(fixture.wysiwyg), false);
+
+    runtime.document.dispatch("scroll", eventFor(fixture.content));
+    runtime.document.dispatch("scroll", eventFor(fixture.wysiwyg));
+    runtime.document.dispatch("wheel", eventFor(fixture.content));
+    runtime.document.dispatch("touchmove", eventFor(fixture.content));
+
+    assert.deepEqual(
+      routed.map(({ source, target }) => ({
+        source,
+        manual: shouldUseManualScrollPolicy(
+          source,
+          false,
+          source === "scroll" && scroll.ownsActiveScroll(target),
+        ),
+      })),
+      [
+        // Engine-owned scroll without a keyboard cooldown is pure viewport
+        // motion: the cursor snaps 1:1 (sweep fix for follow lag).
+        { source: "scroll", manual: true },
+        { source: "scroll", manual: true },
+        { source: "manual-input", manual: true },
+        { source: "manual-input", manual: true },
+      ],
+    );
+    assert.equal(shouldUseManualScrollPolicy("manual-input", true, true), true);
+    assert.equal(
+      shouldUseManualScrollPolicy("scroll", true, true),
+      false,
+      "keyboard-pending engine scrolls keep the transition",
+    );
+
+    const firstFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstFrame);
+    runtime.raf.flush(firstFrame, 0);
+    const finalFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(finalFrame);
+    runtime.raf.flush(finalFrame, 100);
+    assert.equal(scroll.ownsActiveScroll(fixture.content), false);
+
+    runtime.document.dispatch("scroll", eventFor(fixture.content));
+    const finalRoute = routed.at(-1);
+    assert.ok(finalRoute);
+    assert.equal(finalRoute.source, "scroll");
+    assert.equal(
+      shouldUseManualScrollPolicy(
+        finalRoute.source,
+        false,
+        scroll.ownsActiveScroll(finalRoute.target),
+      ),
+      true,
+    );
+  } finally {
+    destroyCursorDocumentEvents();
+    scroll.reset();
     inputMode.reset();
     setActiveEditor(null);
     runtime.restore();
@@ -1266,8 +1710,11 @@ test("scroll keeps its active timeline while adopting a structural resync target
     const firstFrame = [...runtime.raf.pending.keys()][0];
     assert.ok(firstFrame);
 
-    runtime.clock.advance(200);
     runtime.raf.flush(firstFrame, runtime.clock.now);
+    const firstProgressFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstProgressFrame);
+    runtime.clock.advance(200);
+    runtime.raf.flush(firstProgressFrame, runtime.clock.now);
     const activeFrame = [...runtime.raf.pending.keys()][0];
     assert.ok(activeFrame);
 
@@ -1327,7 +1774,10 @@ test("typewriter waits for stable structural geometry before changing active scr
     runtime.document.dispatch("selectionchange");
     runtime.raf.flushNext(runtime.clock.now);
 
-    const activeScrollFrame = [...runtime.raf.pending.keys()][0];
+    let activeScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(activeScrollFrame);
+    runtime.raf.flush(activeScrollFrame, runtime.clock.now);
+    activeScrollFrame = [...runtime.raf.pending.keys()][0];
     assert.ok(activeScrollFrame);
 
     // Start a structural edit while a scroll is in flight. The first
@@ -1356,7 +1806,7 @@ test("typewriter waits for stable structural geometry before changing active scr
     while (true) {
       const nonScrollFrame = [...runtime.raf.pending.keys()].find((id) => id !== activeScrollFrame);
       if (nonScrollFrame === undefined) break;
-      assert.ok(settleFrameCount++ < 4, "structural settle frames must remain bounded");
+      assert.ok(settleFrameCount++ < 16, "settle and readiness frames must remain bounded");
       runtime.clock.advance(16);
       runtime.raf.flush(nonScrollFrame, runtime.clock.now);
     }
@@ -1493,6 +1943,7 @@ test("Cursor, Typewriter, and Ripple keep one input session across shared events
     assert.equal(runtime.window.listenerCount("resize"), 0);
     assert.equal(runtime.document.getElementById("zentype-cursor"), null);
     assert.equal(runtime.raf.pending.size, 0);
+    runtime.clock.advance(1000);
     assert.equal(runtime.clock.pending.size, 0);
     assert.equal(fixture.block.style.getPropertyValue("--zt-ripple-opacity"), "");
 
@@ -1575,6 +2026,188 @@ test("cursor fails open on invalid geometry, active-editor mismatch, and rejecte
   }
 });
 
+test("cursor reveals with a fade when reacquiring from reliable hidden", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime, "cursor");
+  runtime.clock.now = 120_000;
+
+  try {
+    inputMode.reset();
+    initCursor();
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.raf.flushNext(runtime.clock.now);
+
+    const cursor = runtime.document.getElementById("zentype-cursor");
+    assert.ok(cursor);
+    const positionedTransform = cursor.style.transform;
+    assert.equal(positionedTransform.includes("translate3d("), true);
+    assert.equal(cursor.style.transition.startsWith("transform"), true);
+
+    // Reliably hidden: no caret geometry at all.
+    runtime.clearCaret();
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.classList.contains("hidden"), true);
+
+    // Reacquire: geometry is reliable again at the same caret.
+    runtime.setCaret(fixture.text, 1, rect(20, 500));
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    // Position snaps to the caret (same math as a normal update) while the
+    // element is still invisible; the reveal is opacity-only.
+    assert.equal(cursor.style.transform, positionedTransform);
+    assert.equal(cursor.classList.contains("hidden"), false);
+    assert.equal(cursor.style.opacity, "0");
+    assert.equal(cursor.style.transition, "opacity 120ms ease-out");
+    // Native caret handover happens in the same update, before the fade.
+    assert.equal(fixture.block.classList.contains("zentype-custom-caret-active"), true);
+
+    // The reveal handoff restores presence on the next frame.
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.style.opacity, "");
+    assert.equal(cursor.style.transition, "opacity 120ms ease-out");
+    assert.equal(runtime.raf.pending.size, 0);
+
+    // A normal visible update takes over: transition rewritten by distance,
+    // no reveal replay, no opacity "0" intermediate.
+    runtime.setCaret(fixture.text, 1, rect(20, 600));
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.style.opacity, "");
+    assert.equal(cursor.style.transition.startsWith("transform"), true);
+    assert.notEqual(cursor.style.transform, positionedTransform);
+  } finally {
+    destroyCursor();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("cursor skips the reacquire fade while the caret is off-screen", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime, "cursor");
+  runtime.clock.now = 130_000;
+
+  try {
+    inputMode.reset();
+    initCursor();
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.raf.flushNext(runtime.clock.now);
+
+    const cursor = runtime.document.getElementById("zentype-cursor");
+    assert.ok(cursor);
+
+    runtime.clearCaret();
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.classList.contains("hidden"), true);
+
+    // Caret point is inside the editor rect (allowed) but its line bottom
+    // extends past it (off-screen): the cursor must stay invisible with no
+    // reveal handoff — never fade to full opacity off-screen.
+    runtime.setCaret(fixture.text, 1, rect(20, 995));
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.classList.contains("hidden"), false);
+    assert.equal(cursor.style.opacity, "0");
+    assert.equal(runtime.raf.pending.size, 0);
+  } finally {
+    destroyCursor();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("cursor appears instantly without reveal under reduced motion", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime, "cursor");
+  runtime.window.reducedMotion = true;
+  runtime.clock.now = 140_000;
+
+  try {
+    inputMode.reset();
+    initCursor();
+    runtime.raf.flushNext(runtime.clock.now);
+
+    const cursor = runtime.document.getElementById("zentype-cursor");
+    assert.ok(cursor);
+
+    runtime.clearCaret();
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.classList.contains("hidden"), true);
+
+    runtime.setCaret(fixture.text, 1, rect(20, 500));
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.classList.contains("hidden"), false);
+    assert.equal(cursor.style.opacity, "");
+    assert.equal(runtime.raf.pending.size, 0);
+  } finally {
+    destroyCursor();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("cursor switch settle supersedes a pending reacquire reveal", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime, "cursor");
+  runtime.clock.now = 150_000;
+
+  try {
+    inputMode.reset();
+    initCursor();
+    runtime.raf.flushNext(runtime.clock.now);
+    runtime.raf.flushNext(runtime.clock.now);
+
+    const cursor = runtime.document.getElementById("zentype-cursor");
+    assert.ok(cursor);
+
+    runtime.clearCaret();
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.classList.contains("hidden"), true);
+
+    // Switch settle takes over visibility while the reacquire is pending.
+    onProtyleSwitched({} as never);
+    assert.equal(cursor.classList.contains("hidden"), false);
+    assert.equal(cursor.style.opacity, "0");
+    assert.equal(isSwitchHiddenActive(), true);
+
+    // A successful update mid-settle must not start a reacquire reveal.
+    runtime.setCaret(fixture.text, 1, rect(20, 500));
+    onProtyleLoaded({} as never);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.style.opacity, "0");
+    assert.equal(isSwitchHiddenActive(), true);
+
+    // Drive the settle to stability: 8 stable ticks finish it, then the
+    // switch reveal and the transition-restore frame both run.
+    for (let index = 0; index < 12; index++) {
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+    assert.equal(isSwitchHiddenActive(), false);
+    assert.equal(isSwitchRevealPending(), false);
+    assert.equal(cursor.style.opacity, "");
+    assert.equal(cursor.classList.contains("hidden"), false);
+    assert.equal(runtime.raf.pending.size, 0);
+  } finally {
+    stopSwitchSettle();
+    destroyCursor();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
 test("cursor switch settle hides until stable, cancels stale settle, and reveals once", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
@@ -1648,6 +2281,53 @@ test("cursor switch settle hides until stable, cancels stale settle, and reveals
   }
 });
 
+test("cursor switch settle reveals on frame stability without a fixed delay floor", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const cursor = new FakeElement();
+  cursor.classList.add("hidden");
+  const target = { x: 4, y: 6, height: 20 };
+  let queueUpdates = 0;
+
+  try {
+    stopSwitchSettle();
+    runtime.clock.now = 0;
+    startSwitchSettle({
+      getCursorElement: () => cursor as unknown as HTMLDivElement,
+      sampleTarget: () => target,
+      cancelRemoveTransitionFrame: () => undefined,
+      pauseBreathe: () => undefined,
+      queueUpdate: () => { queueUpdates++; },
+      scheduleResumeBreathe: () => undefined,
+    });
+
+    // Seven stable frames (112ms at 16ms/frame): stability window not yet met,
+    // so the cursor must stay hidden regardless of how early the target settled.
+    for (let index = 1; index <= 7; index++) {
+      runtime.clock.now = index * 16;
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+    assert.equal(isSwitchHiddenActive(), true);
+    assert.equal(isSwitchRevealPending(), false);
+
+    // Eighth stable frame (~128ms total): readiness met — the old 240ms floor
+    // would have kept the cursor hidden for another seven frames.
+    runtime.clock.now = 128;
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(isSwitchHiddenActive(), false);
+    assert.equal(isSwitchRevealPending(), true);
+    assert.equal(queueUpdates, 1);
+
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(isSwitchRevealPending(), false);
+    assert.equal(cursor.style.opacity, "");
+    assert.equal(cursor.classList.contains("no-transition"), false);
+  } finally {
+    stopSwitchSettle();
+    runtime.restore();
+  }
+});
+
 test("module lifecycle releases owned resources and reinitializes cleanly", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
@@ -1702,6 +2382,7 @@ test("module lifecycle releases owned resources and reinitializes cleanly", () =
     assert.equal(fixture.content.listenerCount("wheel"), 0);
     assert.equal(runtime.resizeObservers.every((observer) => observer.disconnected), true);
     assert.equal(runtime.mutationObservers.every((observer) => observer.disconnected), true);
+    runtime.clock.advance(1000);
     assert.equal(runtime.clock.pending.size, 0);
     assert.equal(runtime.highlights.size, 0);
     assert.equal(fixture.block.classList.contains("zentype-ripple-block"), false);
@@ -1997,6 +2678,8 @@ test("ripple preserves valid nested opacity until the coordinator commits a stru
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(newContent.style.getPropertyValue("--zt-ripple-opacity"), "1");
     assert.equal(fixture.focusContent.style.getPropertyValue("--zt-ripple-opacity"), "");
+    assert.equal(runtime.raf.pending.size, 1, "a changed nested handoff retargets on the next frame");
+    runtime.raf.flushNext(runtime.clock.now);
     assert.equal(runtime.raf.pending.size, 0);
 
     inputMode.setBothOff();
@@ -2154,7 +2837,7 @@ test("Tab list intent stays authoritative through nested-list reparent and stabl
     inputMode.reset();
     inputMode.setBothOn();
     initTypewriter();
-    runtime.setCaret(fixture.alternateText, 1, rect(20, 400));
+    runtime.setCaret(fixture.alternateText, 1, rect(20, 550));
     runtime.document.dispatch("keydown", eventFor(fixture.alternateContent, {
       key: "Tab",
       isComposing: false,
@@ -2201,13 +2884,15 @@ test("Tab list intent stays authoritative through nested-list reparent and stabl
     assert.equal(afterReparent.phase, "mutating", "the semantic mutation has no idle gap");
     assert.equal(afterReparent.activityVersion > started.activityVersion, true);
 
-    runtime.clock.now = 16;
-    runtime.raf.flushNext(runtime.clock.now);
-    runtime.clock.now = 32;
-    runtime.raf.flushNext(runtime.clock.now);
-    runtime.raf.flushNext(runtime.clock.now);
-    runtime.clock.now = 48;
-    runtime.raf.flushNext(runtime.clock.now);
+    // The Tab FLIP readiness loop and the coordinator's settle chain now share
+    // the frame queue; drive both to quiescence instead of a fixed flush count.
+    let settleFrames = 0;
+    while ((isStructuralEditPending() || runtime.raf.pending.size > 0) && settleFrames < 60) {
+      runtime.clock.now += 16;
+      runtime.raf.flushNext(runtime.clock.now);
+      settleFrames += 1;
+    }
+    assert.ok(settleFrames < 60, "list-change must settle in a bounded number of frames");
 
     assert.deepEqual(
       finishes.map(({ generation: finishedGeneration, kind, stable }) => ({
@@ -2218,8 +2903,161 @@ test("Tab list intent stays authoritative through nested-list reparent and stabl
       [{ generation, kind: "list-change", stable: true }],
     );
     assert.equal(isStructuralEditPending(), false);
+    assert.equal(runtime.raf.pending.size, 0, "list-change keeps the existing typing debounce");
+    runtime.clock.advance(401);
+    assert.equal(runtime.raf.pending.size, 1, "debounced list-change starts one scroll");
+    const firstScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstScrollFrame);
+    runtime.raf.flush(firstScrollFrame, runtime.clock.now);
+    const scrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(scrollFrame);
+    runtime.clock.advance(1000);
+    runtime.raf.flush(scrollFrame, runtime.clock.now);
+    assert.equal(Math.round(fixture.content.scrollTop), 70);
   } finally {
     unsubscribe();
+    destroyTypewriter();
+    destroyStructuralEditCoordinator();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("Tab list intent FLIPs the reparented item on both axes", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+  const plainTransition = `transform 250ms ${TYPEWRITER_CONFIG.SCROLL_CURVE}`;
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initTypewriter();
+    flip.reset();
+
+    // Focused item at (100, 300); SiYuan's indent moves it to (124, 340).
+    // The paragraph inside rides along with the same painted delta — the
+    // nested-dedupe must transform the item only, never both.
+    fixture.alternateItem.rect = rect(100, 300, 700, 20);
+    fixture.alternateContent.rect = rect(124, 300, 676, 20);
+    runtime.setCaret(fixture.alternateText, 1, rect(150, 305, 1, 20));
+
+    const transformWrites: string[] = [];
+    const itemSetProperty = fixture.alternateItem.style.setProperty.bind(fixture.alternateItem.style);
+    fixture.alternateItem.style.setProperty = (property: string, value: string, priority = "") => {
+      if (property === "transform") transformWrites.push(value);
+      itemSetProperty(property, value, priority);
+    };
+
+    runtime.document.dispatch("keydown", eventFor(fixture.alternateContent, {
+      key: "Tab",
+      isComposing: false,
+      defaultPrevented: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      metaKey: false,
+    }));
+    assert.equal(getStructuralEditSnapshot().kind, "list-change");
+    assert.equal(runtime.raf.pending.size >= 1, true, "FLIP arms a readiness frame at keydown");
+
+    // The Tab reparent: the same item element moves under a new sublist wrapper.
+    const oldList = fixture.alternateItem.parentElement;
+    const newList = new FakeElement({ dataType: "NodeList" });
+    append(fixture.focusItem, newList);
+    oldList.removeChild(fixture.alternateItem);
+    append(newList, fixture.alternateItem);
+    fixture.alternateItem.rect = rect(124, 340, 676, 20);
+    fixture.alternateContent.rect = rect(148, 340, 652, 20);
+
+    // The coordinator's settle frame is queued ahead of the FLIP readiness
+    // frame; run both until the Invert/Play task has written the transform.
+    let armFrames = 0;
+    while (transformWrites.length < 2 && armFrames < 20) {
+      runtime.clock.now += 16;
+      runtime.raf.flushNext(runtime.clock.now);
+      armFrames += 1;
+    }
+    assert.deepEqual(transformWrites.slice(0, 2), ["translate(-24px, -40px)", ""]);
+    assert.equal(fixture.alternateItem.style.getPropertyValue("transition"), plainTransition);
+    assert.equal(fixture.alternateItem.style.transform, "");
+    assert.equal(
+      fixture.alternateContent.style.transform,
+      "",
+      "the nested paragraph must not receive a second identical transform",
+    );
+
+    runtime.clock.advance(400);
+    assert.equal(fixture.alternateItem.style.getPropertyValue("transition"), "");
+    assert.equal(fixture.alternateItem.style.transform, "");
+  } finally {
+    destroyTypewriter();
+    destroyStructuralEditCoordinator();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("structural FLIP drives the motion sink per frame and settles once at cleanup", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initTypewriter();
+    flip.reset();
+
+    fixture.alternateItem.rect = rect(100, 300, 700, 20);
+    fixture.alternateContent.rect = rect(124, 300, 676, 20);
+    runtime.setCaret(fixture.alternateText, 1, rect(150, 305, 1, 20));
+
+    let followCalls = 0;
+    flip.setMotionFrameSink(() => {
+      followCalls += 1;
+    });
+
+    runtime.document.dispatch("keydown", eventFor(fixture.alternateContent, {
+      key: "Tab",
+      isComposing: false,
+      defaultPrevented: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      metaKey: false,
+    }));
+
+    const oldList = fixture.alternateItem.parentElement;
+    const newList = new FakeElement({ dataType: "NodeList" });
+    append(fixture.focusItem, newList);
+    oldList.removeChild(fixture.alternateItem);
+    append(newList, fixture.alternateItem);
+    fixture.alternateItem.rect = rect(124, 340, 676, 20);
+
+    let settleFrames = 0;
+    while (followCalls === 0 && settleFrames < 20) {
+      runtime.clock.now += 16;
+      runtime.raf.flushNext(runtime.clock.now);
+      settleFrames += 1;
+    }
+    const callsDuringMotion = followCalls;
+    assert.ok(callsDuringMotion >= 1, "the sink must be driven during the motion window");
+
+    // Cleanup (300ms) stops the per-frame loop and fires exactly one settle call.
+    runtime.clock.advance(400);
+    const callsAfterCleanup = followCalls;
+    assert.equal(callsAfterCleanup, callsDuringMotion + 1, "cleanup fires exactly one settle refresh");
+
+    for (let frame = 0; frame < 4; frame++) {
+      runtime.clock.now += 16;
+      if (runtime.raf.pending.size > 0) runtime.raf.flushNext(runtime.clock.now);
+    }
+    assert.equal(followCalls, callsAfterCleanup, "no sink calls after the motion window closes");
+  } finally {
+    flip.setMotionFrameSink(null);
     destroyTypewriter();
     destroyStructuralEditCoordinator();
     inputMode.reset();
@@ -2280,6 +3118,103 @@ test("pending structural transactions extend their quiet window for same-block r
     runtime.raf.flushNext(runtime.clock.now);
     assert.equal(isStructuralEditPending(), false);
     assert.equal(replacement.style.getPropertyValue("--zt-ripple-opacity"), "1");
+  } finally {
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("structural replacement carries dim visual state until normal Ripple ownership resumes", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(fixture.alternateContent.style.getPropertyValue("--zt-ripple-opacity"), "1");
+    assert.equal(runtime.highlights.has("zt-sentence-dim"), true);
+
+    runtime.document.dispatch("input", eventFor(fixture.alternateContent, {
+      inputType: "insertParagraph",
+      isComposing: false,
+    }));
+    assert.equal(isStructuralEditPending(), true);
+
+    const replacement = new FakeElement({
+      dataType: "NodeParagraph",
+      dataNodeId: "block:alternate",
+      contentEditable: true,
+    });
+    const replacementText = new FakeText("alternate. Branch!");
+    append(replacement, replacementText);
+
+    const newItem = new FakeElement({
+      dataType: "NodeListItem",
+      dataNodeId: "item:after-enter",
+    });
+    const newMarker = new FakeElement({ classes: ["protyle-action"] });
+    const newContent = new FakeElement({
+      dataType: "NodeParagraph",
+      dataNodeId: "block:after-enter",
+      contentEditable: true,
+    });
+    const newText = new FakeText("new block");
+    const newAttr = new FakeElement({ classes: ["protyle-attr"] });
+    append(newContent, newText);
+    append(newItem, newMarker, newContent, newAttr);
+
+    const parentList = fixture.alternateItem.parentElement;
+    assert.ok(parentList);
+    fixture.alternateItem.replaceChild(replacement, fixture.alternateContent);
+    append(parentList, newItem);
+    runtime.setCaret(newText, 1, rect(20, 400));
+
+    const mutationObserver = runtime.mutationObservers.find((observer) =>
+      observer.observed.includes(fixture.rootList));
+    assert.ok(mutationObserver);
+    mutationObserver.callback([
+      {
+        type: "childList",
+        target: fixture.alternateItem,
+        addedNodes: [replacement],
+        removedNodes: [fixture.alternateContent],
+      },
+      {
+        type: "childList",
+        target: parentList,
+        addedNodes: [newItem],
+        removedNodes: [],
+      },
+    ] as unknown as MutationRecord[]);
+
+    assert.equal(
+      replacement.style.getPropertyValue("--zt-ripple-opacity"),
+      String(RIPPLE_CONFIG.BLOCK_LEVELS[1]),
+      "the replacement avoids the natural full-brightness window",
+    );
+    assert.equal(
+      replacement.style.getPropertyValue("--zt-ripple-transition-duration"),
+      "0s",
+    );
+    assert.equal(replacement.classList.contains("zentype-ripple-block"), true);
+    assert.equal(newContent.style.getPropertyValue("--zt-ripple-opacity"), "");
+
+    let settleFrames = 0;
+    while (isStructuralEditPending()) {
+      assert.ok(settleFrames++ < 8, "structural replacement settles in a bounded window");
+      runtime.clock.advance(16);
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+    while (runtime.raf.pending.size > 0) runtime.raf.flushNext(runtime.clock.now);
+
+    assert.equal(newContent.style.getPropertyValue("--zt-ripple-opacity"), "1");
+    assert.equal(replacement.style.getPropertyValue("--zt-ripple-opacity"), "");
+    assert.equal(replacement.classList.contains("zentype-ripple-block"), false);
   } finally {
     destroyRipple();
     inputMode.reset();
@@ -2354,33 +3289,38 @@ test("ripple transitions a legacy block handoff before releasing ownership", () 
 
     assert.equal(
       fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"),
-      "1",
-      "a stale block first transitions toward natural opacity",
+      "",
+      "nested takeover releases the legacy parent without a natural-opacity stage",
     );
     assert.equal(
       fixture.rootList.classList.contains("zentype-ripple-block"),
-      true,
-      "the Ripple class remains while the handoff transition is active",
+      false,
+      "the legacy class is removed when nested ownership takes over",
     );
-    assert.deepEqual(runtime.clock.delays(), [400]);
+    assert.equal(runtime.clock.delays().length, 0);
 
-    runtime.clock.advance(399);
-    assert.equal(fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"), "1");
-    assert.equal(fixture.rootList.classList.contains("zentype-ripple-block"), true);
-
-    runtime.clock.advance(1);
-    assert.equal(fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"), "");
-    assert.equal(fixture.rootList.classList.contains("zentype-ripple-block"), false);
-
-    // A later handoff may have a pending CSS transition, but OFF must still
-    // release the host immediately instead of waiting for that timer.
+    // A nested-to-legacy handoff is immediate because the nested layer is
+    // being replaced by the legacy parent layer.
     runtime.setCaret(topSiblingText, 1, rect(20, 400));
     runtime.document.dispatch("selectionchange");
     runtime.raf.flushNext(runtime.clock.now);
     runtime.setCaret(fixture.alternateText, 1, rect(20, 400));
     runtime.document.dispatch("selectionchange");
     runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"), "");
+    assert.equal(fixture.rootList.classList.contains("zentype-ripple-block"), false);
+
+    // Focus exit keeps a dim legacy target alive at natural opacity until the
+    // configured transition has completed.
+    runtime.setCaret(topSiblingText, 1, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"), "0.4");
+    inputMode.setBothOff();
+    assert.equal(fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"), "1");
     assert.equal(fixture.rootList.classList.contains("zentype-ripple-block"), true);
+    assert.equal(runtime.clock.delays().includes(400), true);
+    runtime.clock.advance(400);
     inputMode.setBothOff();
     assert.equal(fixture.rootList.style.getPropertyValue("--zt-ripple-opacity"), "");
     assert.equal(fixture.rootList.classList.contains("zentype-ripple-block"), false);
@@ -2437,6 +3377,375 @@ test("ripple retains outgoing sentence dim through a block handoff", () => {
   }
 });
 
+// --- Sentence transition slot helpers (new engine contract) ---
+// The engine owns one bounded slot highlight per in-flight sentence
+// (zt-sentence-transition-0..3) plus the stable zt-sentence-dim channel.
+// A slot completing toward dim hands its range to stable dim; a slot
+// completing toward active simply disappears (natural text color).
+
+const TRANSITION_SLOT_NAMES = [0, 1, 2, 3].map((index) => `zt-sentence-transition-${index}`);
+const transitionSlotVar = (index: number) => `--zt-sentence-transition-${index}-color`;
+
+function transitionStartOffsets(runtime: FakeRuntime): number[] {
+  const starts: number[] = [];
+  for (const name of TRANSITION_SLOT_NAMES) {
+    const highlight = runtime.highlights.get(name);
+    if (highlight && highlight.ranges.length > 0) starts.push(highlight.ranges[0].startOffset);
+  }
+  return starts.sort((a, b) => a - b);
+}
+
+function transitionSlotNameFor(runtime: FakeRuntime, startOffset: number): string {
+  for (const name of TRANSITION_SLOT_NAMES) {
+    const highlight = runtime.highlights.get(name);
+    if (highlight && highlight.ranges.some((range) => range.startOffset === startOffset)) {
+      return name;
+    }
+  }
+  assert.ok(false, `expected a transition slot covering sentence at ${startOffset}`);
+  return "";
+}
+
+function transitionSlotColor(runtime: FakeRuntime, startOffset: number): string {
+  const name = transitionSlotNameFor(runtime, startOffset);
+  const index = Number(name.split("-").pop());
+  return runtime.document.documentElement.style.getPropertyValue(transitionSlotVar(index));
+}
+
+test("sentence focus activates both sentences on the shared boundary", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+  // Asymmetric fade contract: acquisition keeps the 400ms easeInOut language,
+  // release runs a 600ms slow tail. Each in-flight sentence owns its slot.
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+
+    // "one. Two!" segments: [0,5) and [5,9). Caret inside the first sentence.
+    runtime.setCaret(fixture.focusText, 2, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    const firstDim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(firstDim);
+    assert.equal(firstDim.ranges.length, 1);
+    assert.equal(firstDim.ranges[0].startOffset, 5);
+    assert.equal(firstDim.ranges[0].endOffset, 9);
+
+    // Exact shared boundary: both sentences active, nothing left to dim.
+    runtime.setCaret(fixture.focusText, 5, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.highlights.has("zt-sentence-dim"), false);
+    // The entering sentence B owns one acquisition slot; A stays active.
+    assert.deepEqual(transitionStartOffsets(runtime), [5]);
+
+    // The acquisition runs on the 400ms timeline and releases its slot.
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the slot at t=0
+    runtime.clock.advance(400);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(transitionStartOffsets(runtime), []);
+
+    // Leaving the boundary into the second sentence fades the first out: A
+    // owns a single release slot now.
+    runtime.setCaret(fixture.focusText, 6, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(transitionStartOffsets(runtime), [0]);
+
+    // The leaving-only fade runs on the slow 600ms release timeline and hands
+    // A over to the stable dim channel on completion.
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the slot at t=0
+    runtime.clock.advance(600);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(transitionStartOffsets(runtime), []);
+    const stableDim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(stableDim);
+    assert.equal(stableDim.ranges.length, 1);
+    assert.equal(stableDim.ranges[0].startOffset, 0);
+    assert.equal(stableDim.ranges[0].endOffset, 5);
+  } finally {
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("sentence fade covers direct sentence jumps at BOF and EOF", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createRippleFixture(runtime);
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+
+    runtime.setCaret(fixture.focusText, 2, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+
+    // EOF jump: caret at text.length keeps the last sentence active. A leaves
+    // (release slot) and B enters (acquisition slot) — two independent slots.
+    runtime.setCaret(fixture.focusText, 9, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(transitionStartOffsets(runtime), [0, 5]);
+    const eofLeaving = runtime.highlights.get(transitionSlotNameFor(runtime, 0));
+    const eofEntering = runtime.highlights.get(transitionSlotNameFor(runtime, 5));
+    assert.equal(eofLeaving!.ranges[0].startOffset, 0);
+    assert.equal(eofLeaving!.ranges[0].endOffset, 5);
+    assert.equal(eofEntering!.ranges[0].startOffset, 5);
+    assert.equal(eofEntering!.ranges[0].endOffset, 9);
+    assert.equal(runtime.highlights.has("zt-sentence-dim"), false);
+
+    // Release runs to 600ms; A then rejoins the stable dim channel.
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors both slots at t=0
+    runtime.clock.advance(600);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(transitionStartOffsets(runtime), []);
+    const eofDim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(eofDim);
+    assert.equal(eofDim.ranges.length, 1);
+    assert.equal(eofDim.ranges[0].startOffset, 0);
+    assert.equal(eofDim.ranges[0].endOffset, 5);
+
+    // BOF jump back: caret 0 keeps the first sentence active. B releases and
+    // A acquires.
+    runtime.setCaret(fixture.focusText, 0, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(transitionStartOffsets(runtime), [0, 5]);
+    const bofLeaving = runtime.highlights.get(transitionSlotNameFor(runtime, 5));
+    const bofEntering = runtime.highlights.get(transitionSlotNameFor(runtime, 0));
+    assert.equal(bofLeaving!.ranges[0].startOffset, 5);
+    assert.equal(bofLeaving!.ranges[0].endOffset, 9);
+    assert.equal(bofEntering!.ranges[0].startOffset, 0);
+    assert.equal(bofEntering!.ranges[0].endOffset, 5);
+
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors both slots at t=0
+    runtime.clock.advance(600);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(transitionStartOffsets(runtime), []);
+    const bofDim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(bofDim);
+    assert.equal(bofDim.ranges.length, 1);
+    assert.equal(bofDim.ranges[0].startOffset, 5);
+    assert.equal(bofDim.ranges[0].endOffset, 9);
+  } finally {
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("sentence fade acquires at 400ms and releases at 600ms", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  // "One. Two. Three." segments: [0,5), [5,10), [10,16).
+  const fixture = createEditorFixture(runtime, "One. Two. Three.");
+  const alphaOf = (color: string): number => {
+    const match = color.match(/^rgba\(\d+,\d+,\d+,([\d.]+)\)$/);
+    assert.ok(match, `unexpected color format: ${color}`);
+    return Number(match![1]);
+  };
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+
+    // Caret inside sentence A: B and C sit in the static dim highlight.
+    runtime.setCaret(fixture.text, 2, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    const initialDim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(initialDim);
+    assert.equal(initialDim.ranges.length, 2);
+
+    // {A} -> {B}: A owns a release slot, B an acquisition slot; C stays static.
+    runtime.setCaret(fixture.text, 7, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(transitionStartOffsets(runtime), [0, 5]);
+    // The staying sentence (C) keeps static dim; neither A nor B is in it.
+    assert.equal(runtime.highlights.get("zt-sentence-dim")?.ranges.length, 1);
+    assert.equal(runtime.highlights.get("zt-sentence-dim")?.ranges[0].startOffset, 10);
+
+    const rootStyle = runtime.document.documentElement.style;
+    // Each flush advances the slot's own frame timeline, not the clock.
+    const flushFade = (elapsedMs: number) => {
+      runtime.raf.flushNext(runtime.clock.now + elapsedMs);
+    };
+
+    // t=0 (first rAF): the acquisition slot sits at dim, the release slot at
+    // the active color.
+    flushFade(0);
+    assert.equal(transitionSlotColor(runtime, 5), "rgba(0,0,0,0.6)");
+    assert.equal(transitionSlotColor(runtime, 0), "rgba(0,0,0,1)");
+
+    // t=200ms: acquisition is around the 400ms easeInOut midpoint; release has
+    // barely left its start on the 600ms curve and is still brighter.
+    flushFade(200);
+    const aIn = alphaOf(transitionSlotColor(runtime, 5));
+    assert.ok(aIn > 0.6 && aIn < 1, `acquisition mid-flight, got alpha ${aIn}`);
+    const aOut = alphaOf(transitionSlotColor(runtime, 0));
+    assert.ok(aOut > 0.6 && aOut < 1, `release mid-flight, got alpha ${aOut}`);
+    assert.ok(aOut > aIn, "release lags acquisition at 200ms");
+
+    // t=400ms: the acquisition completes and releases its slot; the release
+    // tail is still running on its own timeline.
+    flushFade(400);
+    assert.deepEqual(transitionStartOffsets(runtime), [0]);
+    const aOutAt400 = alphaOf(transitionSlotColor(runtime, 0));
+    assert.ok(aOutAt400 > 0.6, `release not finished at 400ms, got alpha ${aOutAt400}`);
+
+    // t=600ms: the release completes and A rejoins the stable dim channel.
+    flushFade(600);
+    assert.deepEqual(transitionStartOffsets(runtime), []);
+    const stableDim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(stableDim);
+    assert.equal(stableDim.ranges.length, 2, "released sentence rejoins static dim");
+
+    // {B} -> {B}: caret moves inside the active sentence without animation.
+    runtime.setCaret(fixture.text, 9, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(transitionStartOffsets(runtime), []);
+  } finally {
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("sentence fade anchors its timeline to the first rAF timestamp", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  // "One. Two. Three." segments: [0,5), [5,10), [10,16).
+  const fixture = createEditorFixture(runtime, "One. Two. Three.");
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+
+    runtime.setCaret(fixture.text, 2, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+
+    // Jump sentences with the performance clock far ahead of frame time: a
+    // schedule-time anchor would consume this offset on the first callback.
+    runtime.clock.now = 5_000_000;
+    runtime.setCaret(fixture.text, 7, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    // Slot colors start at their endpoints (entering dim, leaving active).
+    assert.equal(transitionSlotColor(runtime, 5), "rgba(0,0,0,0.6)");
+    assert.equal(transitionSlotColor(runtime, 0), "rgba(0,0,0,1)");
+
+    // First slot frame: frame timestamp lags the performance clock by 250ms
+    // (vsync-style skew). elapsed must be 0 — start colors, no jump.
+    const firstFrame = runtime.clock.now - 250;
+    runtime.raf.flushNext(firstFrame);
+    assert.equal(transitionSlotColor(runtime, 5), "rgba(0,0,0,0.6)");
+    assert.equal(transitionSlotColor(runtime, 0), "rgba(0,0,0,1)");
+
+    // From here each slot timeline follows frame timestamps only: 200ms of
+    // frame time is mid-flight, not 450ms of clock time (which would finish).
+    runtime.raf.flushNext(firstFrame + 200);
+    const acquireColor = transitionSlotColor(runtime, 5);
+    assert.notEqual(acquireColor, "rgba(0,0,0,0.6)");
+    assert.notEqual(acquireColor, "rgba(0,0,0,1)");
+    const releaseColor = transitionSlotColor(runtime, 0);
+    assert.notEqual(releaseColor, "rgba(0,0,0,1)");
+    assert.notEqual(releaseColor, "rgba(0,0,0,0.6)");
+  } finally {
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("sentence focus survives text edits that extend the active sentence", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  // "One. Two. Three." segments: [0,5), [5,10), [10,16).
+  const fixture = createEditorFixture(runtime, "One. Two. Three.");
+
+  try {
+    inputMode.reset();
+    inputMode.setBothOn();
+    initRipple();
+    runtime.raf.flushNext(runtime.clock.now);
+
+    // Caret on the A|B shared boundary: {A,B} both active, nothing dimmed.
+    runtime.setCaret(fixture.text, 5, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    // With {A,B} dual-active, only C sits in static dim.
+    const boundaryDim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(boundaryDim);
+    assert.equal(boundaryDim.ranges.length, 1);
+    assert.equal(boundaryDim.ranges[0].startOffset, 10);
+
+    // Let the boundary acquisition slot complete so no stale slot frame is
+    // pending when the text edit lands.
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the slot at t=0
+    runtime.clock.advance(400);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(transitionStartOffsets(runtime), []);
+
+    // Type one character inside sentence B: B's end moves 10 -> 11 while its
+    // start (and all of A) stay put; the caret lands inside B. B is still the
+    // same sentence, so A releases with a fade and B must not re-fade.
+    fixture.text.data = "One. Twxo. Three.";
+    runtime.setCaret(fixture.text, 7, rect(20, 400));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+
+    assert.deepEqual(transitionStartOffsets(runtime), [0], "previous sentence A fades out across the text edit");
+    // The release slot covers A on its current geometry [0,5).
+    const fadeOut = runtime.highlights.get(transitionSlotNameFor(runtime, 0));
+    assert.equal(fadeOut!.ranges.length, 1);
+    assert.equal(fadeOut!.ranges[0].startOffset, 0);
+    assert.equal(fadeOut!.ranges[0].endOffset, 5);
+    // Static dim covers only C during the release, on current geometry.
+    const dim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(dim);
+    assert.equal(dim.ranges.length, 1);
+    assert.equal(dim.ranges[0].startOffset, 11);
+
+    // The release completes into stable dim over A and C.
+    runtime.raf.flushNext(runtime.clock.now); // first rAF anchors the slot at t=0
+    runtime.clock.advance(600);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(transitionStartOffsets(runtime), []);
+    const stableDim = runtime.highlights.get("zt-sentence-dim");
+    assert.ok(stableDim);
+    assert.equal(stableDim.ranges.length, 2);
+    assert.deepEqual(
+      stableDim.ranges.map((range) => range.startOffset).sort((a, b) => a - b),
+      [0, 11],
+    );
+  } finally {
+    destroyRipple();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
 test("FLIP interruption freezes the rendered position and rebases the next edit", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
@@ -2465,9 +3774,18 @@ test("FLIP interruption freezes the rendered position and rebases the next edit"
 
     flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
     secondBlock.rect = rect(0, 80, 1000, 20);
+    const transformWrites: string[] = [];
+    const setProperty = secondBlock.style.setProperty.bind(secondBlock.style);
+    secondBlock.style.setProperty = (property: string, value: string, priority = "") => {
+      if (property === "transform") transformWrites.push(value);
+      setProperty(property, value, priority);
+    };
     runtime.raf.flushNext(runtime.clock.now);
-    assert.equal(secondBlock.style.transform, "translateY(20px)");
-    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(
+      transformWrites.slice(0, 2),
+      ["translateY(20px)", ""],
+      "invert writes the frozen delta and play clears it in the same task",
+    );
     assert.equal(secondBlock.style.transition.includes("250ms"), true);
     assert.equal(flip.hasShiftedBlocks(), true);
     assert.deepEqual(runtime.clock.delays(), [300]);
@@ -2478,12 +3796,11 @@ test("FLIP interruption freezes the rendered position and rebases the next edit"
 
     secondBlock.rect = rect(0, 60, 1000, 20);
     runtime.raf.flushNext(runtime.clock.now);
-    assert.equal(
-      secondBlock.style.transform,
-      "translateY(30px)",
-      "the new Invert phase starts from the frozen rendered position",
+    assert.deepEqual(
+      transformWrites.slice(2),
+      ["", "translateY(10px)", "", "translateY(30px)", ""],
+      "the new Invert starts from the frozen rendered position",
     );
-    runtime.raf.flushNext(runtime.clock.now);
     assert.equal(secondBlock.style.transform, "");
     assert.equal(secondBlock.style.transition.includes("250ms"), true);
 
@@ -2546,7 +3863,6 @@ test("FLIP interruption batches baseline and logical geometry phases", () => {
     secondBlock.rect = rect(0, 80, 1000, 20);
     thirdBlock.rect = rect(0, 120, 1000, 20);
     runtime.raf.flushNext(runtime.clock.now);
-    runtime.raf.flushNext(runtime.clock.now);
     phases.length = 0;
 
     flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
@@ -2592,8 +3908,11 @@ test("scroll callbacks are reserved for active-loop retarget completion", () => 
     scroll.scrollTo(fixture.content, { deltaY: 100 }, () => { initialCallbackCount++; });
     const initialFrame = [...runtime.raf.pending.keys()][0];
     assert.ok(initialFrame);
-    runtime.clock.advance(600);
     runtime.raf.flush(initialFrame, runtime.clock.now);
+    const initialProgressFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(initialProgressFrame);
+    runtime.clock.advance(600);
+    runtime.raf.flush(initialProgressFrame, runtime.clock.now);
     assert.equal(initialCallbackCount, 0, "an initial scroll does not request resync");
     assert.equal(runtime.raf.pending.size, 0);
 
@@ -2660,6 +3979,290 @@ test("FLIP skips invalid local sampling without scanning the full editor", () =>
   }
 });
 
+test("FLIP composes Ripple's opacity transition into ripple blocks during play", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  const rippleBlock = new FakeElement({
+    classes: ["zentype-ripple-block"],
+    dataNodeId: "block-ripple",
+    contentEditable: true,
+  });
+  append(rippleBlock, new FakeText("ripple"));
+  rippleBlock.rect = rect(0, 100, 1000, 20);
+  const plainBlock = new FakeElement({ dataNodeId: "block-plain", contentEditable: true });
+  append(plainBlock, new FakeText("plain"));
+  plainBlock.rect = rect(0, 140, 1000, 20);
+  append(fixture.wysiwyg, rippleBlock, plainBlock);
+
+  try {
+    flip.reset();
+    const range = new FakeRange(fixture.text, 0);
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+    rippleBlock.rect = rect(0, 60, 1000, 20);
+    plainBlock.rect = rect(0, 100, 1000, 20);
+
+    let playFrames = 0;
+    while (!rippleBlock.style.transition.includes("250ms")) {
+      assert.ok(playFrames++ < 8, "FLIP must reach its play phase");
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+
+    assert.equal(
+      rippleBlock.style.getPropertyPriority("transition"),
+      "important",
+      "the composed transition must beat Ripple's important stylesheet shorthand",
+    );
+    assert.equal(
+      rippleBlock.style.transition,
+      "opacity var(--zt-ripple-transition-duration) ease, transform 250ms cubic-bezier(0.25, 0.1, 0.25, 1)",
+    );
+    assert.equal(plainBlock.style.getPropertyPriority("transition"), "");
+    assert.match(plainBlock.style.transition, /^transform 250ms/);
+    assert.equal(rippleBlock.style.transform, "");
+    assert.equal(plainBlock.style.transform, "");
+  } finally {
+    flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("FLIP readiness inverts on the first frame geometry actually moves", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  const secondBlock = new FakeElement({ dataNodeId: "block-second", contentEditable: true });
+  append(secondBlock, new FakeText("second"));
+  secondBlock.rect = rect(0, 100, 1000, 20);
+  append(fixture.wysiwyg, secondBlock);
+
+  try {
+    flip.reset();
+    const range = new FakeRange(fixture.text, 0);
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(secondBlock.style.transform, "", "frame 1 with unchanged geometry must not invert");
+    assert.equal(flip.hasShiftedBlocks(), false);
+
+    secondBlock.rect = rect(0, 60, 1000, 20);
+    const transformWrites: string[] = [];
+    const setProperty = secondBlock.style.setProperty.bind(secondBlock.style);
+    secondBlock.style.setProperty = (property: string, value: string, priority = "") => {
+      if (property === "transform") transformWrites.push(value);
+      setProperty(property, value, priority);
+    };
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.deepEqual(
+      transformWrites,
+      ["translateY(40px)", ""],
+      "the invert writes the structural delta before play clears it in the same task",
+    );
+    assert.equal(secondBlock.style.transition.includes("250ms"), true);
+    assert.equal(flip.hasShiftedBlocks(), true);
+  } finally {
+    flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("FLIP readiness fails open when geometry never changes", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+
+  try {
+    flip.reset();
+    const range = new FakeRange(fixture.text, 0);
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+
+    let drained = 0;
+    while (runtime.raf.pending.size > 0) {
+      assert.ok(drained++ < 20, "the readiness loop must stop on its own");
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+    assert.equal(flip.hasShiftedBlocks(), false, "an expired window inverts into a no-op");
+    assert.equal(fixture.block.style.transform, "");
+  } finally {
+    flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("FLIP readiness stops polling after its elapsed bound", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+
+  try {
+    flip.reset();
+    const range = new FakeRange(fixture.text, 0);
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+
+    runtime.clock.advance(600);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 0, "the elapsed bound stops further polling");
+    assert.equal(flip.hasShiftedBlocks(), false);
+  } finally {
+    flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("a new FLIP generation kills the previous readiness loop", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  const secondBlock = new FakeElement({ dataNodeId: "block-second", contentEditable: true });
+  append(secondBlock, new FakeText("second"));
+  secondBlock.rect = rect(0, 100, 1000, 20);
+  append(fixture.wysiwyg, secondBlock);
+
+  try {
+    flip.reset();
+    const range = new FakeRange(fixture.text, 0);
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+    flip.reset();
+
+    secondBlock.rect = rect(0, 60, 1000, 20);
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(runtime.raf.pending.size, 0, "the dead loop must not reschedule");
+    assert.equal(secondBlock.style.transform, "", "a dead generation never inverts");
+    assert.equal(secondBlock.style.transition, "", "a dead generation never writes a play transition");
+    assert.equal(flip.hasShiftedBlocks(), false);
+  } finally {
+    flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("viewport scrolling alone never arms FLIP readiness", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  const secondBlock = new FakeElement({ dataNodeId: "block-second", contentEditable: true });
+  append(secondBlock, new FakeText("second"));
+  secondBlock.rect = rect(0, 100, 1000, 20);
+  append(fixture.wysiwyg, secondBlock);
+
+  try {
+    flip.reset();
+    const range = new FakeRange(fixture.text, 0);
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+
+    // The container scrolls under its own rect: block rects move with the
+    // viewport while the container box stays put, so content space is stable.
+    fixture.content.scrollTop = 30;
+    for (const el of [fixture.block, secondBlock]) {
+      el.rect = rect(0, el.rect.top - 30, 1000, 20);
+    }
+
+    let drained = 0;
+    while (runtime.raf.pending.size > 0) {
+      assert.ok(drained++ < 20, "pure scrolling must not hold the loop open");
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+    assert.equal(secondBlock.style.transform, "", "viewport motion is not structural motion");
+    assert.equal(flip.hasShiftedBlocks(), false);
+  } finally {
+    flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("FLIP writes the play transition in the same task as the invert commit", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime);
+  const rippleBlock = new FakeElement({
+    classes: ["zentype-ripple-block"],
+    dataNodeId: "block-ripple",
+    contentEditable: true,
+  });
+  append(rippleBlock, new FakeText("ripple"));
+  rippleBlock.rect = rect(0, 100, 1000, 20);
+  append(fixture.wysiwyg, rippleBlock);
+
+  try {
+    flip.reset();
+    const range = new FakeRange(fixture.text, 0);
+    flip.start(fixture.wysiwyg, range as unknown as Range, runtime.raf.request);
+    rippleBlock.rect = rect(0, 60, 1000, 20);
+
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(
+      rippleBlock.style.transition,
+      "opacity var(--zt-ripple-transition-duration) ease, transform 250ms cubic-bezier(0.25, 0.1, 0.25, 1)",
+      "a single frame must reach the play writes without an extra deferred frame",
+    );
+    assert.equal(rippleBlock.style.getPropertyPriority("transition"), "important");
+    assert.equal(rippleBlock.style.transform, "");
+  } finally {
+    flip.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("stable Enter structural authority uses the inner lower settle target", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime, "enter");
+  runtime.clock.now = 39_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+    runtime.setCaret(fixture.text, 1, rect(20, 550));
+    runtime.document.dispatch("keydown", eventFor(fixture.block, {
+      key: "Enter",
+      isComposing: false,
+      defaultPrevented: false,
+    }));
+
+    let settleFrames = 0;
+    while (isStructuralEditPending()) {
+      assert.ok(settleFrames++ < 10, "the coordinator must settle in a bounded number of frames");
+      runtime.clock.advance(16);
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+
+    // The fake never models the structural geometry shift, so the FLIP
+    // readiness loop keeps polling until its bounded window fails open.
+    runtime.clock.advance(200);
+    let readinessDrain = 0;
+    while (runtime.raf.pending.size > 1) {
+      assert.ok(readinessDrain++ < 8, "FLIP readiness polling must remain bounded");
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+
+    assert.equal(runtime.raf.pending.size, 1, "stable structural authority starts one scroll");
+    const firstScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstScrollFrame);
+    runtime.raf.flush(firstScrollFrame, runtime.clock.now);
+    const scrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(scrollFrame);
+    runtime.clock.advance(1000);
+    runtime.raf.flush(scrollFrame, runtime.clock.now);
+    assert.equal(
+      Math.round(fixture.content.scrollTop),
+      70,
+      "Enter uses the shared 48% lower settle edge",
+    );
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
 test("Enter on an empty block waits for a stable structural commit", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);
@@ -2678,11 +4281,20 @@ test("Enter on an empty block waits for a stable structural commit", () => {
     assert.equal(isStructuralEditPending(), true);
     let settleFrames = 0;
     while (isStructuralEditPending()) {
-      assert.ok(settleFrames++ < 4, "the coordinator must settle in a bounded number of frames");
+      assert.ok(settleFrames++ < 10, "the coordinator must settle in a bounded number of frames");
       runtime.clock.advance(16);
       runtime.raf.flushNext(runtime.clock.now);
     }
     assert.equal(settleFrames >= 2, true, "the authoritative check waits for quiet frames");
+    // The fake never models the structural geometry shift, so the FLIP
+    // readiness loop keeps polling until its bounded window fails open.
+    runtime.clock.advance(200);
+    let readinessDrain = 0;
+    while (runtime.raf.pending.size > 1) {
+      assert.ok(readinessDrain++ < 8, "FLIP readiness polling must remain bounded");
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+
     assert.equal(runtime.raf.pending.size, 1, "the stable commit starts the smooth scroll");
     assert.equal(fixture.content.scrollTop, 0);
   } finally {
@@ -2757,6 +4369,64 @@ test("Backspace character deletion and block merge retain separate characterizat
     assert.match(secondBlock.style.transition, /transform 250ms/);
     runtime.clock.advance(300);
     assert.equal(secondBlock.style.transition, "");
+  } finally {
+    destroyTypewriter();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("stable block Backspace uses the shared inner lower settle target", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime, "ab");
+  const secondBlock = new FakeElement({
+    dataNodeId: "block-next",
+    contentEditable: true,
+  });
+  const secondText = new FakeText("next");
+  append(secondBlock, secondText);
+  append(fixture.wysiwyg, secondBlock);
+  runtime.clock.now = 42_000;
+
+  try {
+    inputMode.reset();
+    initTypewriter();
+    runtime.setCaret(fixture.text, 0, rect(20, 550));
+    runtime.selection.range?.setEnd(secondText, 0);
+    runtime.document.dispatch("keydown", eventFor(fixture.block, {
+      key: "Backspace",
+      isComposing: false,
+      defaultPrevented: false,
+    }));
+
+    assert.equal(isStructuralEditPending(), true);
+    let settleFrames = 0;
+    while (isStructuralEditPending()) {
+      assert.ok(settleFrames++ < 10, "the coordinator must settle in a bounded number of frames");
+      runtime.clock.advance(16);
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+
+    // The fake never models the structural geometry shift, so the FLIP
+    // readiness loop keeps polling until its bounded window fails open.
+    runtime.clock.advance(200);
+    let readinessDrain = 0;
+    while (runtime.raf.pending.size > 1) {
+      assert.ok(readinessDrain++ < 8, "FLIP readiness polling must remain bounded");
+      runtime.raf.flushNext(runtime.clock.now);
+    }
+
+    assert.equal(runtime.raf.pending.size, 1, "stable Backspace starts one scroll");
+    const firstScrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(firstScrollFrame);
+    runtime.raf.flush(firstScrollFrame, runtime.clock.now);
+    const scrollFrame = [...runtime.raf.pending.keys()][0];
+    assert.ok(scrollFrame);
+    runtime.clock.advance(1000);
+    runtime.raf.flush(scrollFrame, runtime.clock.now);
+    assert.equal(Math.round(fixture.content.scrollTop), 70);
   } finally {
     destroyTypewriter();
     inputMode.reset();

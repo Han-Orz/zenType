@@ -29,10 +29,12 @@ export const CURSOR_CONFIG = {
   BLINK_DELAY_MS: 1100,
 } as const;
 
-/** 打字机参数（光标保持在 38%～50% 的舒适区间内）。 */
+/** 打字机参数（光标在外层触发区外时回到内层稳定区）。 */
 export const TYPEWRITER_CONFIG = {
-  /** v2.3.0：舒适区间 [低, 高]。光标在此区间内时不触发滚动。 */
-  COMFORT_ZONE: [0.38, 0.50],
+  /** 自动跟随的外层触发区 [低, 高]；区间内不触发滚动。 */
+  SCROLL_TRIGGER_ZONE: [0.34, 0.54],
+  /** 自动跟随的内层稳定区 [低, 高]；越过触发区后回到对应边缘。 */
+  SCROLL_SETTLE_ZONE: [0.40, 0.48],
   /** 滚动距离→时长分档（ms）。 */
   SCROLL_DURATION_TIERS: [180, 260, 360, 480, 600],
   /** 块级 FLIP 过渡动画曲线。 */

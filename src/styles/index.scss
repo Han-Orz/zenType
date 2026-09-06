@@ -173,20 +173,27 @@
 
 // ===== 涟漪聚焦句级 dimming (CSS Custom Highlight API) =====
 // v2.5.0：废弃 span 包裹，改用 CSS Custom Highlight API（零 DOM 突变）
-// ::highlight 不支持 opacity/transition，用 color 模拟 dim；跨句时由 ripple.ts 用 rAF 插值当前句切换。
+// ::highlight 不支持 opacity/transition，用 color 模拟 dim；跨句过渡由
+// ripple/sentenceTransition.ts 的 bounded slot pool + 单一 rAF 驱动插值。
+// 每个正在过渡的句子独占一个 slot（zt-sentence-transition-0..3），slot 拥有
+// 自己的 Range / 起止颜色 / 起止时间；动画结束后 dim 句交回稳定 zt-sentence-dim。
 // 局限：currentColor 在 ::highlight 里指 highlight 自身，无法"相对原色 dim"。
 // 彩色文字（mark/链接）会被覆盖成灰/白，只能按主题设固定 RGB。
-// CSS 变量值由 ripple.ts applyRipple() 根据 config.SENTENCE_DIM_ALPHA + 主题动态覆盖。
+// CSS 变量值由 sentenceTransition engine 按主题 + config.SENTENCE_DIM_ALPHA 写入。
 :root {
   --zt-sentence-dim-color: rgba(0, 0, 0, 0.6);
-  --zt-sentence-fade-in-color: rgba(0, 0, 0, 1);
-  --zt-sentence-fade-out-color: rgba(0, 0, 0, 0.6);
+  --zt-sentence-transition-0-color: rgba(0, 0, 0, 0.6);
+  --zt-sentence-transition-1-color: rgba(0, 0, 0, 0.6);
+  --zt-sentence-transition-2-color: rgba(0, 0, 0, 0.6);
+  --zt-sentence-transition-3-color: rgba(0, 0, 0, 0.6);
 }
 
 [data-theme-mode="dark"] {
   --zt-sentence-dim-color: rgba(255, 255, 255, 0.6);
-  --zt-sentence-fade-in-color: rgba(255, 255, 255, 1);
-  --zt-sentence-fade-out-color: rgba(255, 255, 255, 0.6);
+  --zt-sentence-transition-0-color: rgba(255, 255, 255, 0.6);
+  --zt-sentence-transition-1-color: rgba(255, 255, 255, 0.6);
+  --zt-sentence-transition-2-color: rgba(255, 255, 255, 0.6);
+  --zt-sentence-transition-3-color: rgba(255, 255, 255, 0.6);
 }
 
 ::highlight(zt-sentence-dim) {
@@ -200,12 +207,22 @@
   color: var(--zt-sentence-dim-color);
 }
 
-::highlight(zt-sentence-fade-in) {
-  color: var(--zt-sentence-fade-in-color);
+// Bounded sentence transition slot pool — each in-flight sentence owns one
+// slot with its own start time and current color (see sentenceTransition.ts).
+::highlight(zt-sentence-transition-0) {
+  color: var(--zt-sentence-transition-0-color);
 }
 
-::highlight(zt-sentence-fade-out) {
-  color: var(--zt-sentence-fade-out-color);
+::highlight(zt-sentence-transition-1) {
+  color: var(--zt-sentence-transition-1-color);
+}
+
+::highlight(zt-sentence-transition-2) {
+  color: var(--zt-sentence-transition-2-color);
+}
+
+::highlight(zt-sentence-transition-3) {
+  color: var(--zt-sentence-transition-3-color);
 }
 
 // Ripple block dimming is intentionally class/custom-property based. This
@@ -214,5 +231,5 @@
 // The duration custom property is written from RIPPLE_CONFIG.TRANSITION_SEC.
 .zentype-ripple-block {
   opacity: var(--zt-ripple-opacity, 1) !important;
-  transition: opacity var(--zt-ripple-transition-duration) ease;
+  transition: opacity var(--zt-ripple-transition-duration) ease !important;
 }

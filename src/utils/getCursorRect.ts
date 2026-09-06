@@ -18,6 +18,17 @@ import { CURSOR_CONFIG } from "../config";
 import { getLineHeight } from "./getLineHeight";
 import { resolveRangeTextPoint } from "./rangeTextPoint";
 
+/** Dev-only hot-path counters (Phase 1 stabilization profiling). */
+const RECT_DEBUG = __ZENTYPE_DEV__;
+export const cursorRectPerf = {
+  native: 0,
+  fallbackAdjacent: 0,
+  fallbackEmpty: 0,
+  failOpen: 0,
+  fallbackCalls: 0,
+  fallbackTotalMs: 0,
+};
+
 /** 用户可配置：见 src/config.ts :: CURSOR_CONFIG.HEIGHT_RATIO */
 export const LINE_HEIGHT_RATIO = CURSOR_CONFIG.HEIGHT_RATIO;
 
@@ -43,9 +54,18 @@ export function getCursorRect(): CursorRect | null {
   const validRects = rects.filter((rect) => rect.height > 0);
   if (validRects.length > 0) {
     baseRect = validRects[validRects.length - 1];
+    if (RECT_DEBUG) cursorRectPerf.native++;
   } else {
+    const fallbackStart = RECT_DEBUG ? performance.now() : 0;
     const fallback = getFallbackCursorRect(range);
-    if (!fallback) return null;
+    if (RECT_DEBUG) {
+      cursorRectPerf.fallbackCalls++;
+      cursorRectPerf.fallbackTotalMs += performance.now() - fallbackStart;
+    }
+    if (!fallback) {
+      if (RECT_DEBUG) cursorRectPerf.failOpen++;
+      return null;
+    }
     baseRect = fallback.rect;
     caretEdge = fallback.edge;
   }
@@ -82,9 +102,11 @@ function getFallbackCursorRect(range: Range): FallbackCursorRect | null {
   // client rect; recover that caret from nearby real text instead.
   if (isEmptyBlock(block)) {
     const rect = getEmptyBlockRect(range);
+    if (RECT_DEBUG) cursorRectPerf.fallbackEmpty++;
     return rect ? { rect, edge: "start" } : null;
   }
 
+  if (RECT_DEBUG) cursorRectPerf.fallbackAdjacent++;
   return getAdjacentTextRect(range, block);
 }
 

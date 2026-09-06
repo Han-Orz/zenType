@@ -1,4 +1,11 @@
 import { findAllScrollableAncestors } from "../../utils/scroll";
+import {
+  shouldUseManualScrollPolicy,
+  type CursorScrollSource,
+} from "./events";
+import { cursorPerf } from "./perf";
+
+const DEBUG_ENABLED = __ZENTYPE_DEV__;
 
 interface ScrollEventBinding {
   el: HTMLElement;
@@ -8,6 +15,7 @@ interface ScrollEventBinding {
 export interface ScrollBindingContext {
   getCursorElement: () => HTMLElement | null;
   isKeyboardUpdatePending: () => boolean;
+  isOwnedScrollTarget: (target: EventTarget | null) => boolean;
   pauseBreathe: () => void;
   queueUpdate: () => void;
 }
@@ -29,6 +37,7 @@ export function bindScrollContainerEvents(
     return;
   }
   lastScrollBindingCursorElement = cursorElement;
+  if (DEBUG_ENABLED) cursorPerf.scrollRebinds++;
 
   const scrollEls = findAllScrollableAncestors(cursorElement);
   const currentSet = new Set(scrollEls);
@@ -50,12 +59,19 @@ export function bindScrollContainerEvents(
     if ((scrollEl as any).__zentypeScrollBound) return;
     (scrollEl as any).__zentypeScrollBound = true;
 
-    const handler: EventListener = () => {
+    const handler: EventListener = (event) => {
+      if (DEBUG_ENABLED) cursorPerf.containerScroll++;
       const cursorEl = context.getCursorElement();
       if (!cursorEl) return;
       context.pauseBreathe();
       // round 4 fix：键盘触发的嵌套滚动容器滚动（如 Enter 自动滚屏）保留过渡动画
-      if (!context.isKeyboardUpdatePending()) {
+      const source: CursorScrollSource = event.type === "scroll" ? "scroll" : "manual-input";
+      const ownedScroll = source === "scroll" && context.isOwnedScrollTarget(event.target);
+      if (shouldUseManualScrollPolicy(
+        source,
+        context.isKeyboardUpdatePending(),
+        ownedScroll,
+      )) {
         cursorEl.classList.add("no-transition");
         cursorEl.classList.add("no-animation");
       }

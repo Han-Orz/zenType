@@ -720,7 +720,9 @@ test("ripple destroy restores an applied block and leaves a target's generic inl
     themeMode = "dark";
     observerInstances[0].callback();
     while (callbacks.length > 0) callbacks.shift()?.(0);
-    assert.match(rootStyle.getPropertyValue("--zt-sentence-dim-color"), /255,255,255/);
+    // The sentence engine owns the dim color variable and only claims it while
+    // there is sentence content to present (the block text is empty here).
+    assert.equal(rootStyle.getPropertyValue("--zt-sentence-dim-color"), "");
     assert.equal(targetWithHostStyles.style.getPropertyValue("opacity"), "0.8");
     assert.equal(targetWithHostStyles.style.getPropertyPriority("opacity"), "important");
 
