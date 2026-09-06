@@ -71,7 +71,12 @@ const SENTENCE_DIM_HIGHLIGHT = "zt-sentence-dim";
 const SENTENCE_OUTGOING_DIM_HIGHLIGHT = "zt-sentence-outgoing-dim";
 const SENTENCE_FADE_IN_HIGHLIGHT = "zt-sentence-fade-in";
 const SENTENCE_FADE_OUT_HIGHLIGHT = "zt-sentence-fade-out";
-const SENTENCE_FADE_MS = Math.round(TRANSITION_SEC * 1000);
+// 句子聚焦非对称淡变：获得焦点快（ease-out 快速收敛），释放焦点慢（ease-in-out 柔和退场）。
+const SENTENCE_FADE_IN_MS = 240;
+const SENTENCE_FADE_OUT_MS = 600;
+// 跨块 handoff 时旧块句级 dim 的静态保留时长：跟随块级 opacity 过渡（TRANSITION_SEC），
+// 目的是盖住 dim -> normal -> dim 亮度峰，与句子淡变时长无关。
+const SENTENCE_OUTGOING_HOLD_MS = Math.round(TRANSITION_SEC * 1000);
 const NESTED_RIPPLE_ENABLED = true;
 const nestedRippleEngine = createNestedRippleEngine();
 
@@ -489,7 +494,7 @@ function clearOutgoingSentenceHighlight(): void {
 }
 
 function preserveOutgoingSentenceHighlight(): void {
-  if (prefersReducedMotion() || SENTENCE_FADE_MS <= 0) {
+  if (prefersReducedMotion() || SENTENCE_OUTGOING_HOLD_MS <= 0) {
     clearOutgoingSentenceHighlight();
     return;
   }
@@ -517,7 +522,7 @@ function preserveOutgoingSentenceHighlight(): void {
     if (sentenceHighlightSupported()) {
       CSS.highlights.delete(SENTENCE_OUTGOING_DIM_HIGHLIGHT);
     }
-  }, SENTENCE_FADE_MS);
+  }, SENTENCE_OUTGOING_HOLD_MS);
 }
 
 function buildDimRanges(
@@ -571,6 +576,11 @@ function mixColor(from: Rgba, to: Rgba, t: number): Rgba {
 
 function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+/** ease-out：起步快、收尾慢——新句快速进入清晰状态。 */
+function easeOutCubic(t: number): number {
+  return 1 - Math.pow(1 - t, 3);
 }
 
 function parseRgbColor(value: string): Rgba | null {
@@ -676,7 +686,7 @@ function startSentenceFade(
 ): boolean {
   cancelSentenceFade();
 
-  if (SENTENCE_FADE_MS <= 0 || prefersReducedMotion()) return false;
+  if (SENTENCE_FADE_IN_MS <= 0 || SENTENCE_FADE_OUT_MS <= 0 || prefersReducedMotion()) return false;
 
   const fadeOutSource = snapSentenceRanges(sentenceRanges, leavingRanges);
   const fadeInSource = snapSentenceRanges(sentenceRanges, enteringRanges);
@@ -684,6 +694,14 @@ function startSentenceFade(
   const fadeOutRanges = buildFadeRanges(textNodeMap, fadeOutSource);
   const fadeInRanges = buildFadeRanges(textNodeMap, fadeInSource);
   if (!fadeOutRanges || !fadeInRanges) return false;
+
+  // 非对称时间线：rAF 生命周期只跑到实际参与方向的最大时长。双向切换时
+  // fade-in 先在 240ms 收敛为清晰色，fade-out 继续走到 600ms 才 cleanup。
+  const totalMs = Math.max(
+    fadeOutRanges.length > 0 ? SENTENCE_FADE_OUT_MS : 0,
+    fadeInRanges.length > 0 ? SENTENCE_FADE_IN_MS : 0,
+  );
+  if (totalMs <= 0) return false;
 
   const token = sentenceFadeToken;
   const startTime = performance.now();
@@ -726,18 +744,23 @@ function startSentenceFade(
   const step = (now: number) => {
     if (token !== sentenceFadeToken) return;
 
-    const raw = Math.min(1, (now - startTime) / SENTENCE_FADE_MS);
-    const t = easeInOutCubic(raw);
-    setOwnedRootStyle(
-      "--zt-sentence-fade-out-color",
-      colorToCss(mixColor(textColor, dimColor, t)),
-    );
-    setOwnedRootStyle(
-      "--zt-sentence-fade-in-color",
-      colorToCss(mixColor(dimColor, textColor, t)),
-    );
+    const elapsed = now - startTime;
+    if (fadeOutRanges.length > 0) {
+      const rawOut = Math.min(1, elapsed / SENTENCE_FADE_OUT_MS);
+      setOwnedRootStyle(
+        "--zt-sentence-fade-out-color",
+        colorToCss(mixColor(textColor, dimColor, easeInOutCubic(rawOut))),
+      );
+    }
+    if (fadeInRanges.length > 0) {
+      const rawIn = Math.min(1, elapsed / SENTENCE_FADE_IN_MS);
+      setOwnedRootStyle(
+        "--zt-sentence-fade-in-color",
+        colorToCss(mixColor(dimColor, textColor, easeOutCubic(rawIn))),
+      );
+    }
 
-    if (raw < 1) {
+    if (elapsed < totalMs) {
       sentenceFadeFrame = requestAnimationFrame(step);
       return;
     }
@@ -849,7 +872,8 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
   const { leaving, entering } = diffSentenceSets(previousRanges, activeRanges);
   const canAnimate =
     !prefersReducedMotion() &&
-    SENTENCE_FADE_MS > 0 &&
+    SENTENCE_FADE_IN_MS > 0 &&
+    SENTENCE_FADE_OUT_MS > 0 &&
     blockId !== null &&
     blockId === lastDimBlockId &&
     previousRanges.length > 0 &&
