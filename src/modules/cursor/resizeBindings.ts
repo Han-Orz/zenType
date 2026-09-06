@@ -1,3 +1,7 @@
+import { cursorPerf } from "./perf";
+
+const DEBUG_ENABLED = __ZENTYPE_DEV__;
+
 let protyleContentObserver: ResizeObserver | null = null;
 let protyleWysiwygObserver: ResizeObserver | null = null;
 let lastBoundProtyleContent: HTMLElement | null = null;
@@ -26,6 +30,7 @@ export function bindResizeObservers(
     protyleContentObserver = new ResizeObserver(() => {
       const el = context.getCursorElement();
       if (!el) return;
+      if (DEBUG_ENABLED) cursorPerf.resizeDriven++;
       // round 4 fix：键盘触发的 ResizeObserver（Enter 新建段落等）不强制无过渡
       if (!context.isKeyboardUpdatePending()) el.classList.add("no-transition");
       context.queueUpdate();
@@ -43,6 +48,7 @@ export function bindResizeObservers(
     protyleWysiwygObserver = new ResizeObserver(() => {
       const el = context.getCursorElement();
       if (!el) return;
+      if (DEBUG_ENABLED) cursorPerf.resizeDriven++;
       // round 4 fix：键盘触发的 ResizeObserver（Enter 新建段落等）不强制无过渡
       if (!context.isKeyboardUpdatePending()) el.classList.add("no-transition");
       context.queueUpdate();

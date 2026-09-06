@@ -27,7 +27,7 @@
 
 import type { IProtyle, IWebSocketData } from "siyuan/types";
 import { CURSOR_CONFIG, EDGE_FADE, TRANSITION } from "../config";
-import { getCursorRect } from "../utils/getCursorRect";
+import { cursorRectPerf, getCursorRect } from "../utils/getCursorRect";
 import { isInAllowElements } from "../utils/boundary";
 import { isMobile } from "../utils/isMobile";
 import { getEffectiveZIndex } from "../utils/getEffectiveZIndex";
@@ -77,6 +77,14 @@ import {
 import * as inputMode from "./inputMode";
 import * as typewriterScroll from "./typewriter/scroll";
 import * as structuralFlip from "./typewriter/flip";
+import {
+  buildCursorPerfSummary,
+  cursorPerf,
+  CURSOR_PERF_FLUSH_CALLS,
+  CURSOR_PERF_FLUSH_MS,
+  pushPerfRing,
+  resetCursorPerf,
+} from "./cursor/perf";
 
 const CURSOR_ID = "zentype-cursor";
 
@@ -87,7 +95,8 @@ export type CursorDebugEventName =
   | "cursor-frame"
   | "cursor-scroll-policy"
   | "cursor-transition-restored"
-  | "cursor-switch-settle";
+  | "cursor-switch-settle"
+  | "cursor-perf-summary";
 
 export interface CursorDebugEvent {
   name: CursorDebugEventName;
@@ -208,7 +217,35 @@ function restoreNativeCaretAndHideCustom(): void {
 
 /** Dev-only: doUpdateCursor gave up before producing visible geometry. */
 function emitUpdateSkipped(reason: string): void {
-  if (DEBUG_ENABLED) emitDebugState("cursor-update-skipped", { reason });
+  if (DEBUG_ENABLED) {
+    emitDebugState("cursor-update-skipped", { reason });
+    cursorPerf.skips[reason] = (cursorPerf.skips[reason] ?? 0) + 1;
+    recordCursorUpdateDuration();
+    maybeFlushCursorPerf();
+  }
+}
+
+// Dev-only profiling: start timestamp of the doUpdateCursor invocation in
+// flight; consumed by recordCursorUpdateDuration at every exit path.
+let cursorUpdateStartAt = 0;
+
+function recordCursorUpdateDuration(): void {
+  const duration = performance.now() - cursorUpdateStartAt;
+  pushPerfRing(cursorPerf.durations, duration);
+}
+
+function maybeFlushCursorPerf(): void {
+  const now = performance.now();
+  if (cursorPerf.windowStartedAt === 0) {
+    resetCursorPerf(now);
+    return;
+  }
+  const elapsed = now - cursorPerf.windowStartedAt;
+  if (cursorPerf.updates > 0 && (cursorPerf.updates >= CURSOR_PERF_FLUSH_CALLS || elapsed >= CURSOR_PERF_FLUSH_MS)) {
+    const summary = buildCursorPerfSummary(now, cursorRectPerf);
+    if (summary) emitDebugState("cursor-perf-summary", summary);
+    resetCursorPerf(now);
+  }
 }
 
 /** Hide the native caret only on the editable owner currently being rendered. */
@@ -300,6 +337,10 @@ export function flushCursorTransitionIfNeeded(el: HTMLDivElement): boolean {
 
 /** rAF 节流入口：每帧最多执行一次 doUpdateCursor() */
 function queueUpdate(): void {
+  if (DEBUG_ENABLED) {
+    cursorPerf.queueRequests++;
+    if (pendingFrame !== null) cursorPerf.queueDeduped++;
+  }
   if (pendingFrame !== null) return;
   pendingFrame = requestAnimationFrame((timestamp) => {
     pendingFrame = null;
@@ -374,6 +415,20 @@ const popoverDragContext: PopoverDragContext = {
 function doUpdateCursor(frameTimestamp?: number): void {
   if (!cursorEl) return;
 
+  if (DEBUG_ENABLED) {
+    cursorPerf.updates++;
+    cursorUpdateStartAt = performance.now();
+    // C1 keyboard chain: event → outer rAF → queueUpdate → this run.
+    if (pendingKeyboardUpdate && cursorPerf.keyboardEventAt !== null && frameTimestamp !== undefined) {
+      pushPerfRing(cursorPerf.keyboardLatencies, frameTimestamp - cursorPerf.keyboardEventAt);
+      if (cursorPerf.keyboardOuterRafAt !== null && frameTimestamp > cursorPerf.keyboardOuterRafAt + 0.5) {
+        cursorPerf.keyboardTwoFrame++;
+      }
+      cursorPerf.keyboardEventAt = null;
+      cursorPerf.keyboardOuterRafAt = null;
+    }
+  }
+
   const reducedMotion = prefersReducedMotion();
   if (reducedMotion) {
     cancelRemoveTransitionFrame();
@@ -385,6 +440,7 @@ function doUpdateCursor(frameTimestamp?: number): void {
 
   // 2) 读取选区 → 显示矩形
   let rect: ReturnType<typeof getCursorRect>;
+  const rectStart = DEBUG_ENABLED ? performance.now() : 0;
   try {
     rect = getCursorRect();
   } catch {
@@ -393,6 +449,7 @@ function doUpdateCursor(frameTimestamp?: number): void {
     pauseBreathe();
     return;
   }
+  if (DEBUG_ENABLED) cursorPerf.getCursorRectMs += performance.now() - rectStart;
   if (!rect || rect.height === 0) {
     // No reliable geometry means the native caret is the only trustworthy
     // fallback; never leave the previous custom caret parked on old content.
@@ -407,6 +464,7 @@ function doUpdateCursor(frameTimestamp?: number): void {
   // 传 editorRect 把淡出边界对齐到"编辑器内容区"而不是"裸视口"，让顶部对称底部。
   // 注意：必须先算 allowed（拿到 editorRect）再调 getEdgeProximity。
   let allowed: ReturnType<typeof isInAllowElements>;
+  const boundsStart = DEBUG_ENABLED ? performance.now() : 0;
   try {
     allowed = isInAllowElements({ x: rect.x, y: rect.y });
   } catch {
@@ -414,6 +472,10 @@ function doUpdateCursor(frameTimestamp?: number): void {
     restoreNativeCaretAndHideCustom();
     pauseBreathe();
     return;
+  }
+  if (DEBUG_ENABLED) {
+    cursorPerf.boundsMs += performance.now() - boundsStart;
+    cursorPerf.boundsCalls++;
   }
   const edge = getEdgeProximity(rect, allowed.editorRect);
 
@@ -462,11 +524,13 @@ function doUpdateCursor(frameTimestamp?: number): void {
     cachedZIndexElement.isConnected
   ) {
     effectiveZ = cachedEffectiveZIndex;
+    if (DEBUG_ENABLED) cursorPerf.zIndexHits++;
   } else {
     effectiveZ = getEffectiveZIndex(allowed.cursorElement!);
     cachedZIndexElement = allowed.cursorElement;
     cachedFullscreenElement = fullscreenElement;
     cachedEffectiveZIndex = effectiveZ;
+    if (DEBUG_ENABLED) cursorPerf.zIndexMisses++;
   }
   cursorEl.style.zIndex = String(effectiveZ + 1);
 
@@ -516,6 +580,7 @@ function doUpdateCursor(frameTimestamp?: number): void {
 
   // 7) 仅在 no-transition 生效时同步一次布局，让瞬移位置先提交，再恢复过渡。
   if (!reducedMotion && flushCursorTransitionIfNeeded(cursorEl)) {
+    if (DEBUG_ENABLED) cursorPerf.forcedLayouts++;
     // 下一帧恢复 transition（transform / height / opacity 过渡）
     if (removeTransitionFrame !== null) cancelAnimationFrame(removeTransitionFrame);
     removeTransitionFrame = requestAnimationFrame(() => {
@@ -541,6 +606,8 @@ function doUpdateCursor(frameTimestamp?: number): void {
     emitDebugState("cursor-update", {
       frameTimestamp,
     });
+    recordCursorUpdateDuration();
+    maybeFlushCursorPerf();
   }
 
   // round 4 fix（capture + cooldown）：键盘标志由 markKeyboardPending 启动的 300ms 倒计时负责清零，

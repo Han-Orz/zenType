@@ -1,4 +1,5 @@
 import * as inputModeTriggers from "../inputModeTriggers";
+import { cursorPerf } from "./perf";
 import {
   isCurrentSelectionEditable,
   isCurrentSelectionInActiveEditor,
@@ -7,6 +8,8 @@ import {
   isInActiveEditor,
   isReadonlyEditorTarget,
 } from "../../utils/editorScope";
+
+const DEBUG_ENABLED = __ZENTYPE_DEV__;
 
 export type CursorScrollSource = "scroll" | "manual-input";
 
@@ -50,6 +53,7 @@ function isUsableEditorEvent(event: Event): boolean {
 export function bindCursorDocumentEvents(context: CursorEventContext): void {
   // 聚焦/打字机模式：wheel/touchmove 退出处理（不涉及 scroll，避免程序滚动误退出）
   const onWheelExit: EventListener = (event) => {
+    if (DEBUG_ENABLED) cursorPerf.docCaptureWheel++;
     inputModeTriggers.onWheelOrTouchMove();
     context.clearKeyboardPending();
     if (isInActiveEditor(event.target)) context.onScrollOrWheel("manual-input", event.target);
@@ -94,7 +98,17 @@ export function bindCursorDocumentEvents(context: CursorEventContext): void {
       inputModeTriggers.onVerticalNavigationKey();
     }
     context.markKeyboardPending();
-    requestAnimationFrame(context.queueUpdate);
+    // C1 keyboard chain: stamp the event time, then the outer rAF's frame time.
+    // doUpdateCursor compares its own rAF timestamp against outerRafAt — a later
+    // timestamp proves the update ran one frame after the outer hop.
+    if (DEBUG_ENABLED) {
+      cursorPerf.keyboardEvents++;
+      cursorPerf.keyboardEventAt = performance.now();
+    }
+    requestAnimationFrame((outerFrameTs) => {
+      if (DEBUG_ENABLED) cursorPerf.keyboardOuterRafAt = outerFrameTs;
+      context.queueUpdate();
+    });
   };
 
   const onInput: EventListener = (event) => {
@@ -114,7 +128,14 @@ export function bindCursorDocumentEvents(context: CursorEventContext): void {
       inputModeTriggers.onTextInput();
       context.markKeyboardPending();
     }
-    requestAnimationFrame(context.queueUpdate);
+    if (DEBUG_ENABLED) {
+      cursorPerf.keyboardEvents++;
+      cursorPerf.keyboardEventAt = performance.now();
+    }
+    requestAnimationFrame((outerFrameTs) => {
+      if (DEBUG_ENABLED) cursorPerf.keyboardOuterRafAt = outerFrameTs;
+      context.queueUpdate();
+    });
   };
 
   const onClick: EventListener = (event) => {
@@ -129,6 +150,7 @@ export function bindCursorDocumentEvents(context: CursorEventContext): void {
   };
 
   const onScroll: EventListener = (event) => {
+    if (DEBUG_ENABLED) cursorPerf.docCaptureScroll++;
     if (isInActiveEditor(event.target)) context.onScrollOrWheel("scroll", event.target);
   };
 

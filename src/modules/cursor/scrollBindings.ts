@@ -3,6 +3,9 @@ import {
   shouldUseManualScrollPolicy,
   type CursorScrollSource,
 } from "./events";
+import { cursorPerf } from "./perf";
+
+const DEBUG_ENABLED = __ZENTYPE_DEV__;
 
 interface ScrollEventBinding {
   el: HTMLElement;
@@ -34,6 +37,7 @@ export function bindScrollContainerEvents(
     return;
   }
   lastScrollBindingCursorElement = cursorElement;
+  if (DEBUG_ENABLED) cursorPerf.scrollRebinds++;
 
   const scrollEls = findAllScrollableAncestors(cursorElement);
   const currentSet = new Set(scrollEls);
@@ -56,6 +60,7 @@ export function bindScrollContainerEvents(
     (scrollEl as any).__zentypeScrollBound = true;
 
     const handler: EventListener = (event) => {
+      if (DEBUG_ENABLED) cursorPerf.containerScroll++;
       const cursorEl = context.getCursorElement();
       if (!cursorEl) return;
       context.pauseBreathe();
