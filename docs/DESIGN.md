@@ -457,7 +457,7 @@ function animateBlockShift(editor: HTMLElement, range: Range): void {
 
 ### 4.1 想要的效果（v2.6.1 更新：CSS Custom Highlight API + 句级 fade）
 
-- **当前输入句**稳定态保持默认文字色（最亮）；当前块的**其它句**用 `::highlight(zt-sentence-dim)` 染色为 `color: rgba(0,0,0,0.6)`（浅色）/ `rgba(255,255,255,0.6)`（深色）——按 `.`、`?`、`!`、`。`、`？`、`！`、`…` 切句，**句级**而非仅块级
+- **当前输入句**稳定态保持默认文字色（最亮）；当前块的**其它句**用 `::highlight(zt-sentence-dim)` 染色为 `color: rgba(0,0,0,0.6)`（浅色）/ `rgba(255,255,255,0.6)`（深色）——句界完全由 `Intl.Segmenter({ granularity: "sentence" })` 给出（无 regex fallback），**句级**而非仅块级
 - **句级切换动画**：每个正在过渡的句子拥有独立的 presentation slot（`zt-sentence-transition-0..3`，含自身 Range / from→to 颜色 / startTime / duration）；acquire（dim→text）为 400ms、release（text→dim）为 600ms，均 `easeInOutCubic`。单个共享 rAF driver 每帧只对在飞 slot 采样并写 CSS 变量，空闲时 rAF = 0。呈现状态机位于 `ripple/sentenceTransition.ts`，ripple.ts 只负责把语义目标交给它。
 - 当前块 opacity = 1.0，不参与视觉权重衰减；相邻 ±1 块 opacity ≈ 0.4 × 视觉权重
 - 相邻 ±2 块 opacity ≈ 0.2；更远按 `[0.15, 0.1, 0.05]` 继续衰减
@@ -471,7 +471,7 @@ function animateBlockShift(editor: HTMLElement, range: Range): void {
 | 决策 | 值 | 代码引用 | 理由 |
 |---|---|---|---|
 | **默认 ON** | 初始化时启用共享的打字机/涟漪状态 | `typewriter.ts:599-601` | 与模块默认启用状态一致 |
-| **句级粒度**（v2.5.0 改 Highlight API） | 按 `.?!。？！…` 切句，小数点保护 | `ripple.ts` `splitSentences` / `applySentenceHighlight` | 用户偏好"看清整句"，不只是块；v2.5.0 废弃 `getSentences`/span 包裹 |
+| **句级粒度**（v2.5.0 改 Highlight API） | `Intl.Segmenter({ granularity: "sentence" })`（唯一句界来源，无 regex fallback） | `ripple/sentenceModel.ts` `splitSentences` / `applySentenceHighlight` | 用户偏好"看清整句"，不只是块；v2.5.0 废弃 `getSentences`/span 包裹 |
 | **块级 opacity 梯度** | `[1.0, 0.4, 0.2, 0.15, 0.1, 0.05]` | `config.ts` `BLOCK_LEVELS` | v2.6.0 参考 Obsidian focus，增强聚焦对比 |
 | **句级 dim alpha** | `SENTENCE_DIM_ALPHA = 0.6` | `config.ts` `SENTENCE_DIM_ALPHA` | v2.6.1 调低非当前句亮度，当前句稳定态保持原色 |
 | **句级切换动画** | 每句独立 slot `zt-sentence-transition-0..3`（各自 Range / 颜色 / startTime），acquire 400ms / release 600ms rAF 颜色插值 | `ripple/sentenceTransition.ts` `createSentenceTransitionEngine` | `::highlight` 不支持 transition；per-slot 状态使反向/打断时从当前颜色续走，无 timeline 继承 |
@@ -673,7 +673,7 @@ WEIGHT_MIN: 0.85                                  // 视觉权重下限（lerp �
 | TODO | 内容 |
 |---|---|
 | **区分不同的块类型** | `EMBED_MULTIPLIER` 已移除（v2.6.0）。嵌套块继承父级 opacity，不再单独乘系数。若要让特定块类型有不同 dimming 系数，需重新设计 |
-| **句级切分边界** | 现按 `[.?!。？！…]+` 切句（v2.6.0 加小数点保护 `(?<!\d)`）；`?!` 组合、中英文标点混合等场景可能需要更精细规则 |
+| **句级切分边界** | 句界由 `Intl.Segmenter({ granularity: "sentence" })` 唯一给出，无 regex fallback；切分语义遵循引擎 locale 规则，非引擎无法复刻的边界情况不再可用 |
 | **块级缓存边界** | 当前缓存依赖 `containerTop/scrollTop/childCount` 三个变量；若 SiYuan 排版变更不改变这些值但影响布局时，缓存可能返回陈旧结果 |
 
 ---
@@ -951,7 +951,7 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 | 嵌套块继承 | 只设顶层块 opacity，嵌套块继承 | 避免 opacity 叠加（父 0.5 × 子 0.5 = 0.25） |
 | 远块跳过 | distance≥2 跳过 getBoundingClientRect | 不可感知的差异不回读布局 |
 | 删除死代码 | isRippleTargetBlock/depthOf 等全部删除 | 简化维护面 |
-| 句子分割加省略号 | 正则加 `…` + 小数点保护 `(?<!\d)` | 用户有省略号分段需求 |
+| 句子分割加省略号 | v2.6.0 按正则 `(?<!\d)[.?!。？！…]+(?!\d)` 切句；`8dcd3a4` 起句界改由 `Intl.Segmenter({ granularity: "sentence" })` 唯一提供（无 regex fallback），正则仅存于历史实现 | 用户有省略号分段需求 |
 
 ### 9.10 v2.6.1 决策（2026-07-03）— Typewriter 修复 + Ripple 句级 fade
 

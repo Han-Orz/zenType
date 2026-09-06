@@ -684,7 +684,7 @@ export function createSentenceTransitionEngine(): SentenceTransitionEngine {
     return ranges;
   }
 
-  function syncStable(slots: readonly SentenceTransitionSlot[]): void {
+  function syncStable(): void {
     if (!cssHighlightApiSupported()) return;
     stableRangeRefs = resolveRanges(core.stableRanges());
     registerHighlight(SENTENCE_DIM_HIGHLIGHT, stableRangeRefs);
@@ -758,7 +758,7 @@ export function createSentenceTransitionEngine(): SentenceTransitionEngine {
     const result = core.update({ ...input, animate: canAnimate });
 
     if (cssHighlightApiSupported()) {
-      syncStable(result.slots);
+      syncStable();
       syncSlots(result.slots);
       syncDimVar(input.dimColor);
     }
