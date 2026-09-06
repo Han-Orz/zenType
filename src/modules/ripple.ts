@@ -449,6 +449,8 @@ let activeSentenceFade: {
   blockId: string | null;
   oldRanges: SentenceRange[];
   newRanges: SentenceRange[];
+  targetRanges: SentenceRange[];
+  totalMs: number;
 } | null = null;
 let outgoingSentenceRanges: Range[] = [];
 let outgoingSentenceCleanupTimer: TransitionReleaseTimer | null = null;
@@ -679,6 +681,7 @@ function startSentenceFade(
   sentenceRanges: SentenceRange[],
   leavingRanges: SentenceRange[],
   enteringRanges: SentenceRange[],
+  targetRanges: SentenceRange[],
 ): boolean {
   cancelSentenceFade();
 
@@ -718,6 +721,8 @@ function startSentenceFade(
     blockId,
     oldRanges: fadeOutSource,
     newRanges: fadeInSource,
+    targetRanges: [...targetRanges],
+    totalMs,
   };
 
   const finish = () => {
@@ -745,14 +750,16 @@ function startSentenceFade(
 
     if (startTime === null) startTime = now;
     const elapsed = now - startTime;
-    if (fadeOutRanges.length > 0) {
+    const fadeState = activeSentenceFade;
+    if (!fadeState) return;
+    if (fadeState.oldRanges.length > 0) {
       const rawOut = Math.min(1, elapsed / SENTENCE_FADE_OUT_MS);
       setOwnedRootStyle(
         "--zt-sentence-fade-out-color",
         colorToCss(mixColor(textColor, dimColor, easeInOutCubic(rawOut))),
       );
     }
-    if (fadeInRanges.length > 0) {
+    if (fadeState.newRanges.length > 0) {
       const rawIn = Math.min(1, elapsed / SENTENCE_FADE_IN_MS);
       setOwnedRootStyle(
         "--zt-sentence-fade-in-color",
@@ -760,7 +767,7 @@ function startSentenceFade(
       );
     }
 
-    if (elapsed < totalMs) {
+    if (elapsed < fadeState.totalMs) {
       sentenceFadeFrame = requestAnimationFrame(step);
       return;
     }
@@ -873,11 +880,13 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
   // Segmenter geometry by the same stable start anchor used above for the
   // semantic diff; refreshSentenceFadeRanges() then retargets the Highlight
   // ranges without restarting the existing fade timeline.
-  let fadeTargetRanges = activeSentenceFade?.newRanges ?? [];
+  // The fade target is the complete active set, not merely the entering
+  // highlight ranges. Rebase it by sentence start when text edits move ends.
+  let fadeTargetRanges = activeSentenceFade?.targetRanges ?? [];
+  let fadeTargetRebaseOk = true;
   if (text !== lastDimText && activeSentenceFade !== null) {
     const rebasedFadeTarget: SentenceRange[] = [];
-    let fadeTargetRebaseOk = true;
-    for (const old of activeSentenceFade.newRanges) {
+    for (const old of activeSentenceFade.targetRanges) {
       const current = matches.find((match) => match.start === old.start);
       if (!current) {
         fadeTargetRebaseOk = false;
@@ -888,25 +897,20 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
     if (fadeTargetRebaseOk) fadeTargetRanges = rebasedFadeTarget;
   }
 
+  const targetMatchesActive = sameSentenceRangeSet(activeRanges, fadeTargetRanges);
+  const targetOverlapsActive = fadeTargetRanges.some((target) =>
+    activeRanges.some((current) => current.start === target.start),
+  );
+  const boundaryContinuation =
+    fadeTargetRebaseOk &&
+    targetOverlapsActive &&
+    (activeRanges.length === 2 || fadeTargetRanges.length === 2);
+
   let continuingFade =
     activeSentenceFade !== null &&
     blockId === activeSentenceFade.blockId &&
-    sameSentenceRangeSet(activeRanges, fadeTargetRanges);
-  if (continuingFade && activeSentenceFade !== null) {
-    const refreshed = refreshSentenceFadeRanges(
-      textNodeMap,
-      matches,
-      activeSentenceFade.oldRanges,
-      activeRanges,
-    );
-    if (refreshed) {
-      activeSentenceFade.block = block;
-      activeSentenceFade.oldRanges = refreshed.oldRanges;
-      activeSentenceFade.newRanges = refreshed.newRanges;
-    } else {
-      continuingFade = false;
-    }
-  }
+    fadeTargetRebaseOk &&
+    (targetMatchesActive || boundaryContinuation);
 
   const { leaving, entering } = diffSentenceSets(diffPrevious, activeRanges);
   const canAnimate =
@@ -920,6 +924,43 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
     // 只有 leaving range 在当前切句结果中原样存在（start/end 全等）才可动画：
     // 文本编辑导致的边界位移只做 dim 重建，不产生 fade（也不产生多余 rAF）。
     leaving.every((range) => matches.some((match) => sameSentenceRange(match, range)));
+
+  if (continuingFade && activeSentenceFade !== null) {
+    let nextOldRanges = [...activeSentenceFade.oldRanges];
+    let nextNewRanges = [...activeSentenceFade.newRanges];
+
+    if (canAnimate) {
+      for (const range of leaving) {
+        nextNewRanges = nextNewRanges.filter((current) => current.start !== range.start);
+        if (!nextOldRanges.some((current) => current.start === range.start)) nextOldRanges.push(range);
+      }
+      for (const range of entering) {
+        nextOldRanges = nextOldRanges.filter((current) => current.start !== range.start);
+        if (!nextNewRanges.some((current) => current.start === range.start)) nextNewRanges.push(range);
+      }
+    }
+
+    const refreshed = refreshSentenceFadeRanges(
+      textNodeMap,
+      matches,
+      nextOldRanges,
+      nextNewRanges,
+    );
+    if (refreshed) {
+      activeSentenceFade.block = block;
+      activeSentenceFade.oldRanges = refreshed.oldRanges;
+      activeSentenceFade.newRanges = refreshed.newRanges;
+      activeSentenceFade.targetRanges = [...activeRanges];
+      if (refreshed.oldRanges.length > 0) {
+        activeSentenceFade.totalMs = Math.max(activeSentenceFade.totalMs, SENTENCE_FADE_OUT_MS);
+      }
+      if (refreshed.newRanges.length > 0) {
+        activeSentenceFade.totalMs = Math.max(activeSentenceFade.totalMs, SENTENCE_FADE_IN_MS);
+      }
+    } else {
+      continuingFade = false;
+    }
+  }
 
   let excludedRanges: SentenceRange[] = [];
   if (continuingFade && activeSentenceFade !== null) {
@@ -941,8 +982,8 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
   lastHadDimRanges = dimRanges.length > 0;
   lastDimTextNodes = snapshotTextNodeMap(textNodeMap);
 
-  if (canAnimate) {
-    const started = startSentenceFade(block, textNodeMap, matches, leaving, entering);
+  if (!continuingFade && canAnimate) {
+    const started = startSentenceFade(block, textNodeMap, matches, leaving, entering, activeRanges);
     if (!started) {
       const fallbackRanges = buildDimRanges(matches, textNodeMap, activeRanges);
       setSentenceHighlight(SENTENCE_DIM_HIGHLIGHT, fallbackRanges);
