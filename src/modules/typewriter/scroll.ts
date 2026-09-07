@@ -201,6 +201,46 @@ export function scrollTo(
   const nextEasing = options.easing ?? easeOutCubic;
 
   if (activeScrollFrame !== null && activeTarget === target) {
+    // The intended endpoint lies behind the rendered position relative to the
+    // current motion (e.g. the user clicks the opposite comfort zone while a
+    // scroll is still easing out). Keeping the old start/end baseline would
+    // make the easing curve teleport across the reversed endpoint in one
+    // frame. Re-baseline from the rendered position instead: the next frame
+    // anchors a fresh timeline at the current scrollTop, so the reversal
+    // eases out smoothly. Same-direction retargets keep their easing
+    // timeline and only adopt the newer endpoint.
+    const motionDirection = endScroll - startScroll;
+    const reverses = motionDirection !== 0 && Math.sign(deltaY) !== Math.sign(motionDirection);
+    if (reverses) {
+      const previousEndScroll = endScroll;
+      startScroll = target.scrollTop;
+      endScroll = target.scrollTop + deltaY;
+      startTime = null;
+      duration = nextDuration;
+      easing = nextEasing;
+      resyncPending = true;
+      if (onRetargetSettled) retargetSettledCallback = onRetargetSettled;
+      if (DEBUG_ENABLED) {
+        emitDebug({
+          name: "typewriter-scroll-retarget",
+          target,
+          motionId: activeMotionId,
+          generation,
+          startScroll,
+          previousEndScroll,
+          endScroll,
+          deltaY,
+          duration,
+          easing: easing.name || "anonymous",
+          startTime,
+          reversed: true,
+          currentScrollTop: target.scrollTop,
+          resyncPending,
+          hasCallback: Boolean(onRetargetSettled),
+        });
+      }
+      return;
+    }
     // Keep startScroll/startTime/duration/easing intact. The current motion
     // should finish naturally; only its endpoint and post-settle resync change.
     const previousEndScroll = endScroll;
