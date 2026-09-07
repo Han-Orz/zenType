@@ -173,11 +173,14 @@
 
 // ===== 涟漪聚焦句级 dimming (CSS Custom Highlight API) =====
 // v2.5.0：废弃 span 包裹，改用 CSS Custom Highlight API（零 DOM 突变）
-// ::highlight 不支持 opacity/transition，用 color 模拟 dim；跨句由 ripple.ts
-// 沿用 v2.6.3 的一组淡入淡出，完成后交回稳定 zt-sentence-dim。
+// ::highlight 不支持 opacity/transition，用 color 模拟 dim；跨句过渡由
+// ripple/sentenceTransition.ts 的 bounded slot pool + 单一 rAF 驱动插值。
+// 每个正在过渡的句子独占一个 slot，slot 颜色由引擎注入的
+// ::highlight(zt-sentence-transition-N) 规则直写（不经过 root 变量）；
+// 动画结束后 dim 句交回稳定 zt-sentence-dim。
 // 局限：currentColor 在 ::highlight 里指 highlight 自身，无法"相对原色 dim"。
 // 彩色文字（mark/链接）会被覆盖成灰/白，只能按主题设固定 RGB。
-// CSS 变量值由 ripple.ts 按主题 + config.SENTENCE_DIM_ALPHA 写入。
+// --zt-sentence-dim-color 由 sentenceTransition engine 按主题写入。
 :root {
   --zt-sentence-dim-color: rgba(0, 0, 0, 0.6);
 }
@@ -190,12 +193,11 @@
   color: var(--zt-sentence-dim-color);
 }
 
-::highlight(zt-sentence-fade-in) {
-  color: var(--zt-sentence-fade-in-color);
-}
-
-::highlight(zt-sentence-fade-out) {
-  color: var(--zt-sentence-fade-out-color);
+// Retain the previous block's sentence dim while its block opacity hands off
+// to the new focus target. The range is removed after the same transition
+// lifecycle; this avoids a dim -> normal -> dim brightness peak on handoff.
+::highlight(zt-sentence-outgoing-dim) {
+  color: var(--zt-sentence-dim-color);
 }
 
 // Ripple block dimming is intentionally class/custom-property based. This

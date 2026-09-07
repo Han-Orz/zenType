@@ -446,12 +446,6 @@ export function createSentenceTransitionCore(
       return settleUpdate(input.sentenceRanges, newActiveKeys);
     }
 
-    const navigationChanged = input.textChange === "none" && (
-      newActiveKeys.size !== activeKeys.size ||
-      [...newActiveKeys].some((key) => !activeKeys.has(key))
-    );
-    if (navigationChanged) clearSlots();
-
     // Ordinal identity when the sentence count is stable, start-anchor
     // identity when the count moved (topology change).
     const prevCount = geometry.length;
