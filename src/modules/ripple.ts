@@ -67,6 +67,7 @@ import {
   parseRgbColor,
   SENTENCE_DIM_HIGHLIGHT,
   type Rgba,
+  type SentenceTextChange,
   type SentenceTransitionEngine,
 } from "./ripple/sentenceTransition";
 
@@ -493,6 +494,29 @@ function getBlockTextColor(block: HTMLElement): Rgba {
   return { r: fallback, g: fallback, b: fallback, a: 1 };
 }
 
+function classifySentenceTextChange(previous: string, current: string): SentenceTextChange {
+  if (current === previous) return "none";
+
+  let prefix = 0;
+  const sharedLength = Math.min(previous.length, current.length);
+  while (prefix < sharedLength && previous[prefix] === current[prefix]) prefix++;
+
+  let previousEnd = previous.length;
+  let currentEnd = current.length;
+  while (
+    previousEnd > prefix &&
+    currentEnd > prefix &&
+    previous[previousEnd - 1] === current[currentEnd - 1]
+  ) {
+    previousEnd--;
+    currentEnd--;
+  }
+
+  if (previousEnd === prefix) return "insert";
+  if (currentEnd === prefix) return "delete";
+  return "replace";
+}
+
 /**
  * caret 在该位置时 resolver 是否会得到与缓存一致的 active set（short-circuit 判定）。
  * 单句缓存：句内任一位置（含 EOF 端点）；双句缓存：仅公共边界点本身。
@@ -571,7 +595,7 @@ function applySentenceHighlight(block: HTMLElement, caretOffset: number, textNod
     blockKey: blockId,
     sentenceRanges: matches,
     activeRanges,
-    textChanged: text !== lastDimText,
+    textChange: classifySentenceTextChange(lastDimText, text),
     textNodeMap,
     textColor: getBlockTextColor(block),
     dimColor: getThemeDimColor(),

@@ -567,7 +567,7 @@ sentenceTransitionEngine.update({
   blockKey,
   sentenceRanges: matches,        // splitSentences(text)
   activeRanges,                   // resolveActiveSentenceRanges(...)
-  textChanged,
+  textChange,                    // none | insert | delete | replace
   textNodeMap,
   textColor,
   dimColor,

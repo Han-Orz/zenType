@@ -25,8 +25,8 @@
  *   - text change, stable count → ordinal rebind keeps continuity;
  *   - count change (topology)   → identity by start anchor. In-flight slots
  *     survive rebind (a running release never snaps), release/acquire between
- *     persisted sentences keep animating, and typed or merged content snaps
- *     bright — typing never dims what the user just wrote.
+ *     persisted sentences keep animating. Inserted/replaced active content
+ *     snaps bright, while deletion-driven activation still acquires normally.
  */
 
 import {
@@ -102,6 +102,7 @@ export function sameColor(a: Rgba, b: Rgba): boolean {
 // --- Core model types ---
 
 export type SentencePresentationTarget = "active" | "dim";
+export type SentenceTextChange = "none" | "insert" | "delete" | "replace";
 
 export interface SentenceTransitionSlot {
   index: number;
@@ -112,6 +113,7 @@ export interface SentenceTransitionSlot {
   to: Rgba;
   current: Rgba;
   duration: number;
+  easing: "smooth" | "linear";
   /** Frame-anchored; null until the first advance so rAF timestamps are never
    *  mixed with performance.now(). */
   startTime: number | null;
@@ -121,7 +123,7 @@ export interface SentenceTransitionUpdate {
   blockKey: string | null;
   sentenceRanges: readonly SentenceRange[];
   activeRanges: readonly SentenceRange[];
-  textChanged: boolean;
+  textChange: SentenceTextChange;
   textColor: Rgba;
   dimColor: Rgba;
   /** false = reduced motion / zero durations / no rAF → settle instantly. */
@@ -197,6 +199,15 @@ export function createSentenceTransitionCore(
     return target === "active" ? acquireMs : releaseMs;
   }
 
+  function colorDistance(a: Rgba, b: Rgba): number {
+    return Math.max(
+      Math.abs(a.r - b.r) / 255,
+      Math.abs(a.g - b.g) / 255,
+      Math.abs(a.b - b.b) / 255,
+      Math.abs(a.a - b.a),
+    );
+  }
+
   function clearSlots(): void {
     slots = [];
   }
@@ -245,15 +256,15 @@ export function createSentenceTransitionCore(
    *
    * Existing in-flight slots are kept and rebound whenever their sentence
    * persists, so a running release never snaps to full dim on a later edit.
-   * A dim -> text ramp only starts when a persisting dim sentence becomes
-   * active without its own content changing (caret / boundary movement,
-   * backspace merges); text that was just typed or merged into the active
-   * sentence snaps bright — typing never dims what the user just wrote.
+   * A persisted dim sentence that becomes active acquires normally for caret
+   * movement and deletion. Inserted/replaced active content snaps bright so
+   * typing never dims what the user just wrote.
    */
   function remapUpdate(
     sentenceRanges: readonly SentenceRange[],
     newActiveKeys: Set<string>,
     useStartIdentity: boolean,
+    textChangeAllowsAcquire: boolean,
   ): SentenceTransitionUpdateResult {
     const prevGeometry = geometry;
     const prevActive = activeKeys;
@@ -293,14 +304,16 @@ export function createSentenceTransitionCore(
       slot.key = key;
       slot.range = sentenceRanges[newIndex];
       if (slot.target !== target) {
-        // Retarget: resume from the last rendered color with a fresh,
-        // frame-anchored timeline. Never restart from an endpoint, never
-        // inherit the old start time.
+        // Reverse from the rendered color at a constant speed, without
+        // restarting the slow entrance of the initial transition.
         slot.from = slot.current;
         slot.target = target;
         slot.to = targetColor(target);
-        slot.duration = durationFor(target);
-        slot.startTime = null;
+        const fullDistance = colorDistance(textColor, dimColor);
+        slot.duration = fullDistance === 0 ? 0 : durationFor(target) *
+          Math.min(1, colorDistance(slot.from, slot.to) / fullDistance);
+        slot.easing = "linear";
+        slot.startTime = lastNow;
       }
       kept[newIndex] = slot;
     }
@@ -334,6 +347,7 @@ export function createSentenceTransitionCore(
               to: dimColor,
               current: textColor,
               duration: releaseMs,
+              easing: "smooth",
               startTime: null,
             });
           }
@@ -341,13 +355,12 @@ export function createSentenceTransitionCore(
         continue;
       }
 
-      // target === "active": only start a dim -> text ramp when a persisting
-      // dim sentence became active with unchanged content. Newborns and
-      // content that grew/changed while being typed or merged snap bright.
+      // target === "active": persisted dim sentences acquire on caret movement
+      // and deletion. Inserted/replaced active content snaps bright.
       if (
         !wasActive &&
         prevRange !== null &&
-        sameRange(prevRange, sentenceRanges[index])
+        (textChangeAllowsAcquire || sameRange(prevRange, sentenceRanges[index]))
       ) {
         const slotIndex = nextFreeIndex(usedIndexes);
         if (slotIndex !== -1) {
@@ -361,6 +374,7 @@ export function createSentenceTransitionCore(
             to: textColor,
             current: dimColor,
             duration: acquireMs,
+            easing: "smooth",
             startTime: null,
           });
         }
@@ -440,7 +454,8 @@ export function createSentenceTransitionCore(
     return remapUpdate(
       input.sentenceRanges,
       newActiveKeys,
-      input.textChanged && !countStable,
+      input.textChange !== "none" && !countStable,
+      input.textChange === "none" || input.textChange === "delete",
     );
   }
 
@@ -476,7 +491,7 @@ export function createSentenceTransitionCore(
         continue;
       }
 
-      const progress = (current - slot.startTime) / slot.duration;
+      const progress = slot.duration === 0 ? 1 : (current - slot.startTime) / slot.duration;
       if (progress >= 1) {
         slot.current = slot.to;
         completed.push({
@@ -486,7 +501,8 @@ export function createSentenceTransitionCore(
           target: slot.target,
         });
       } else {
-        slot.current = mixColor(slot.from, slot.to, easeInOutCubic(progress));
+        const eased = slot.easing === "linear" ? progress : easeInOutCubic(progress);
+        slot.current = mixColor(slot.from, slot.to, eased);
         remaining.push(slot);
       }
     }
@@ -633,6 +649,8 @@ export function createSentenceTransitionEngine(): SentenceTransitionEngine {
     slotVisuals.push({ range: null, registered: false, lastVarValue: null });
   }
   let stableRangeRefs: Range[] = [];
+  let stableGeometry: SentenceRange[] = [];
+  let stableTextNodeMap: TextNodeMapEntry[] = [];
   let lastDimVarValue: string | null = null;
   const ownedRootVars = new Map<string, OwnedInlineStyle>();
   let frameHandle: number | null = null;
@@ -684,13 +702,50 @@ export function createSentenceTransitionEngine(): SentenceTransitionEngine {
     return ranges;
   }
 
-  function syncStable(): void {
-    if (!cssHighlightApiSupported()) return;
-    stableRangeRefs = resolveRanges(core.stableRanges());
-    registerHighlight(SENTENCE_DIM_HIGHLIGHT, stableRangeRefs);
+  function sameGeometry(
+    a: readonly SentenceRange[],
+    b: readonly SentenceRange[],
+  ): boolean {
+    return a.length === b.length && a.every((range, index) => {
+      const other = b[index];
+      return range.start === other.start && range.end === other.end;
+    });
   }
 
-  function syncSlots(slots: readonly SentenceTransitionSlot[]): void {
+  function sameTextNodeMap(
+    a: readonly TextNodeMapEntry[],
+    b: readonly TextNodeMapEntry[],
+  ): boolean {
+    return a.length === b.length && a.every((entry, index) => {
+      const other = b[index];
+      return (
+        entry.node === other.node &&
+        entry.start === other.start &&
+        entry.len === other.len
+      );
+    });
+  }
+
+  function syncStable(): void {
+    if (!cssHighlightApiSupported()) return;
+    const nextGeometry = core.stableRanges();
+    const hasRegisteredHighlight = CSS.highlights.has(SENTENCE_DIM_HIGHLIGHT);
+    const registrationMatches = nextGeometry.length > 0
+      ? hasRegisteredHighlight
+      : !hasRegisteredHighlight;
+    if (
+      registrationMatches &&
+      sameGeometry(nextGeometry, stableGeometry) &&
+      sameTextNodeMap(textNodeMap, stableTextNodeMap)
+    ) return;
+
+    stableRangeRefs = resolveRanges(nextGeometry);
+    registerHighlight(SENTENCE_DIM_HIGHLIGHT, stableRangeRefs);
+    stableGeometry = nextGeometry.map((range) => ({ ...range }));
+    stableTextNodeMap = textNodeMap.map((entry) => ({ ...entry }));
+  }
+
+  function syncSlots(slots: readonly SentenceTransitionSlot[], bindingsChanged: boolean): void {
     if (!cssHighlightApiSupported()) return;
     for (let index = 0; index < SENTENCE_SLOT_COUNT; index++) {
       const slot = slots.find((candidate) => candidate.index === index);
@@ -703,7 +758,7 @@ export function createSentenceTransitionEngine(): SentenceTransitionEngine {
         visual.range === null ||
         visual.range.start !== slot.range.start ||
         visual.range.end !== slot.range.end;
-      if (!visual.registered || geometryChanged) {
+      if (!visual.registered || geometryChanged || bindingsChanged) {
         const resolved = buildRangeFromMap(textNodeMap, slot.range.start, slot.range.end);
         if (resolved) {
           registerHighlight(slotHighlightName(index), [resolved]);
@@ -742,14 +797,16 @@ export function createSentenceTransitionEngine(): SentenceTransitionEngine {
       writeSlotVar(slot.index, slot.current);
     }
     if (result.stableChanged) {
-      stableRangeRefs = resolveRanges(core.stableRanges());
-      registerHighlight(SENTENCE_DIM_HIGHLIGHT, stableRangeRefs);
+      syncStable();
     }
     if (result.anyTransition) ensureDriver();
   }
 
   function update(input: SentenceTransitionEngineUpdate): void {
-    textNodeMap = input.textNodeMap;
+    const bindingsChanged = !sameTextNodeMap(textNodeMap, input.textNodeMap);
+    if (bindingsChanged) {
+      textNodeMap = input.textNodeMap.map((entry) => ({ ...entry }));
+    }
     const canAnimate =
       input.animate &&
       cssHighlightApiSupported() &&
@@ -759,7 +816,7 @@ export function createSentenceTransitionEngine(): SentenceTransitionEngine {
 
     if (cssHighlightApiSupported()) {
       syncStable();
-      syncSlots(result.slots);
+      syncSlots(result.slots, bindingsChanged);
       syncDimVar(input.dimColor);
     }
     if (result.anyTransition && canAnimate) {
@@ -783,6 +840,9 @@ export function createSentenceTransitionEngine(): SentenceTransitionEngine {
       CSS.highlights.delete(SENTENCE_DIM_HIGHLIGHT);
     }
     stableRangeRefs = [];
+    stableGeometry = [];
+    stableTextNodeMap = [];
+    textNodeMap = [];
     if (lastDimVarValue !== null) {
       releaseRootVar(SENTENCE_DIM_VAR);
       lastDimVarValue = null;

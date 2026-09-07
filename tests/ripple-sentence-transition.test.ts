@@ -6,6 +6,7 @@ import {
   mixColor,
   type Rgba,
   type SentenceRange,
+  type SentenceTextChange,
   type SentenceTransitionCore,
 } from "../src/modules/ripple/sentenceTransition";
 
@@ -26,7 +27,7 @@ function update(
   options: {
     sentenceRanges: readonly SentenceRange[];
     activeRanges: readonly SentenceRange[];
-    textChanged?: boolean;
+    textChange?: SentenceTextChange;
     animate?: boolean;
   },
 ) {
@@ -34,7 +35,7 @@ function update(
     blockKey: "block",
     sentenceRanges: options.sentenceRanges,
     activeRanges: options.activeRanges,
-    textChanged: options.textChanged ?? false,
+    textChange: options.textChange ?? "none",
     textColor: TEXT,
     dimColor: DIM,
     animate: options.animate ?? true,
@@ -256,7 +257,7 @@ test("same-sentence text edit rebinds geometry only: no restart, no retarget", (
   const result = update(engine, {
     sentenceRanges: grown,
     activeRanges: [grown[0]],
-    textChanged: true,
+    textChange: "insert",
   });
   assert.equal(result.slots.length, 2);
   const aAfter = slotByRange(result.slots, 0);
@@ -282,7 +283,7 @@ test("earlier-text offset shift keeps ordinal continuity (start 5 -> 4)", () => 
   const result = update(engine, {
     sentenceRanges: shifted,
     activeRanges: [shifted[1]],
-    textChanged: true,
+    textChange: "delete",
   });
   assert.equal(result.slots.length, 0); // target unchanged, no transition
   assert.deepEqual(result.stableRanges, [shifted[0]]);
@@ -309,7 +310,7 @@ test("a topology merge keeps the persisting sentence's transition and leaves no 
   const result = update(engine, {
     sentenceRanges: merged,
     activeRanges: [merged[0]],
-    textChanged: true,
+    textChange: "delete",
   });
   assert.equal(result.slots.length, 1);
   const kept = slotByRange(result.slots, 0);
@@ -405,7 +406,7 @@ test("block switch settles and a second update can transition within the block",
     blockKey: "other-block",
     sentenceRanges: AB,
     activeRanges: [AB[1]],
-    textChanged: false,
+    textChange: "none",
     textColor: TEXT,
     dimColor: DIM,
     animate: true,
@@ -419,7 +420,7 @@ test("block switch settles and a second update can transition within the block",
     blockKey: "other-block",
     sentenceRanges: AB,
     activeRanges: [AB[0]],
-    textChanged: false,
+    textChange: "none",
     textColor: TEXT,
     dimColor: DIM,
     animate: true,
@@ -441,7 +442,7 @@ test("typing past 。 at a block tail releases the finished sentence instead of 
   const result = update(engine, {
     sentenceRanges: grown,
     activeRanges: [grown[1]],
-    textChanged: true,
+    textChange: "insert",
   });
   assert.equal(result.settled, false);
   assert.equal(result.slots.length, 1);
@@ -471,19 +472,19 @@ test("a sentence that becomes active through typing snaps bright (no dim -> text
   let result = update(engine, {
     sentenceRanges: two,
     activeRanges: [two[0]],
-    textChanged: true,
+    textChange: "insert",
   });
   assert.equal(result.settled, true);
   assert.deepEqual(result.stableRanges, [two[1]]);
 
-  // User keeps typing inside X (textChanged=true): X flips dim -> active on
+  // User keeps typing inside X (textChange=insert): X flips dim -> active on
   // the same event that typed into it → no acquisition slot, snaps bright.
   // The old sentence releases normally.
   const grown = [range(0, 2), range(2, 4)];
   result = update(engine, {
     sentenceRanges: grown,
     activeRanges: [grown[1]],
-    textChanged: true,
+    textChange: "insert",
   });
   assert.equal(result.slots.length, 1);
   const rel = slotByRange(result.slots, 0);
