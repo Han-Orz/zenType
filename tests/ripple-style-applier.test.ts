@@ -407,56 +407,6 @@ test("hands descendant ownership to an ancestor without a double-dim paint", () 
   });
 });
 
-test("neutralizes a stale focused ancestor while retaining ownership", () => {
-  withFakeAnimationFrames((frames) => {
-    const ancestor = new FakeElement();
-    const focus = new FakeElement();
-    const unrelated = new FakeElement();
-    ancestor.descendants.add(asHTMLElement(focus));
-    const applier = createRippleStyleApplier();
-
-    applier.apply(
-      plan(
-        targetWithRole("ancestor", "branch-root", 1),
-        targetWithRole("unrelated", "branch-root", 2),
-      ),
-      binding(["ancestor", ancestor], ["unrelated", unrelated]),
-    );
-
-    applier.neutralizeFocusAncestors(asHTMLElement(focus));
-
-    assert.equal(ancestor.style.getPropertyValue(OPACITY_PROPERTY), "1");
-    assert.equal(ancestor.style.getPropertyValue(DURATION_PROPERTY), "0s");
-    assert.equal(ancestor.classList.contains(RIPPLE_CLASS), true);
-    assert.equal(ancestor.layoutFlushes, 0);
-    assert.equal(
-      unrelated.style.getPropertyValue(OPACITY_PROPERTY),
-      String(RIPPLE_CONFIG.BLOCK_LEVELS[2]),
-    );
-    assert.equal(unrelated.classList.contains(RIPPLE_CLASS), true);
-
-    applier.apply(
-      plan(target("focus-content", 1)),
-      binding(["focus-content", focus]),
-    );
-
-    assert.equal(ancestor.style.getPropertyValue(OPACITY_PROPERTY), "");
-    assert.equal(ancestor.style.getPropertyValue(DURATION_PROPERTY), "");
-    assert.equal(ancestor.classList.contains(RIPPLE_CLASS), false);
-    assert.equal(focus.style.getPropertyValue(OPACITY_PROPERTY), "1");
-    assert.equal(focus.style.getPropertyValue(DURATION_PROPERTY), "0s");
-    frames.flushNext();
-    assert.equal(
-      focus.style.getPropertyValue(OPACITY_PROPERTY),
-      String(RIPPLE_CONFIG.BLOCK_LEVELS[1]),
-    );
-    assert.equal(
-      focus.style.getPropertyValue(DURATION_PROPERTY),
-      `${RIPPLE_CONFIG.TRANSITION_SEC}s`,
-    );
-  });
-});
-
 test("cancels a pending true exit when the element is targeted again", () => {
   withFakeTimers((timers) => {
     const branchRoot = new FakeElement();

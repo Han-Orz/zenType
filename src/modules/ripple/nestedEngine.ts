@@ -17,7 +17,6 @@ export interface NestedRippleEngine {
     focusElement: HTMLElement,
     options?: { preserveOnInvalid?: boolean },
   ): boolean;
-  neutralizeFocusAncestors(focusElement: HTMLElement): void;
   hasActiveStyles(): boolean;
   invalidateStructure(): void;
   clear(animate?: boolean): void;
@@ -99,10 +98,6 @@ export function createNestedRippleEngine(): NestedRippleEngine {
     return activeStyles;
   }
 
-  function neutralizeFocusAncestors(focusElement: HTMLElement): void {
-    styleApplier.neutralizeFocusAncestors(focusElement);
-  }
-
   function invalidateStructure(): void {
     structureDirty = true;
   }
@@ -113,11 +108,5 @@ export function createNestedRippleEngine(): NestedRippleEngine {
     discardSnapshot();
   }
 
-  return {
-    apply,
-    neutralizeFocusAncestors,
-    hasActiveStyles,
-    invalidateStructure,
-    clear,
-  };
+  return { apply, hasActiveStyles, invalidateStructure, clear };
 }
