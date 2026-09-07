@@ -1,102 +1,63 @@
 import { getActiveEditor } from "siyuan";
+import type { EditorFrame } from "../types";
+import { getCursorRect } from "./getCursorRect";
 
-const ELEMENT_NODE = 1;
+export function editableAt(target: EventTarget | null): HTMLElement | null {
+  const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
+  if (!(element instanceof HTMLElement) || !element.isContentEditable) return null;
+  if (element.closest("[readonly], [aria-readonly='true'], [data-readonly='true'], .av, .block__popover, [data-type='NodeBlockQueryEmbed']")) return null;
+  const editor = element.closest<HTMLElement>(".protyle-wysiwyg");
+  if (!editor || !getActiveEditor()?.protyle.element.contains(editor)) return null;
+  return element.closest<HTMLElement>("[contenteditable='true'], [contenteditable='plaintext-only']");
+}
 
-function activeEditorElement(): HTMLElement | null {
-  try {
-    const editor = getActiveEditor();
-    return (editor?.protyle?.element as HTMLElement | undefined) ?? null;
-  } catch {
-    return null;
+export function readEditorFrame(reducedMotion: boolean): EditorFrame | null {
+  if (!document.hasFocus()) return null;
+  const selection = window.getSelection();
+  if (!selection?.rangeCount || !selection.isCollapsed) return null;
+  const editable = editableAt(selection.focusNode);
+  if (!editable) return null;
+  const editor = editable.closest<HTMLElement>(".protyle-wysiwyg")!;
+  const root = editor.closest<HTMLElement>(".protyle");
+  if (!root || root.closest(".fn__none, [hidden]")) return null;
+  const focused = document.activeElement;
+  if (focused !== document.body && focused !== document.documentElement &&
+      (!focused || !root.contains(focused) || !(focused instanceof HTMLElement) || !focused.isContentEditable)) return null;
+  const range = selection.getRangeAt(0).cloneRange();
+  const element = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
+  const block = element?.closest<HTMLElement>("[data-node-id]");
+  if (!block || !editor.contains(block)) return null;
+  const scroll = editor.closest<HTMLElement>(".protyle-content");
+  if (!scroll) return null;
+  const caret = getCursorRect(range, editable);
+  if (!caret) return null;
+  const box = scroll.getBoundingClientRect();
+  const visual = window.visualViewport;
+  const viewport = {
+    top: Math.max(box.top, visual?.offsetTop ?? 0),
+    bottom: Math.min(box.bottom, (visual?.offsetTop ?? 0) + (visual?.height ?? window.innerHeight)),
+    left: Math.max(box.left, visual?.offsetLeft ?? 0),
+    right: Math.min(box.right, (visual?.offsetLeft ?? 0) + (visual?.width ?? window.innerWidth)),
+  };
+  const scrollViewport = { top: viewport.top, bottom: viewport.bottom };
+  let zIndex = 0;
+  let insideScroll = true;
+  // A code block or table may clip the caret inside the editor viewport.
+  for (let parent = element; parent; parent = parent.parentElement) {
+    const style = getComputedStyle(parent);
+    const z = parseInt(style.zIndex, 10);
+    if (Number.isFinite(z)) zIndex = Math.max(zIndex, z);
+    if (parent === scroll) insideScroll = false;
+    if (!insideScroll) continue;
+    const clipX = /auto|scroll|hidden|clip/.test(style.overflowX);
+    const clipY = /auto|scroll|hidden|clip/.test(style.overflowY);
+    if (!clipX && !clipY) continue;
+    const rect = parent.getBoundingClientRect();
+    if (clipX) { viewport.left = Math.max(viewport.left, rect.left); viewport.right = Math.min(viewport.right, rect.right); }
+    if (clipY) { viewport.top = Math.max(viewport.top, rect.top); viewport.bottom = Math.min(viewport.bottom, rect.bottom); }
   }
-}
-
-function asNode(target: EventTarget | Node | null | undefined): Node | null {
-  if (!target || typeof target !== "object") return null;
-  if ("nodeType" in target) return target as Node;
-  return null;
-}
-
-function parentElementOf(node: Node): Element | null {
-  if (node.nodeType === ELEMENT_NODE) return node as Element;
-  return node.parentElement;
-}
-
-function contains(root: Element, node: Node): boolean {
-  return root === node || root.contains(node);
-}
-
-function isEditableNode(target: EventTarget | Node | null | undefined, root: HTMLElement): boolean {
-  const node = asNode(target);
-  if (!node || !contains(root, node)) return false;
-  return isEditableElement(parentElementOf(node));
-}
-
-function isEditableElement(element: Element | null): boolean {
-  if (!element || typeof element.closest !== "function") return false;
-  const editable = element.closest(
-    "[contenteditable='true'], [contenteditable='plaintext-only'], .protyle-title__input",
-  ) as HTMLElement | null;
-  if (!editable) return false;
-  if (editable.closest("[contenteditable='false'], [readonly], [aria-readonly='true']")) {
-    return false;
-  }
-  // isContentEditable is available on real HTMLElement instances. Keep title
-  // inputs valid on hosts that do not expose it consistently.
-  return editable.classList?.contains("protyle-title__input")
-    || editable.isContentEditable !== false;
-}
-
-/** Whether a node belongs to the currently active SiYuan Protyle. */
-export function isInActiveEditor(target: EventTarget | Node | null | undefined): boolean {
-  const node = asNode(target);
-  const root = activeEditorElement();
-  return !!node && !!root && contains(root, node);
-}
-
-/** Whether a node belongs to an editable region of the active Protyle. */
-export function isEditableTarget(target: EventTarget | Node | null | undefined): boolean {
-  const root = activeEditorElement();
-  return !!root && isEditableNode(target, root);
-}
-
-/** Scope a target-bearing event to the active editable Protyle. */
-export function isEditableEvent(event: Event): boolean {
-  const root = activeEditorElement();
-  if (!root) return false;
-  const path = typeof event.composedPath === "function" ? event.composedPath() : [];
-  if (path.some((target) => isEditableNode(target as EventTarget, root))) return true;
-  return isEditableNode(event.target, root);
-}
-
-/** Selectionchange/resize have no useful target; validate current selection. */
-export function isCurrentSelectionEditable(): boolean {
-  const selection = typeof window !== "undefined" ? window.getSelection() : null;
-  const root = activeEditorElement();
-  if (!selection || selection.rangeCount === 0 || !root) return false;
-  return isEditableNode(selection.anchorNode, root) || isEditableNode(selection.focusNode, root);
-}
-
-/** Whether the current targetless Selection still belongs to the active Protyle. */
-export function isCurrentSelectionInActiveEditor(): boolean {
-  const selection = typeof window !== "undefined" ? window.getSelection() : null;
-  const root = activeEditorElement();
-  if (!selection || selection.rangeCount === 0 || !root) return false;
-  const anchor = asNode(selection.anchorNode);
-  const focus = asNode(selection.focusNode);
-  return (!!anchor && contains(root, anchor)) || (!!focus && contains(root, focus));
-}
-
-/** Focusout uses relatedTarget to distinguish an internal focus move. */
-export function isFocusInsideActiveEditor(target: EventTarget | Node | null | undefined): boolean {
-  const node = asNode(target);
-  const root = activeEditorElement();
-  return !!node && !!root && contains(root, node);
-}
-
-/** An event in the active Protyle but outside an editable region is readonly UI. */
-export function isReadonlyEditorTarget(target: EventTarget | Node | null | undefined): boolean {
-  const node = asNode(target);
-  const root = activeEditorElement();
-  return !!node && !!root && contains(root, node) && !isEditableNode(node, root);
+  if (viewport.bottom <= viewport.top || viewport.right <= viewport.left) return null;
+  return { root, editor, editable, block, scroll, range, caret, viewport, scrollViewport,
+    scrollTop: scroll.scrollTop, maxScroll: Math.max(0, scroll.scrollHeight - scroll.clientHeight),
+    reducedMotion, zIndex: zIndex + 1 };
 }

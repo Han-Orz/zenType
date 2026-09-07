@@ -75,34 +75,3 @@ export function resolveActiveSentenceRanges(
   }
   return [last];
 }
-
-export function sameSentenceRange(a: SentenceRange, b: SentenceRange): boolean {
-  return a.start === b.start && a.end === b.end;
-}
-
-/**
- * Value (start/end) equality of two active sets — never identity comparison.
- * Resolver output is order-stable, so index-wise equality is set equality.
- */
-export function sameSentenceRangeSet(
-  a: readonly SentenceRange[],
-  b: readonly SentenceRange[],
-): boolean {
-  if (a.length !== b.length) return false;
-  return a.every((range, index) => sameSentenceRange(range, b[index]));
-}
-
-export interface SentenceSetDiff {
-  leaving: SentenceRange[];
-  entering: SentenceRange[];
-}
-
-/** Set difference between two active sets: what stops and starts being active. */
-export function diffSentenceSets(
-  previous: readonly SentenceRange[],
-  current: readonly SentenceRange[],
-): SentenceSetDiff {
-  const leaving = previous.filter((range) => !current.some((c) => sameSentenceRange(c, range)));
-  const entering = current.filter((range) => !previous.some((p) => sameSentenceRange(p, range)));
-  return { leaving, entering };
-}

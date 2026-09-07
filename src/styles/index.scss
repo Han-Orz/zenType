@@ -1,109 +1,34 @@
-// zenType 全局样式
-
-// ===== 顺滑光标 =====
-
 #zentype-cursor {
   position: fixed;
   pointer-events: none;
-  z-index: 9999; // fallback；cursor.ts 会按祖先层叠上下文动态覆盖
   width: 3px;
   background: var(--zt-cursor-color, #5d8cd7);
-  transform: translate3d(0, 0, 0);
-  will-change: transform, height, opacity; // commit 1：加入 opacity 走合成层
-  backface-visibility: hidden;
-  // commit 1：transform-origin 顶部居中，缩放时保持顶边（caret 对齐线）固定
   transform-origin: top center;
-  // commit 1：transition 加入 opacity 0.15s ease-out，淡出 / 恢复平滑
-  transition: transform 0.15s cubic-bezier(0.25, 0.1, 0.25, 1), opacity 0.15s ease-out;
-  opacity: 1;
-  // 默认开启呼吸动画；breathing.ts 通过 .no-animation 暂停
-  animation: zentype-breathe 3s 1.5s ease-in-out infinite;
+  will-change: transform;
 }
 
-// 状态类
-#zentype-cursor.hidden {
-  opacity: 0 !important;
-  animation: none !important;
-  transition: none !important;
+#zentype-cursor[hidden] { display: none; }
+#zentype-cursor.zentype-breathing { animation: zentype-breathe 3s ease-in-out infinite; }
+.zentype-custom-caret-active { caret-color: transparent !important; }
+[data-theme-mode="dark"] { --zt-cursor-color: #8ab4f8; }
+
+@keyframes zentype-breathe {
+  0%, 100% { opacity: 1; }
+  55% { opacity: 0.85; }
+  80% { opacity: 0.2; }
 }
 
-#zentype-cursor.no-animation {
-  animation: none !important;
-}
-
-#zentype-cursor.no-transition {
-  transition: none !important;
+.zentype-ripple-block {
+  opacity: var(--zentype-dim, 1);
+  transition: opacity 240ms ease-out;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  #zentype-cursor,
-  #zentype-edge-arrow,
-  .zentype-ripple-block {
+  #zentype-cursor, .zentype-ripple-block {
     animation: none !important;
     transition: none !important;
   }
 }
-
-// 呼吸动画关键帧：缓慢变暗后短暂消失，再回到低亮度并进入下一轮。
-@keyframes zentype-breathe {
-  0%   { opacity: 1; }
-  60%  { opacity: 0.9; }
-  90%  { opacity: 0; }
-  95%  { opacity: 0; }
-  100% { opacity: 0.3; }
-}
-
-// commit 2（已下线）：squish / bounce 关键帧。用户测试后认为"弹弓"动画太突兀，
-// 整个边缘缩放动画路线已下线；保留 case B 的平滑 opacity 淡出。
-// 重新启用方法：从 git 历史恢复 @keyframes zentype-squish/bounce + .squishing/.bouncing，
-// 并在 cursor.ts 的 doUpdateCursor 边界检测后重新调用 triggerSquish/triggerBounceAnimation。
-
-// commit 3：视口边缘箭头指示器
-//   三角形用 CSS border-trick 实现；data-direction 切换方向
-//   箭头固定在 z-index 9998；光标 z-index 由祖先层叠上下文动态计算
-#zentype-edge-arrow {
-  position: fixed;
-  width: 0;
-  height: 0;
-  pointer-events: none;
-  z-index: 9998;
-  opacity: 0;
-  transition: opacity var(--zt-arrow-transition, 200ms) ease-out;
-
-  &.visible {
-    opacity: var(--zt-arrow-opacity, 0.6);
-  }
-
-  // 箭头指上：位于视口顶部，border-bottom 实色 → 三角形尖端朝上
-  &[data-direction="up"] {
-    border-left: var(--zt-arrow-size, 12px) solid transparent;
-    border-right: var(--zt-arrow-size, 12px) solid transparent;
-    border-bottom: var(--zt-arrow-size, 12px) solid var(--zt-cursor-color, #5d8cd7);
-    top: var(--zt-arrow-offset, 8px);
-  }
-
-  // 箭头指下：位于视口底部，border-top 实色 → 三角形尖端朝下
-  &[data-direction="down"] {
-    border-left: var(--zt-arrow-size, 12px) solid transparent;
-    border-right: var(--zt-arrow-size, 12px) solid transparent;
-    border-top: var(--zt-arrow-size, 12px) solid var(--zt-cursor-color, #5d8cd7);
-    bottom: var(--zt-arrow-offset, 8px);
-  }
-}
-
-[data-theme-mode="dark"] {
-  --zt-cursor-color: #8ab4f8;
-}
-
-// 隐藏原生光标仅限当前 custom caret 已成功定位的 editable owner。
-// cursor.ts 在 Range / boundary / 移动端标题等失败路径移除该 class，始终 fail-open。
-.zentype-custom-caret-active { caret-color: transparent !important; }
-
-// 侧边栏拖动手柄禁止选择（防止拖动时被误插入 marker）
-.layout__resize { user-select: none; }
-
-// ===== 顶栏图标两态 =====
-// 银河 SVG 固定 24px；开启态让几个彩色星球轻微转动。
 
 @keyframes zentype-galaxy-drift-fast {
   0%   { transform: rotate(0deg); }
@@ -169,42 +94,4 @@
   .zentype-topbar-icon--on .zt-galaxy-planet {
     animation: none;
   }
-}
-
-// ===== 涟漪聚焦句级 dimming (CSS Custom Highlight API) =====
-// v2.5.0：废弃 span 包裹，改用 CSS Custom Highlight API（零 DOM 突变）
-// ::highlight 不支持 opacity/transition，用 color 模拟 dim；跨句过渡由
-// ripple/sentenceTransition.ts 的 bounded slot pool + 单一 rAF 驱动插值。
-// 每个正在过渡的句子独占一个 slot，slot 颜色由引擎注入的
-// ::highlight(zt-sentence-transition-N) 规则直写（不经过 root 变量）；
-// 动画结束后 dim 句交回稳定 zt-sentence-dim。
-// 局限：currentColor 在 ::highlight 里指 highlight 自身，无法"相对原色 dim"。
-// 彩色文字（mark/链接）会被覆盖成灰/白，只能按主题设固定 RGB。
-// --zt-sentence-dim-color 由 sentenceTransition engine 按主题写入。
-:root {
-  --zt-sentence-dim-color: rgba(0, 0, 0, 0.6);
-}
-
-[data-theme-mode="dark"] {
-  --zt-sentence-dim-color: rgba(255, 255, 255, 0.6);
-}
-
-::highlight(zt-sentence-dim) {
-  color: var(--zt-sentence-dim-color);
-}
-
-// Retain the previous block's sentence dim while its block opacity hands off
-// to the new focus target. The range is removed after the same transition
-// lifecycle; this avoids a dim -> normal -> dim brightness peak on handoff.
-::highlight(zt-sentence-outgoing-dim) {
-  color: var(--zt-sentence-dim-color);
-}
-
-// Ripple block dimming is intentionally class/custom-property based. This
-// keeps its visual ownership separate from typewriter FLIP's inline
-// transform/transition and leaves original inline opacity untouched.
-// The duration custom property is written from RIPPLE_CONFIG.TRANSITION_SEC.
-.zentype-ripple-block {
-  opacity: var(--zt-ripple-opacity, 1) !important;
-  transition: opacity var(--zt-ripple-transition-duration) ease !important;
 }

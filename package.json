@@ -1,6 +1,6 @@
 {
   "name": "zentype",
-  "version": "2.8.1",
+  "version": "2.9.0",
   "description": "顺滑光标 + 打字机模式 + 涟漪聚焦 - 让写作更专注",
   "main": "index.js",
   "scripts": {
@@ -8,9 +8,9 @@
     "test": "node tests/run.mjs",
     "build:dev": "node build.js --dev",
     "dev": "node build.js --dev --watch",
-    "debug:bridge": "node scripts/debug-bridge.mjs",
     "link": "node scripts/make_dev_link.js",
-    "clean": "rimraf dist dev *.zip"
+    "clean": "rimraf dist dev *.zip",
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit"
   },
   "devDependencies": {
     "@types/archiver": "^8.0.0",

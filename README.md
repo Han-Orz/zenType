@@ -1,217 +1,41 @@
-# zenType
+# zenType 2.9.0
 
-让写作中的光标、页面和视觉焦点跟随你的思考。
+Smooth caret, typewriter scrolling, and ripple focus for SiYuan. This is the first v2.9 rewrite, ready for hands-on validation in SiYuan.
 
-![zenType preview](preview.png)
+## Behavior
 
-zenType 是一个为思源笔记设计的写作体验插件。
+- Short caret movements ease into place; large jumps snap. The caret breathes after inactivity.
+- Typewriter scrolling uses a comfort band after a 400ms typing pause. Visibility takes priority at viewport edges.
+- Ripple dims neighboring blocks and list branches, with sentence focus inside the current block.
+- Pointer interaction, manual scrolling, vertical navigation, blur, and editor switches end automatic following.
+- IME composition uses the native caret and pauses scrolling.
+- Invalid geometry, selections, read-only content, titles, databases, embedded editors, and popovers retain native behavior.
+- Reduced-motion preferences disable animation.
 
-它从一个很小的问题开始。
+Use the topbar button or Ctrl+Alt+Z to toggle typewriter and ripple together. Individual commands are available in the command palette. Both features are enabled by default and activate when writing in the document body.
 
-长时间写东西时，人会不断寻找自己的位置。
+## Build and try
 
-光标在哪里。
+With dependencies already installed:
 
-页面为什么滚到了下面。
+```sh
+npm run typecheck
+npm run build:dev
+npm run build
+```
 
-刚刚写到哪一句。
+Development files are in `dev/`, production files in `dist/`, and the installable bundle is `package.zip`. Extract the bundle into your SiYuan workspace's `data/plugins/zenType/` directory and reload the plugin.
 
-上一段和下一段的关系还在不在。
+An existing development link can keep using `dev/`. To create one, run `node scripts/make_dev_link.js --workspace <workspace-path>`; it refuses to overwrite an existing plugin directory. `npm run dev` watches source changes. There is no DebugKit or debug bridge.
 
-这些事情本身很轻微，却会不断打断写作。
+Try IME composition, rapid navigation, repeated Enter/Backspace, list indentation, manual scrolling, split editors, and disabling the plugin. Verify native caret behavior returns when appropriate.
 
-zenType 想做的是减少这些额外注意力，让编辑器更像一个安静的写作空间。
+## Architecture
 
-## 顺滑光标
+One input entry point, one frame scheduler, and three direct effects. Geometry reads precede visual writes. No structural FLIP, settle transactions, animation ownership handoffs, or persistent sentence identities.
 
-顺滑光标是 zenType 最初的起点。
+Text and structure edits settle to the current state. Navigation through stable text has at most one entering/leaving sentence transition.
 
-系统光标只是一个位置提示。zenType 希望它成为写作过程中的视觉中心。
+Historical tests are unchanged and were not run or adapted for this rewrite. Current validation consists of type checking, builds, and hands-on SiYuan feedback.
 
-它会跟随真实输入位置移动，在移动时保持连续感。
-
-光标移动较短距离时，会快速贴近新的位置。
-
-跨越较大距离时，会根据距离调整过渡，让移动更自然。
-
-停止输入后，光标会进入轻微呼吸状态。
-
-它不会闪烁催促你，也不会完全消失。
-
-那个缓慢的明暗变化，更像是在提醒你。
-
-这里仍然是你的写作位置。
-
-当你重新开始输入，光标会立即回到工作状态。
-
-靠近编辑区域边缘时，光标会逐渐淡出。回到可见区域后，它会重新出现。
-
-整个过程只服务于一个目标。
-
-让你随时知道自己在哪里。
-
-## 打字机模式
-
-写长文时，光标经常会慢慢移动到屏幕底部。
-
-等它离开舒适区域以后，再手动滚动页面，会打断思路。
-
-zenType 会让输入位置保持在屏幕比较舒服的位置。
-
-写作过程中，页面会跟随你的输入移动，让你可以继续向前写。
-
-它不会强行控制你的浏览。
-
-当你滚动页面、点击其他位置、选择文字或者切换内容时，自动跟随会暂时让开。
-
-重新开始输入以后，写作状态会恢复。
-
-zenType 希望页面服务于写作，而不是让写作者适应页面。
-
-## 涟漪聚焦
-
-写作时，眼睛通常只需要关注当前一句。
-
-但周围内容仍然重要。
-
-zenType 会让当前句保持清晰，同时降低周围内容的视觉干扰。
-
-离当前位置越远，视觉权重越低。
-
-上下文依然存在，只是不再和当前内容争夺注意力。
-
-句子之间移动时，焦点会平滑过渡。
-
-快速上下移动、反复修改句子边界时，视觉状态也会跟随当前编辑位置变化。
-
-输入中的文字会优先保持清晰。
-
-动画服务于阅读和写作，不会抢走你的注意力。
-
-## 真实编辑中的连续感
-
-普通输入很简单。
-
-真正困难的是那些会改变文档结构的操作。
-
-例如：
-
-- Enter 创建新块
-- Backspace 合并内容
-- Tab 和 Shift+Tab 调整列表层级
-
-这些操作会改变编辑器内部结构。
-
-zenType 会等待内容变化稳定后重新连接视觉状态。
-
-因此换行、合并段落、调整列表时，光标、页面和焦点不会各自移动。
-
-你看到的是一次连续的编辑过程。
-
-## 对嵌套内容的处理
-
-列表和层级结构需要特殊处理。
-
-简单地给每一层内容降低透明度，会让深层列表越来越难阅读。
-
-zenType 会保留当前编辑路径的清晰度。
-
-正在编辑的项目保持突出。
-
-相关父级保留必要信息。
-
-远离当前内容的分支逐渐降低视觉存在感。
-
-这样既能保持层级关系，也不会让复杂列表失去可读性。
-
-## zenType 的设计原则
-
-### 自动行为应该帮助写作
-
-插件可以主动移动页面和调整视觉状态。
-
-但当用户主动操作时，控制权会回到用户手中。
-
-### 动画应该解释变化
-
-动画不是为了展示效果。
-
-它应该告诉你。
-
-刚刚发生了什么。
-
-现在关注哪里。
-
-下一步应该看哪里。
-
-### 写作内容永远优先
-
-视觉效果可以变化。
-
-文档内容不会被修改。
-
-zenType 尽量把效果放在显示层，不改变你的实际笔记结构。
-
-## 安装
-
-1. 从 [Releases](../../releases) 下载最新 Release zip
-2. 打开思源笔记
-3. 进入设置 → 插件
-4. 选择从本地安装插件
-5. 选择下载的 zip 文件
-
-## 使用
-
-首次安装后，三个模块默认开启。
-
-### 顶栏按钮
-
-顶栏图标可以快速切换打字机模式和涟漪聚焦。
-
-顺滑光标保持独立运行。
-
-### 命令面板
-
-打开思源命令面板，搜索 `zenType`。
-
-可以分别控制各个功能。
-
-## 特殊情况
-
-### 选择文字
-
-拖选内容时，涟漪聚焦会暂时退出。
-
-这样阅读和检查文字时不会受到视觉变化影响。
-
-### 只读状态
-
-只读内容不会触发打字机滚动。
-
-回到可编辑状态后，写作体验会恢复。
-
-### 嵌入内容
-
-视频、iframe、PDF 等嵌入内容会作为完整内容参与视觉处理。
-
-打字机模式不会尝试在嵌入区域内部移动。
-
-## 从 siyuan-zen 升级
-
-v2.6.1 开始，插件名称从 `siyuan-zen` 改为 `zenType`。
-
-思源会把两个名称识别为不同插件。
-
-升级时请先卸载旧版 `siyuan-zen`，再安装 `zenType`。
-
-完整版本记录请查看 [CHANGELOG](docs/CHANGELOG.md)。
-
-## 了解更多
-
-设计思路请查看 [DESIGN.md](docs/DESIGN.md)。
-
-开发诊断工具请查看 [DebugKit](docs/DEBUGKIT.md)。
-
-## License
-
-MIT
+See [the implementation spec](docs/DESIGN.md). Motion settings live in `src/config.ts`.
