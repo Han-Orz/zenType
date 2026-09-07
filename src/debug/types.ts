@@ -3,8 +3,9 @@ import type {
   StructuralEditPhase,
 } from "../modules/structuralEdit";
 
-export type DebugSchema = "zentype-debug/v1";
-export type DebugProfile = "timing" | "forensic";
+export type DebugSchema = "zentype-debug/v1" | "zentype-debug-bundle/v1";
+/** `timeline` is the scalar channel formerly exposed as `performance`. */
+export type DebugProfile = "timing" | "forensic" | "timeline" | "full";
 export type DebugTransportState = "unknown" | "probing" | "online" | "offline";
 export type DebugEnvelopeKind = "event" | "snapshot" | "status";
 
@@ -14,6 +15,7 @@ export interface DebugFrameBurstOptions {
 }
 
 export interface DebugStartOptions {
+  preset?: import("./performance").PerformancePreset;
   profile?: DebugProfile;
   frameBurst?: DebugFrameBurstOptions;
   markerForensic?: DebugMarkerForensicOptions;
@@ -39,6 +41,7 @@ export interface DebugSessionState {
   label: string | null;
   profile: DebugProfile;
   buildSha: string | null;
+  buildFingerprint: string | null;
   startedAt: string | null;
   stoppedAt: string | null;
 }
@@ -63,6 +66,8 @@ export interface DebugKitCounters {
 }
 
 export interface DebugKitState extends DebugSessionState, DebugTransportCounters, DebugKitCounters {
+  timeline?: { preset: import("./performance").PerformancePreset; capacity: number; retainedEvents: number; droppedEvents: number };
+  forensic?: { capacity: number; retainedEvents: number; droppedEvents: number };
   session: DebugSessionState;
   bridgeUrl: string;
   recentEventCount: number;
@@ -294,6 +299,7 @@ export interface DebugHookController {
   getProfile(): DebugProfile;
   getState(): DebugKitState;
   getRecentEvents(): readonly DebugEnvelope[];
+  exportRecording(): string;
   clear(): void;
   reconnect(): Promise<boolean>;
   destroy(): void;

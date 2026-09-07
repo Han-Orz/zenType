@@ -3,6 +3,7 @@
  * src/debug so production builds can replace this module with the noop.
  */
 export { initDebugHook } from "../debug";
+export { createDebugBundleFilename, downloadDebugBundle } from "../debug/download";
 export {
   redactText,
   serializeStructuralEditSnapshot,

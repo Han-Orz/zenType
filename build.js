@@ -3,6 +3,7 @@ const { sassPlugin } = require('esbuild-sass-plugin');
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { createHash } = require('crypto');
 
 const ROOT_DIR = __dirname;
 const isDev = process.argv.includes('--dev');
@@ -31,6 +32,24 @@ function resolveBuildSha(runGit = execFileSync) {
 }
 
 const buildSha = resolveBuildSha();
+
+function resolveBuildFingerprint(root = ROOT_DIR, dev = isDev) {
+  const files = ['build.js', 'package.json', 'pnpm-lock.yaml', 'tsconfig.json', 'plugin.json'];
+  const visit = (relative) => {
+    for (const entry of fs.readdirSync(path.join(root, relative), { withFileTypes: true })) {
+      const file = `${relative}/${entry.name}`;
+      if (entry.isDirectory()) visit(file);
+      else if (entry.isFile()) files.push(file);
+    }
+  };
+  visit('src');
+  const hash = createHash('sha256').update(dev ? 'dev\0' : 'production\0');
+  for (const file of files.sort()) {
+    const contents = fs.readFileSync(path.join(root, file));
+    hash.update(`${file}\0${contents.length}\0`).update(contents);
+  }
+  return hash.digest('hex');
+}
 
 // Static plugin files are intentionally explicit. Keeping this list shared by
 // copy and watch prevents a changed README/icon from being omitted in dev.
@@ -66,6 +85,15 @@ const buildOptions = {
   external: ['siyuan'],
   loader: { '.ts': 'ts' },
   plugins: [
+    {
+      name: 'debug-build-identity',
+      setup(build) {
+        build.onLoad({ filter: /[\\/]debug[\\/]buildIdentity\.ts$/ }, () => ({
+          contents: `export const buildFingerprint = ${JSON.stringify(resolveBuildFingerprint())};`,
+          loader: 'ts',
+        }));
+      },
+    },
     {
       name: 'debug-hook-build-mode',
       setup(build) {
@@ -218,6 +246,7 @@ module.exports = {
   STATIC_ASSETS,
   PACKAGE_FILES,
   resolveBuildSha,
+  resolveBuildFingerprint,
   cleanOutputDir,
   copyAssets,
   watchStaticAssets,

@@ -17,6 +17,7 @@ const INACTIVE_SESSION: DebugSessionState = {
   label: null,
   profile: "timing",
   buildSha: null,
+  buildFingerprint: null,
   startedAt: null,
   stoppedAt: null,
 };
@@ -46,6 +47,14 @@ const INACTIVE_STATE: DebugKitState = {
   destroyed: false,
 };
 
+export function createDebugBundleFilename(): string {
+  return "zentype-debug-unknown.json";
+}
+
+export function downloadDebugBundle(): void {
+  // Production never registers the development-only export command.
+}
+
 export function initDebugHook(_eventBus?: unknown): DebugHookController {
   return {
     start: async (_label?: string, _options?: DebugStartOptions) => ({
@@ -64,6 +73,7 @@ export function initDebugHook(_eventBus?: unknown): DebugHookController {
       ...INACTIVE_STATE,
     }),
     getRecentEvents: (): readonly DebugEnvelope[] => [],
+    exportRecording: () => "{}",
     clear: () => undefined,
     reconnect: async () => false,
     destroy: () => undefined,

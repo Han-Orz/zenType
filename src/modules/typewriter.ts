@@ -509,7 +509,7 @@ export function initTypewriter(): void {
         }
         composing = true;
         firstCharAfterIdle = false;  // composition 走自己的路径，不消费 firstChar 标志
-        if (scroll.isScrolling()) scroll.cancel();
+        if (scroll.isScrolling()) scroll.cancel("composition-start");
         if (debounceTimer !== null) {
           clearTimeout(debounceTimer);
           debounceTimer = null;

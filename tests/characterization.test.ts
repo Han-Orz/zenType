@@ -2454,6 +2454,108 @@ test("cursor rebinds resize and scroll resources after an editor container repla
   }
 });
 
+test("cursor navigation commits the latest caret in one frame and coalesces selection changes", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime, "navigation");
+
+  try {
+    inputMode.reset();
+    initCursor();
+    flushAllFrames(runtime);
+    const cursor = runtime.document.getElementById("zentype-cursor");
+    assert.ok(cursor);
+
+    for (const [index, key] of ["ArrowRight", "ArrowLeft", "Home", "End", "ArrowUp", "ArrowDown", "PageUp", "PageDown"].entries()) {
+      const before = cursor.style.transform;
+      for (let repeat = 0; repeat < 3; repeat++) {
+        runtime.document.dispatch("keydown", eventFor(fixture.block, {
+          key, repeat: repeat > 0, isComposing: false, defaultPrevented: false,
+        }));
+      }
+      assert.equal(cursor.style.transform, before, "wait for the host's default key action");
+      const x = 80 + index * 10;
+      runtime.setCaret(fixture.text, 1, rect(x, 500));
+      assert.equal(runtime.raf.pending.size, 1, "key repeats share the cursor frame");
+      if (index % 2 === 0) runtime.document.dispatch("selectionchange");
+      assert.equal(runtime.raf.pending.size, 1, "selectionchange shares the same frame");
+      runtime.raf.flushNext(runtime.clock.now);
+      assert.equal(cursor.style.transform, `translate3d(${x + 1}px, 497.5px, 0)`);
+      assert.match(cursor.style.transition, /^transform 0\.025s linear, /);
+      assert.equal(runtime.raf.pending.size, 0, "navigation leaves no redundant positioning frame");
+    }
+
+    runtime.document.dispatch("click", eventFor(fixture.block));
+    runtime.setCaret(fixture.text, 1, rect(300, 500));
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.match(cursor.style.transition, /^transform 0\.15s /, "clicks retain distance easing");
+
+    runtime.document.dispatch("keydown", eventFor(fixture.block, {
+      key: "ArrowRight", isComposing: false, defaultPrevented: false,
+    }));
+    destroyCursor();
+    assert.equal(runtime.raf.pending.size, 0, "destroy cancels queued navigation");
+  } finally {
+    destroyCursor();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("cursor navigation handles edge fading, typing, cooldown, and reduced motion", () => {
+  const runtime = new FakeRuntime();
+  installRuntime(runtime);
+  const fixture = createEditorFixture(runtime, "navigation lifecycle");
+
+  try {
+    inputMode.reset();
+    initCursor();
+    flushAllFrames(runtime);
+    const cursor = runtime.document.getElementById("zentype-cursor");
+    assert.ok(cursor);
+    const navigate = () => runtime.document.dispatch("keydown", eventFor(fixture.block, {
+      key: "ArrowLeft", isComposing: false, defaultPrevented: false,
+    }));
+
+    navigate();
+    runtime.setCaret(fixture.text, 1, rect(5, 500));
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.match(cursor.style.transition, /^transform 0\.025s linear, /);
+    assert.match(cursor.style.transform, /^translate3d\(6px, 497\.5px, 0\) scale\(/);
+    assert.ok(Number(cursor.style.opacity) > 0 && Number(cursor.style.opacity) < 1);
+
+    runtime.document.dispatch("input", eventFor(fixture.block, {
+      inputType: "insertText", isComposing: false,
+    }));
+    runtime.setCaret(fixture.text, 2, rect(15, 500));
+    flushAllFrames(runtime);
+    assert.match(cursor.style.transition, /^transform 0\.07s /, "typing restores easing even near the edge");
+
+    navigate();
+    runtime.setCaret(fixture.text, 1, rect(80, 500));
+    flushAllFrames(runtime);
+    runtime.clock.advance(300);
+    runtime.setCaret(fixture.text, 2, rect(90, 500));
+    runtime.document.dispatch("selectionchange");
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.match(cursor.style.transition, /^transform 0\.07s /, "navigation policy expires with the cooldown");
+
+    runtime.window.reducedMotion = true;
+    navigate();
+    runtime.setCaret(fixture.text, 1, rect(50, 500));
+    runtime.raf.flushNext(runtime.clock.now);
+    assert.equal(cursor.style.transform, "translate3d(51px, 497.5px, 0)");
+    assert.equal(cursor.classList.contains("no-transition"), true);
+    assert.equal(runtime.raf.pending.size, 0);
+  } finally {
+    destroyCursor();
+    inputMode.reset();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
 test("cursor keyboard cooldown keeps scroll and resize refreshes transition-safe", () => {
   const runtime = new FakeRuntime();
   installRuntime(runtime);

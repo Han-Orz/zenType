@@ -7,6 +7,7 @@ import {
   redactText,
   summarizeKeyboardKey,
 } from "../src/modules/debugHook";
+import { performanceRecordingActive, recordPerformance } from "../src/debug/performance";
 
 class FakeClassList extends Set<string> {
   contains(value: string): boolean {
@@ -247,7 +248,11 @@ class FakeEventBus {
 
 class FakeRuntime {
   readonly document = new FakeDocument();
-  readonly window = { getSelection: () => this.document.selection };
+  readonly window = {
+    getSelection: () => this.document.selection,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+  };
   readonly observers: FakeMutationObserver[] = [];
   readonly animationFrames = new Map<number, FrameRequestCallback>();
   readonly fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
@@ -899,6 +904,63 @@ test("timing profile masks printable keys and does not serialize a DOM tree", as
     assert.equal(controller.getState().computedStyleReads, 0);
   } finally {
     await controller.stop();
+    controller.destroy();
+    setActiveEditor(null);
+    runtime.restore();
+  }
+});
+
+test("full profile records timeline and forensic evidence locally without bridge", async () => {
+  const runtime = new FakeRuntime();
+  runtime.install();
+  const root = new FakeElement("DIV", { class: "protyle" });
+  const editor = new FakeElement("DIV", { class: "protyle-wysiwyg" });
+  const block = new FakeElement("DIV", { "data-node-id": "block-a", "data-type": "NodeParagraph" });
+  const text = new FakeText("跨句移动证据");
+  block.appendChild(text);
+  editor.appendChild(block);
+  root.appendChild(editor);
+  runtime.document.root = root;
+  runtime.document.activeElement = block;
+  runtime.document.selection.anchorNode = text;
+  runtime.document.selection.focusNode = text;
+  setActiveEditor({ protyle: { element: root } });
+  const controller = initDebugHook(new FakeEventBus() as unknown as EventBus);
+  try {
+    await controller.start("full", { profile: "full", preset: "all" });
+    assert.equal(performanceRecordingActive(), true);
+    assert.equal(runtime.fetchCalls.length, 0);
+    assert.equal(runtime.observers.length, 1);
+
+    recordPerformance("cursor", "cursor-commit", { x: 10, y: 20 });
+    runtime.document.dispatch("keydown", {
+      type: "keydown",
+      target: block,
+      key: "ArrowRight",
+      code: "ArrowRight",
+      isComposing: false,
+      repeat: false,
+      composedPath: () => [block, editor, root],
+    } as unknown as Event);
+    await controller.stop();
+
+    const bundle = JSON.parse(controller.exportRecording());
+    assert.equal(bundle.schema, "zentype-debug-bundle/v1");
+    assert.equal(bundle.session.profile, "full");
+    assert.equal(bundle.timeline.events.some((event: { name: string }) => event.name === "cursor-commit"), true);
+    assert.equal(bundle.forensic.events.some((event: { kind: string }) => event.kind === "snapshot"), true);
+    const startSnapshot = bundle.forensic.events.find((event: { kind: string; reason?: string }) => (
+      event.kind === "snapshot" && event.reason === "session-start"
+    ));
+    assert.equal(startSnapshot.payload.capture.includeText, true);
+    assert.equal(JSON.stringify(startSnapshot.payload.dom).includes("跨句移动证据"), true);
+    assert.equal(bundle.forensic.counters.computedStyleReads > 0, true);
+    assert.equal(bundle.loss.forensic.capacity > bundle.loss.recent.capacity, true);
+    assert.equal(bundle.loss.forensic.truncated, false);
+    assert.equal(runtime.fetchCalls.length, 0);
+    assert.equal(runtime.observers[0].disconnectCount > 0, true);
+    assert.equal(performanceRecordingActive(), false);
+  } finally {
     controller.destroy();
     setActiveEditor(null);
     runtime.restore();

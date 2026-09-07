@@ -170,19 +170,20 @@ test("rapid reversal resumes from the sampled current color, never from an endpo
 
   // A was dimming (text -> dim): retarget toward active from its current color.
   assert.equal(aAfter.target, "active");
-  assert.equal(aAfter.duration, 400);
+  assert.ok(aAfter.duration > 0 && aAfter.duration < 400);
+  assert.equal(aAfter.easing, "linear");
   assert.ok(closeColor(aAfter.from, aBefore.current), "A must resume from its sampled color");
   assert.equal(aAfter.from.a, aBefore.current.a);
-  assert.equal(aAfter.startTime, null); // fresh timeline, no start-time inheritance
+  assert.equal(aAfter.startTime, 100);
   assert.equal(aAfter.current.a, aAfter.from.a);
 
   // B was acquiring (dim -> text): retarget toward dim from its current color.
   assert.equal(bAfter.target, "dim");
-  assert.equal(bAfter.duration, 600);
+  assert.ok(bAfter.duration > 0 && bAfter.duration < 600);
   assert.ok(closeColor(bAfter.from, bBefore.current), "B must resume from its sampled color");
   assert.ok(Math.abs(bAfter.from.a - DIM.a) > 0.01, "B must not restart from the dim endpoint");
   assert.ok(Math.abs(bAfter.from.a - TEXT.a) > 0.01, "B must not restart from the text endpoint");
-  assert.equal(bAfter.startTime, null);
+  assert.equal(bAfter.startTime, 100);
 });
 
 test("multiple reversals inside 600ms keep per-slot timelines and sample continuity", () => {
@@ -205,34 +206,32 @@ test("multiple reversals inside 600ms keep per-slot timelines and sample continu
   assert.equal(result.slots.length, 1);
   slot = slotByRange(result.slots, 0);
   assert.equal(slot.target, "dim");
-  assert.equal(slot.duration, 600);
-  assert.equal(slot.startTime, null); // fresh timeline, no inheritance
+  assert.ok(slot.duration > 0 && slot.duration < 600);
+  assert.equal(slot.startTime, 60);
   assert.ok(closeColor(slot.from, sample1), "reverse must resume from the sampled color");
-  engine.advance(90);
+  engine.advance(64);
 
   // -> {A,B} again inside 150ms total: retarget toward active, same invariants.
   const sample2 = slotByRange(engine.slots(), 0).current;
   result = update(engine, { sentenceRanges: AB, activeRanges: [AB[0], AB[1]] });
   slot = slotByRange(result.slots, 0);
   assert.equal(slot.target, "active");
-  assert.equal(slot.duration, 400);
-  assert.equal(slot.startTime, null);
+  assert.ok(slot.duration > 0 && slot.duration < 400);
+  assert.equal(slot.startTime, 64);
   assert.ok(closeColor(slot.from, sample2), "every retarget samples the last rendered color");
-  engine.advance(120);
+  engine.advance(68);
 
   // -> {B} one last time, still well inside 600ms of wall motion.
   const sample3 = slotByRange(engine.slots(), 0).current;
   result = update(engine, { sentenceRanges: AB, activeRanges: [AB[1]] });
   slot = slotByRange(result.slots, 0);
   assert.equal(slot.target, "dim");
-  assert.equal(slot.startTime, null);
+  assert.equal(slot.startTime, 68);
   assert.ok(closeColor(slot.from, sample3));
   assert.ok(engine.slots().length <= 2, "bounded slot pool");
 
   // The final release completes into stable dim (A [0,5)).
-  engine.advance(1000); // anchor the fresh timeline
-  assert.equal(engine.hasAnimating(), true);
-  engine.advance(1700);
+  engine.advance(1000);
   assert.equal(engine.hasAnimating(), false);
   assert.deepEqual(engine.stableRanges(), [AB[0]]);
 });
@@ -315,8 +314,8 @@ test("a topology merge keeps the persisting sentence's transition and leaves no 
   assert.equal(result.slots.length, 1);
   const kept = slotByRange(result.slots, 0);
   assert.equal(kept.target, "active");
-  assert.equal(kept.duration, 400);
-  assert.equal(kept.startTime, null);
+  assert.ok(kept.duration > 0 && kept.duration < 400);
+  assert.equal(kept.startTime, 120);
   assert.ok(closeColor(kept.from, sampled!), "merge retargets from the sampled color");
   assert.equal(
     result.slots.some((slot) => slot.range.start === 2),
@@ -326,7 +325,7 @@ test("a topology merge keeps the persisting sentence's transition and leaves no 
   assert.deepEqual(result.stableRanges, []);
 
   // The retargeted acquisition completes back to natural text.
-  engine.advance(200);
+  engine.advance(124);
   assert.equal(engine.hasAnimating(), true);
   engine.advance(700);
   assert.equal(engine.hasAnimating(), false);

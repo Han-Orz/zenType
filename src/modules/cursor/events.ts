@@ -107,6 +107,10 @@ export function bindCursorDocumentEvents(context: CursorEventContext): void {
         ke.key === "PageUp" || ke.key === "PageDown") {
       inputModeTriggers.onVerticalNavigationKey();
     }
+    const navigation = ke.key === "ArrowLeft" || ke.key === "ArrowRight" ||
+      ke.key === "ArrowUp" || ke.key === "ArrowDown" ||
+      ke.key === "Home" || ke.key === "End" ||
+      ke.key === "PageUp" || ke.key === "PageDown";
     context.markKeyboardPending();
     // C1 keyboard chain: stamp the event time, then the outer rAF's frame time.
     // doUpdateCursor compares its own rAF timestamp against outerRafAt — a later
@@ -114,6 +118,12 @@ export function bindCursorDocumentEvents(context: CursorEventContext): void {
     if (DEBUG_ENABLED) {
       cursorPerf.keyboardEvents++;
       cursorPerf.keyboardEventAt = performance.now();
+      cursorPerf.keyboardOuterRafAt = null;
+    }
+    // queueUpdate already waits for a frame, after the host's default action.
+    if (navigation) {
+      context.queueUpdate();
+      return;
     }
     requestAnimationFrame((outerFrameTs) => {
       if (DEBUG_ENABLED) cursorPerf.keyboardOuterRafAt = outerFrameTs;

@@ -26,6 +26,7 @@
  */
 
 import type { IProtyle, IWebSocketData } from "siyuan/types";
+import { currentInputContextId, recordPerformance } from "../debug/performance";
 import { CURSOR_CONFIG, EDGE_FADE, TRANSITION } from "../config";
 import { cursorRectPerf, getCursorRect } from "../utils/getCursorRect";
 import { isInAllowElements } from "../utils/boundary";
@@ -115,6 +116,7 @@ const DEBUG_CURSOR_FRAME_LIMIT = 72;
 
 let cursorEl: HTMLDivElement | null = null;
 let pendingFrame: number | null = null;
+let queuedInputContextId = 0;
 let removeTransitionFrame: number | null = null;
 let pendingKeyboardUpdate = false; // round 4 fix：Enter 触发滚动时跳过 .no-transition，保留按距离分档的过渡动画
 let keyboardCooldownTimer: ReturnType<typeof setTimeout> | null = null; // round 4 fix（capture + cooldown）：键盘事件后 300ms 内 scroll/ResizeObserver 知道本次更新是键盘驱动
@@ -265,9 +267,10 @@ function startReacquireReveal(targetOpacity: string): void {
 /** Dev-only: doUpdateCursor gave up before producing visible geometry. */
 function emitUpdateSkipped(reason: string): void {
   if (DEBUG_ENABLED) {
+    recordCursorUpdateDuration();
+    recordPerformance("cursor", "cursor-skipped", { reason, queuedInputContextId });
     emitDebugState("cursor-update-skipped", { reason });
     cursorPerf.skips[reason] = (cursorPerf.skips[reason] ?? 0) + 1;
-    recordCursorUpdateDuration();
     maybeFlushCursorPerf();
   }
 }
@@ -390,6 +393,7 @@ export function flushCursorTransitionIfNeeded(el: HTMLDivElement): boolean {
 function queueUpdate(): void {
   if (DEBUG_ENABLED) {
     cursorPerf.queueRequests++;
+    queuedInputContextId = currentInputContextId();
     if (pendingFrame !== null) cursorPerf.queueDeduped++;
   }
   if (pendingFrame !== null) return;
@@ -593,6 +597,12 @@ function doUpdateCursor(frameTimestamp?: number): void {
   //   yOffset：光标上移 N 像素，让光标视觉重心偏到行中线之上（用户偏好）。
   //   HEIGHT_RATIO > 1 时光标下沿超出 lineHeight，光标看起来仍偏下；微调上移抵消。
   const yOffset = 2;
+  const dist = prevCursorX !== null && prevCursorY !== null ? Math.hypot(rect.x - prevCursorX, rect.y - prevCursorY) : 0;
+  const dur = transitionDurationForDistance(dist);
+  if (!reducedMotion && dur !== lastCursorDur) {
+    cursorEl.style.transition = `transform ${dur}s cubic-bezier(0.25, 0.1, 0.25, 1), opacity 0.15s ease-out`;
+    lastCursorDur = dur;
+  }
   // 本帧解析出的可见 opacity（"" = 交回 CSS / 呼吸动画），reacquire reveal 的淡入目标。
   let resolvedOpacity = "";
   if (edge.isOffScreen) {
@@ -605,13 +615,6 @@ function doUpdateCursor(frameTimestamp?: number): void {
     resolvedOpacity = applyFadeAndScale(cursorEl, edge.factor, scale, rect, yOffset);
   } else {
     // 远离边缘：清 inline opacity 让 CSS / 呼吸动画接管；transform 不带 scale
-    // Q7：长距离 = 长时长。查表 TRANSITION.TIERS（config.ts），用户可自行调整。
-    const dist = prevCursorX !== null && prevCursorY !== null ? Math.hypot(rect.x - prevCursorX, rect.y - prevCursorY) : 0;
-    const dur = transitionDurationForDistance(dist);
-    if (!reducedMotion && dur !== lastCursorDur) {
-      cursorEl.style.transition = `transform ${dur}s cubic-bezier(0.25, 0.1, 0.25, 1), opacity 0.15s ease-out`;
-      lastCursorDur = dur;
-    }
     if (
       !isSwitchHiddenActive() &&
       !isSwitchRevealPending() &&
@@ -621,9 +624,9 @@ function doUpdateCursor(frameTimestamp?: number): void {
     }
     cursorEl.style.transform = `translate3d(${rect.x}px, ${rect.y - yOffset}px, 0)`;
     cursorEl.style.height = `${rect.height}px`;
-    prevCursorX = rect.x;
-    prevCursorY = rect.y;
   }
+  prevCursorX = rect.x;
+  prevCursorY = rect.y;
 
   // 首次移动的 .no-transition 已在 createCursorElement 加上，下一帧的 rAF 会移除。
   // 文本选中时跳过顺滑过渡（光标应瞬间跳到选区末尾）
@@ -677,10 +680,19 @@ function doUpdateCursor(frameTimestamp?: number): void {
   bindScrollContainerEvents(allowed.cursorElement, scrollBindingContext);
 
   if (DEBUG_ENABLED) {
+    const updateMs = performance.now() - cursorUpdateStartAt;
+    recordCursorUpdateDuration();
+    recordPerformance("cursor", "cursor-commit", {
+      queuedInputContextId,
+      frameTimestamp: frameTimestamp ?? null,
+      x: rect.x,
+      y: rect.y,
+      transitionSeconds: reducedMotion ? 0 : dur,
+      updateMs,
+    });
     emitDebugState("cursor-update", {
       frameTimestamp,
     });
-    recordCursorUpdateDuration();
     maybeFlushCursorPerf();
   }
 

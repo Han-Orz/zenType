@@ -11,14 +11,14 @@
  * Layer 1 — DOM-free core (`createSentenceTransitionCore`):
  *   one transition slot per in-flight sentence. Each slot keeps its own
  *   from/to/current color, duration and (frame-anchored) start time, so a
- *   retarget always resumes from the last *rendered* color — never from the
- *   old endpoint, never by inheriting the old start time, never by settling
- *   first. Stable dim sentences are tracked as geometry, not as slots.
+ *   edits preserve the rendered color. A new navigation target ends the old
+ *   handoff before starting another. Stable dim sentences are tracked as
+ *   geometry, not as slots.
  *
  * Layer 2 — presentation shell (`createSentenceTransitionEngine`):
- *   the single shared rAF driver plus the CSS Custom Highlight / CSS variable
+ *   the single shared rAF driver plus the CSS Custom Highlight / color rule
  *   writes. Idle cost is zero: the driver runs only while a slot is in
- *   flight. Bounded slot pool → bounded highlight names / CSS variables.
+ *   flight. Bounded slot pool → bounded highlight names / color rules.
  *
  * Sentence identity is deliberately simple (see ripple.ts docs):
  *   - no text change            → same geometry, same sentence keys;
@@ -29,6 +29,7 @@
  *     snaps bright, while deletion-driven activation still acquires normally.
  */
 
+import { performanceRecordingActive, recordPerformance } from "../../debug/performance";
 import {
   claimInlineStyle,
   restoreOwnedInlineStyle,
@@ -54,8 +55,6 @@ export const SENTENCE_SLOT_COUNT = 4;
 export const SENTENCE_DIM_HIGHLIGHT = "zt-sentence-dim";
 
 const SLOT_HIGHLIGHT_PREFIX = "zt-sentence-transition";
-const SLOT_VAR_PREFIX = "--zt-sentence-transition";
-const SLOT_VAR_SUFFIX = "-color";
 const SENTENCE_DIM_VAR = "--zt-sentence-dim-color";
 
 // --- Pure color / timing helpers ---
@@ -447,6 +446,12 @@ export function createSentenceTransitionCore(
       return settleUpdate(input.sentenceRanges, newActiveKeys);
     }
 
+    const navigationChanged = input.textChange === "none" && (
+      newActiveKeys.size !== activeKeys.size ||
+      [...newActiveKeys].some((key) => !activeKeys.has(key))
+    );
+    if (navigationChanged) clearSlots();
+
     // Ordinal identity when the sentence count is stable, start-anchor
     // identity when the count moved (topology change).
     const prevCount = geometry.length;
@@ -574,7 +579,7 @@ export interface SentenceTransitionEngine {
 interface SlotVisual {
   range: SentenceRange | null;
   registered: boolean;
-  lastVarValue: string | null;
+  lastColorValue: string | null;
 }
 
 function cssHighlightApiSupported(): boolean {
@@ -587,10 +592,6 @@ function cssHighlightApiSupported(): boolean {
 
 function slotHighlightName(index: number): string {
   return `${SLOT_HIGHLIGHT_PREFIX}-${index}`;
-}
-
-function slotVarName(index: number): string {
-  return `${SLOT_VAR_PREFIX}-${index}${SLOT_VAR_SUFFIX}`;
 }
 
 function resolveTextNodeAt(
@@ -646,7 +647,7 @@ export function createSentenceTransitionEngine(): SentenceTransitionEngine {
   let textNodeMap: readonly TextNodeMapEntry[] = [];
   const slotVisuals: SlotVisual[] = [];
   for (let index = 0; index < SENTENCE_SLOT_COUNT; index++) {
-    slotVisuals.push({ range: null, registered: false, lastVarValue: null });
+    slotVisuals.push({ range: null, registered: false, lastColorValue: null });
   }
   let stableRangeRefs: Range[] = [];
   let stableGeometry: SentenceRange[] = [];
@@ -654,6 +655,21 @@ export function createSentenceTransitionEngine(): SentenceTransitionEngine {
   let lastDimVarValue: string | null = null;
   const ownedRootVars = new Map<string, OwnedInlineStyle>();
   let frameHandle: number | null = null;
+  let slotStyle: HTMLStyleElement | null = null;
+  const slotRules: CSSStyleRule[] = [];
+
+  function ensureSlotRules(): void {
+    if (slotStyle) return;
+    slotStyle = document.createElement("style");
+    slotStyle.textContent = Array.from({ length: SENTENCE_SLOT_COUNT }, (_, index) =>
+      `::highlight(${slotHighlightName(index)}) { color: transparent; }`,
+    ).join("\n");
+    document.head.appendChild(slotStyle);
+    const sheet = slotStyle.sheet!;
+    for (let index = 0; index < SENTENCE_SLOT_COUNT; index++) {
+      slotRules.push(sheet.cssRules[index] as CSSStyleRule);
+    }
+  }
 
   function writeRootVar(property: string, value: string): void {
     const rootStyle = document.documentElement.style;
@@ -672,12 +688,14 @@ export function createSentenceTransitionEngine(): SentenceTransitionEngine {
     ownedRootVars.delete(property);
   }
 
-  function writeSlotVar(index: number, color: Rgba): void {
+  function writeSlotColor(index: number, color: Rgba): void {
     const value = colorToCss(color);
     const visual = slotVisuals[index];
-    if (visual.lastVarValue === value) return;
-    writeRootVar(slotVarName(index), value);
-    visual.lastVarValue = value;
+    if (visual.lastColorValue === value) return;
+    // Keep animated colors out of inherited root custom properties.
+    ensureSlotRules();
+    slotRules[index].style.color = value;
+    visual.lastColorValue = value;
   }
 
   function releaseSlot(index: number): void {
@@ -686,10 +704,7 @@ export function createSentenceTransitionEngine(): SentenceTransitionEngine {
       if (cssHighlightApiSupported()) CSS.highlights.delete(slotHighlightName(index));
       visual.registered = false;
     }
-    if (visual.lastVarValue !== null) {
-      releaseRootVar(slotVarName(index));
-      visual.lastVarValue = null;
-    }
+    visual.lastColorValue = null;
     visual.range = null;
   }
 
@@ -769,7 +784,7 @@ export function createSentenceTransitionEngine(): SentenceTransitionEngine {
         }
         visual.range = { ...slot.range };
       }
-      writeSlotVar(index, slot.current);
+      writeSlotColor(index, slot.current);
     }
   }
 
@@ -788,21 +803,27 @@ export function createSentenceTransitionEngine(): SentenceTransitionEngine {
   function step(now: number): void {
     frameHandle = null;
     if (!cssHighlightApiSupported()) return;
+    const traceStart = __ZENTYPE_DEV__ && performanceRecordingActive() ? performance.now() : null;
     const result = core.advance(now);
 
     for (const completion of result.completed) {
       releaseSlot(completion.index);
     }
     for (const slot of result.slots) {
-      writeSlotVar(slot.index, slot.current);
+      writeSlotColor(slot.index, slot.current);
     }
     if (result.stableChanged) {
       syncStable();
     }
     if (result.anyTransition) ensureDriver();
+    if (__ZENTYPE_DEV__ && traceStart !== null) recordPerformance("sentence", "sentence-frame", {
+      frameTimestamp: now, slots: result.slots.length, completed: result.completed.length,
+      durationMs: performance.now() - traceStart,
+    });
   }
 
   function update(input: SentenceTransitionEngineUpdate): void {
+    const traceStart = __ZENTYPE_DEV__ && performanceRecordingActive() ? performance.now() : null;
     const bindingsChanged = !sameTextNodeMap(textNodeMap, input.textNodeMap);
     if (bindingsChanged) {
       textNodeMap = input.textNodeMap.map((entry) => ({ ...entry }));
@@ -825,6 +846,11 @@ export function createSentenceTransitionEngine(): SentenceTransitionEngine {
       cancelAnimationFrame(frameHandle);
       frameHandle = null;
     }
+    if (__ZENTYPE_DEV__ && traceStart !== null) recordPerformance("sentence", "sentence-update", {
+      sentences: input.sentenceRanges.length, activeRanges: input.activeRanges.length,
+      slots: result.slots.length, textChange: input.textChange, bindingsChanged,
+      durationMs: performance.now() - traceStart,
+    });
   }
 
   function clear(): void {
@@ -836,6 +862,9 @@ export function createSentenceTransitionEngine(): SentenceTransitionEngine {
     for (let index = 0; index < SENTENCE_SLOT_COUNT; index++) {
       releaseSlot(index);
     }
+    slotStyle?.remove();
+    slotStyle = null;
+    slotRules.length = 0;
     if (cssHighlightApiSupported()) {
       CSS.highlights.delete(SENTENCE_DIM_HIGHLIGHT);
     }

@@ -1,4 +1,4 @@
-import { Plugin } from "siyuan";
+import { Plugin, showMessage } from "siyuan";
 import type { IProtyle, IWebSocketData } from "siyuan/types";
 import { addStyle, removeStyle } from "./utils/styleManager";
 import {
@@ -21,7 +21,11 @@ import {
 import * as inputMode from "./modules/inputMode";
 import * as inputModeTriggers from "./modules/inputModeTriggers";
 import type { ModuleEnabled, ModuleName } from "./types";
-import { initDebugHook } from "./modules/debugHook";
+import {
+  initDebugHook,
+  createDebugBundleFilename,
+  downloadDebugBundle,
+} from "./modules/debugHook";
 import type {
   DebugHookController,
   DebugMarkerForensicTarget,
@@ -136,19 +140,14 @@ export default class ZenType extends Plugin {
         callback: () => this.markMarkerFlickerObserved(),
       });
       this.addCommand({
-        langKey: "toggle-debug-hook",
-        langText: "zenType：开始/停止通用 Debug Session",
-        callback: () => { void this.debugHook?.toggle(); },
+        langKey: "start-full-debug-capture",
+        langText: "zenType：开始完整 Debug",
+        callback: () => { void this.startFullDebugCapture(); },
       });
       this.addCommand({
-        langKey: "stop-debug-capture",
-        langText: "zenType：结束 Debug 取证",
-        callback: () => { void this.stopDebugCapture(); },
-      });
-      this.addCommand({
-        langKey: "capture-debug-hook",
-        langText: "zenType：捕获 Debug 快照",
-        callback: () => this.debugHook?.capture("command"),
+        langKey: "stop-and-export-full-debug-capture",
+        langText: "zenType：结束并导出 Debug",
+        callback: () => { void this.stopAndExportFullDebugCapture(); },
       });
     }
 
@@ -345,12 +344,58 @@ export default class ZenType extends Plugin {
     });
   }
 
-  private async stopDebugCapture(): Promise<void> {
+  private async startFullDebugCapture(): Promise<void> {
     const debug = this.debugHook;
     if (!debug) return;
-    await debug.stop();
+    const state = debug.getState();
+    if (state.active) {
+      showMessage("zenType Debug：已有活动会话，请先结束并导出。", 5000, "error");
+      return;
+    }
     debug.clearWatches();
-    console.info("[zenType DebugKit] capture stopped");
+    try {
+      const session = await debug.start("full-debug", { profile: "full", preset: "all" });
+      showMessage(
+        `zenType Debug：已开始完整取证（构建 ${session.buildFingerprint?.slice(0, 8) ?? "unknown"}）。`,
+        5000,
+      );
+    } catch (error) {
+      console.error("[zenType DebugKit] failed to start full capture", error);
+      showMessage("zenType Debug：启动失败，请查看开发者工具。", 5000, "error");
+    }
+  }
+
+  private async stopAndExportFullDebugCapture(): Promise<void> {
+    const debug = this.debugHook;
+    if (!debug) return;
+    const beforeStop = debug.getState();
+    if (!beforeStop.active && !beforeStop.sessionId) {
+      showMessage("zenType Debug：没有可导出的已停止会话。", 5000, "error");
+      return;
+    }
+    if (beforeStop.active) {
+      await debug.stop();
+      debug.clearWatches();
+    }
+    try {
+      const json = debug.exportRecording();
+      const state = debug.getState();
+      const filename = createDebugBundleFilename(state.buildFingerprint);
+      downloadDebugBundle(json, filename);
+      const timeline = state.timeline?.retainedEvents ?? 0;
+      const timelineDropped = state.timeline?.droppedEvents ?? 0;
+      const forensic = state.forensic?.retainedEvents ?? state.recentEventCount;
+      const forensicDropped = state.forensic?.droppedEvents ?? 0;
+      showMessage(
+        `zenType Debug：已导出 ${filename}（timeline 保留 ${timeline}、覆盖 ${timelineDropped}；forensic 保留 ${forensic}、覆盖 ${forensicDropped}）。`,
+        8000,
+      );
+    } catch (error) {
+      // The stopped session is intentionally retained by DebugKit, so this
+      // command can retry a browser download failure without another capture.
+      console.error("[zenType DebugKit] failed to export full capture", error);
+      showMessage("zenType Debug：导出失败；会话已保留，可再次执行结束并导出重试。", 7000, "error");
+    }
   }
 
   private toggle(name: ModuleName): void {

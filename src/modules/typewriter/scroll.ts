@@ -1,4 +1,5 @@
 import { TYPEWRITER_CONFIG } from "../../config";
+import { performanceRecordingActive, recordPerformance, type PerformanceData } from "../../debug/performance";
 import { prefersReducedMotion } from "../../utils/reducedMotion";
 
 const { SCROLL_DURATION_TIERS } = TYPEWRITER_CONFIG;
@@ -52,6 +53,13 @@ function easeOutCubic(t: number): number {
 
 function emitDebug(event: TypewriterScrollDebugEvent): void {
   if (!DEBUG_ENABLED) return;
+  if (performanceRecordingActive()) {
+    const data: PerformanceData = {};
+    for (const [key, value] of Object.entries(event)) {
+      if (key !== "name" && (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean")) data[key] = value;
+    }
+    recordPerformance("scroll", event.name, data);
+  }
   debugSink?.(event);
 }
 
@@ -112,10 +120,11 @@ export function ownsActiveScroll(target: EventTarget | null): boolean {
   return activeScrollFrame !== null && activeTarget !== null && activeTarget === target;
 }
 
-export function cancel(): void {
+export function cancel(reason = "caller"): void {
   if (DEBUG_ENABLED && activeScrollFrame !== null && activeTarget !== null) {
     emitDebug({
       name: "typewriter-scroll-cancel",
+      reason,
       target: activeTarget,
       motionId: activeMotionId,
       generation,
@@ -131,14 +140,14 @@ export function cancel(): void {
 }
 
 export function reset(): void {
-  cancel();
+  cancel("reset");
 }
 
 export function cancelForReducedMotion(): void {
   if (!shouldCancelPendingScrollForReducedMotion(prefersReducedMotion(), isScrolling())) {
     return;
   }
-  cancel();
+  cancel("reduced-motion");
 }
 
 /**
@@ -183,7 +192,7 @@ export function scrollTo(
   const { deltaY } = options;
 
   if (prefersReducedMotion()) {
-    cancel();
+    cancel("reduced-motion");
     applyImmediately(target, deltaY);
     return;
   }
@@ -220,7 +229,7 @@ export function scrollTo(
     return;
   }
 
-  if (activeScrollFrame !== null) cancel();
+  if (activeScrollFrame !== null) cancel("target-replaced");
 
   const token = ++generation;
   activeTarget = target;

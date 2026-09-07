@@ -18,6 +18,8 @@ const testEntries = [
   "ripple-sentence-transition.test.ts",
   "structural-edit.test.ts",
   "debug-hook.test.ts",
+  "debug-performance.test.ts",
+  "debug-download.test.ts",
   "debug-summary.test.mjs",
   "debug-bridge.test.mjs",
 ];
@@ -42,7 +44,7 @@ try {
         },
       }],
       define: {
-        __ZENTYPE_DEV__: "false",
+        __ZENTYPE_DEV__: testEntries[index] === "debug-performance.test.ts" ? "true" : "false",
       },
     });
   }

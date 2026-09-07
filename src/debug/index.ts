@@ -1,4 +1,7 @@
 import type { EventBus } from "siyuan";
+import { getActiveEditor } from "siyuan";
+import { buildFingerprint } from "./buildIdentity";
+import { createPerformanceRecorder } from "./performance";
 import { createDebugCollector } from "./collector";
 import {
   createDebugTransport,
@@ -20,6 +23,8 @@ const BUILD_SHA = typeof __ZENTYPE_BUILD_SHA__ === "string"
   : "unknown";
 
 const MAX_RECENT_EVENTS = 500;
+/** Full Debug keeps detailed evidence independently from the console preview. */
+const MAX_FORENSIC_EVENTS = 8192;
 const MAX_LABEL_LENGTH = 160;
 const MAX_MARK_PAYLOAD_KEYS = 64;
 const MAX_MARK_ARRAY_ITEMS = 32;
@@ -105,11 +110,12 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   }
 
   const recentEvents: DebugEnvelope[] = [];
+  const performanceRecorder = createPerformanceRecorder();
   const watches = new Map<string, DebugWatch>();
   const counters = emptyCounters();
   const transport = createDebugTransport();
   let watchSequence = 0;
-  let profile: DebugProfile = "timing";
+  let profile: DebugProfile = "timeline";
   let bridgeUrl = DEFAULT_BRIDGE_URL;
   let active = false;
   let sessionId: string | null = null;
@@ -119,6 +125,17 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   let sequence = 0;
   let destroyed = false;
   let lifecycleQueue: Promise<unknown> = Promise.resolve();
+  let recordedSession: DebugSessionState | null = null;
+  const forensicEvents: DebugEnvelope[] = [];
+  let droppedForensicEvents = 0;
+
+  function isTimelineProfile(value = profile): boolean {
+    return value === "timeline" || value === "full";
+  }
+
+  function isForensicProfile(value = profile): boolean {
+    return value === "forensic" || value === "full";
+  }
 
   const collector = createDebugCollector({
     eventBus,
@@ -162,6 +179,7 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
       label,
       profile,
       buildSha: BUILD_SHA,
+      buildFingerprint,
       startedAt,
       stoppedAt,
     };
@@ -200,7 +218,15 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     };
     recentEvents.push(envelope);
     if (recentEvents.length > MAX_RECENT_EVENTS) recentEvents.shift();
-    transport.enqueue(envelope);
+    if (profile === "full") {
+      forensicEvents.push(envelope);
+      if (forensicEvents.length > MAX_FORENSIC_EVENTS) {
+        forensicEvents.shift();
+        droppedForensicEvents += 1;
+      }
+    } else {
+      transport.enqueue(envelope);
+    }
     return envelope;
   }
 
@@ -220,6 +246,7 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
   ): Promise<DebugSessionState> {
     if (destroyed) throw new Error("DebugKit has been destroyed");
     if (active) await stopInternal();
+    recordedSession = null;
 
     profile = options.profile ?? profile;
     bridgeUrl = options.bridgeUrl ?? bridgeUrl;
@@ -230,9 +257,16 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     active = true;
     sequence = 0;
     recentEvents.length = 0;
+    forensicEvents.length = 0;
+    droppedForensicEvents = 0;
     resetSessionCounters();
     transport.reset(sessionId, bridgeUrl);
-    collector.setProfile(profile);
+    if (isTimelineProfile()) {
+      performanceRecorder.start(options.preset ?? "all", getActiveEditor()?.protyle?.element ?? null);
+      performanceRecorder.record("debugkit", "session-start", { sessionId, buildFingerprint });
+      if (profile === "timeline") return sessionState();
+    }
+    collector.setProfile(isForensicProfile() ? "forensic" : profile);
     collector.setFrameBurst(options.frameBurst);
     collector.setMarkerForensic(options.markerForensic);
     collector.resetNodeIdentity();
@@ -245,21 +279,30 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
       label,
       profile,
       buildSha: BUILD_SHA,
+      buildFingerprint,
       startedAt,
       transportState: transport.getState().transportState,
     }, "session-start");
 
     collector.attach();
 
-    // This is the only automatic bridge request made at session start.
-    await transport.probe();
-    if (profile === "forensic") captureInternal("session-start");
+    // Full sessions deliberately stay local: they never probe or use bridge.
+    if (profile !== "full") await transport.probe();
+    if (isForensicProfile()) captureInternal("session-start");
     return sessionState();
   }
 
   async function stopInternal(): Promise<void> {
     if (!active || destroyed) return;
-    if (profile === "forensic") captureInternal("session-stop");
+    if (profile === "timeline") {
+      stoppedAt = new Date().toISOString();
+      performanceRecorder.record("debugkit", "session-stop", {});
+      performanceRecorder.stop();
+      active = false;
+      recordedSession = sessionState();
+      return;
+    }
+    if (isForensicProfile()) captureInternal("session-stop");
     stoppedAt = new Date().toISOString();
     publish("status", {
       source: "debugkit",
@@ -271,12 +314,21 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     }, "session-stop");
     collector.detach();
     collector.setMarkerForensic();
+    if (isTimelineProfile()) {
+      performanceRecorder.record("debugkit", "session-stop", {});
+      performanceRecorder.stop();
+    }
     active = false;
-    await transport.flush();
+    recordedSession = sessionState();
+    if (profile !== "full") await transport.flush();
   }
 
   function captureInternal(reason = "manual"): void {
     if (!active || destroyed || !sessionId) return;
+    if (profile === "timeline") {
+      performanceRecorder.record("debugkit", "capture-skipped", { reason });
+      return;
+    }
     const snapshot = collector.createSnapshot(reason);
     counters.snapshotsCaptured += 1;
     publish("snapshot", snapshot as unknown as Record<string, unknown>, reason);
@@ -302,6 +354,10 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     mark(markLabel, payload) {
       if (!active || destroyed) return;
       const safeLabel = truncate(markLabel.trim() || "mark", MAX_LABEL_LENGTH);
+      if (profile === "timeline") {
+        performanceRecorder.record("debugkit", "mark", { label: safeLabel });
+        return;
+      }
       publish("event", {
         ...safeMarkPayload(payload),
         source: "debugkit",
@@ -333,8 +389,11 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
     },
     setProfile(nextProfile) {
       if (profile === nextProfile || destroyed) return;
+      if (active && (isTimelineProfile() || isTimelineProfile(nextProfile))) {
+        throw new Error("Stop the session before switching to or from timeline mode");
+      }
       profile = nextProfile;
-      collector.setProfile(nextProfile);
+      if (nextProfile !== "timeline") collector.setProfile(isForensicProfile(nextProfile) ? "forensic" : nextProfile);
       if (active) {
         publish("status", {
           source: "debugkit",
@@ -353,6 +412,14 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
         session: sessionState(),
         ...transportState,
         ...counters,
+        ...(isTimelineProfile() ? { timeline: performanceRecorder.getState() } : {}),
+        ...(profile === "full" ? {
+          forensic: {
+            capacity: MAX_FORENSIC_EVENTS,
+            retainedEvents: forensicEvents.length,
+            droppedEvents: droppedForensicEvents,
+          },
+        } : {}),
         bridgeUrl,
         recentEventCount: recentEvents.length,
         pendingEventCount: transport.getPendingCount(),
@@ -363,20 +430,78 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
       };
     },
     getRecentEvents() {
-      return recentEvents.slice();
+      return profile === "full" ? forensicEvents.slice() : recentEvents.slice();
+    },
+    exportRecording() {
+      if (active) throw new Error("Stop the session before exporting a recording");
+      const session = recordedSession ?? sessionState();
+      const timelineState = performanceRecorder.getState();
+      return JSON.stringify({
+        schema: "zentype-debug-bundle/v1",
+        session,
+        timeOrigin: performance.timeOrigin ?? null,
+        host: {
+          userAgent: typeof navigator === "undefined" ? null : navigator.userAgent,
+          platform: typeof navigator === "undefined" ? null : navigator.platform,
+          href: typeof location === "undefined" ? null : location.href,
+        },
+        timeline: {
+          ...timelineState,
+          events: (session.profile === "timeline" || session.profile === "full")
+            ? performanceRecorder.getEvents()
+            : [],
+        },
+        forensic: {
+          counters: { ...counters },
+          events: session.profile === "full" ? forensicEvents.slice() : recentEvents.slice(),
+        },
+        loss: {
+          timeline: {
+            capacity: timelineState.capacity,
+            retainedEvents: (session.profile === "timeline" || session.profile === "full")
+              ? timelineState.retainedEvents
+              : 0,
+            droppedEvents: (session.profile === "timeline" || session.profile === "full")
+              ? timelineState.droppedEvents
+              : 0,
+          },
+          forensic: {
+            capacity: session.profile === "full" ? MAX_FORENSIC_EVENTS : MAX_RECENT_EVENTS,
+            retainedEvents: session.profile === "full" ? forensicEvents.length : recentEvents.length,
+            droppedEvents: session.profile === "full" ? droppedForensicEvents : 0,
+            truncated: session.profile === "full" ? droppedForensicEvents > 0 : false,
+          },
+          recent: {
+            capacity: MAX_RECENT_EVENTS,
+            retainedEvents: recentEvents.length,
+            droppedEvents: 0,
+            truncated: false,
+          },
+        },
+      });
     },
     clear() {
       recentEvents.length = 0;
+      forensicEvents.length = 0;
+      droppedForensicEvents = 0;
       transport.clearPending();
     },
     reconnect() {
       if (destroyed) return Promise.resolve(false);
+      if (profile === "timeline" || profile === "full") return Promise.resolve(false);
       return enqueueLifecycle(async () => transport.reconnect());
     },
     destroy() {
       if (destroyed) return;
+      if (active && profile === "timeline") {
+        stoppedAt = new Date().toISOString();
+        performanceRecorder.record("debugkit", "session-stop", { reason: "destroy" });
+        performanceRecorder.stop();
+        active = false;
+        recordedSession = sessionState();
+      }
       if (active) {
-        if (profile === "forensic") captureInternal("destroy");
+        if (isForensicProfile()) captureInternal("destroy");
         stoppedAt = new Date().toISOString();
         publish("status", {
           source: "debugkit",
@@ -388,8 +513,14 @@ export function initDebugHook(eventBus: EventBus): DebugHookController {
         }, "session-stop");
         collector.detach();
         collector.setMarkerForensic();
+        if (isTimelineProfile()) {
+          performanceRecorder.record("debugkit", "session-stop", { reason: "destroy" });
+          performanceRecorder.stop();
+        }
         active = false;
-        void transport.flush().finally(() => transport.destroy());
+        recordedSession = sessionState();
+        if (profile === "full") transport.destroy();
+        else void transport.flush().finally(() => transport.destroy());
       } else {
         collector.detach();
         collector.setMarkerForensic();
