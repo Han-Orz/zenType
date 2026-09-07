@@ -1,91 +1,216 @@
-# zenType v2
+# zenType
 
-Smooth cursor + typewriter mode + ripple focus for distraction-free writing in SiYuan Note.
+让写作中的光标、页面和视觉焦点跟随你的思考。
 
 ![zenType preview](preview.png)
 
-> **⚠️ Upgrading from v2.x (siyuan-zen)?**
->
-> The plugin has been renamed from `siyuan-zen` to `zenType` (v2.6.1) to resolve bazaar marketplace sync issues. SiYuan treats these as **two different plugins**, so existing users must:
->
-> 1. **Uninstall the old `siyuan-zen` plugin first** (Settings → Plugins → siyuan-zen → Uninstall)
-> 2. **Then install `zenType`** using the new zip from [Releases](../../releases)
->
-> Skipping step 1 will leave both plugins installed side-by-side. Your data and settings are not transferred (you'll need to re-toggle features you want).
->
-> v1.0.6 (`ZenType`) → v2.0.0-2.6.0 (`siyuan-zen`) → v2.6.1+ (`zenType`). See [CHANGELOG](docs/CHANGELOG.md) for details.
+zenType 是一个为思源笔记设计的写作体验插件。
 
-## Features
+它从一个很小的问题开始。
 
-- **Smooth Cursor** — Custom blue cursor replaces the system caret with smooth transition animation
-- **Typewriter Mode** — Your caret stays within the 38%–50% comfort zone (golden ratio to midline)
-- **Ripple Focus** — The current sentence stays bright while surrounding blocks/sentences gradually dim (CSS Custom Highlight API for sentence dimming, no content-structure mutation, no data loss)
+长时间写东西时，人会不断寻找自己的位置。
 
-## Installation
+光标在哪里。
 
-1. Download the latest release zip from the Releases page
-2. In SiYuan Note, open Settings → Plugins → Load plugin from disk
-3. Select the downloaded zip
+页面为什么滚到了下面。
 
-## Usage
+刚刚写到哪一句。
 
-On a fresh install, all three modules are enabled by default. Saved per-module states are restored on subsequent loads. Typewriter initialization immediately enables the shared typewriter/ripple state. To toggle:
+上一段和下一段的关系还在不在。
 
-- **Top bar icon** (galaxy): Toggle typewriter mode + ripple focus on/off. The colorful planets animate when both are enabled; the smooth cursor stays active.
-- **Command palette** (Ctrl+Shift+P): Search "zenType" to see individual toggles
+这些事情本身很轻微，却会不断打断写作。
 
-## Edge Cases
+zenType 想做的是减少这些额外注意力，让编辑器更像一个安静的写作空间。
 
-### Embedded Blocks
+## 顺滑光标
 
-Videos, iframes, and PDF embeds are treated as 1 ripple unit (they fade normally). Typewriter mode skips them (no scroll when cursor is in an embed).
+顺滑光标是 zenType 最初的起点。
 
-### Nested Blocks
+系统光标只是一个位置提示。zenType 希望它成为写作过程中的视觉中心。
 
-Nested lists fade by hierarchy and sibling distance. The focused item stays brightest; focus-path ancestors fade only their own marker/direct content. An off-path branch fades once at its branch root, so descendants inherit it without parent/child opacity multiplication. Structural `NodeList` containers stay neutral, while top-level blocks outside the nested list keep the legacy distance-based fade.
+它会跟随真实输入位置移动，在移动时保持连续感。
 
-### Selection (Multi-line)
+光标移动较短距离时，会快速贴近新的位置。
 
-When you drag-select text, ripple focus clears with a 0.4s fade and typewriter mode pauses. The smooth cursor stays active.
+跨越较大距离时，会根据距离调整过渡，让移动更自然。
 
-### Suspended Edits & Popups
+停止输入后，光标会进入轻微呼吸状态。
 
-Read-only mode suspends typewriter mode. Text selection and block popups clear ripple focus.
+它不会闪烁催促你，也不会完全消失。
 
-## Customization (v2.7.0)
+那个缓慢的明暗变化，更像是在提醒你。
 
-Open `src/config.ts` to tweak:
+这里仍然是你的写作位置。
 
-| Parameter | Default | What it does |
-|-----------|---------|--------------|
-| `CURSOR_CONFIG.HEIGHT_RATIO` | `1.05` | Cursor height = line-height × this multiplier |
-| `CURSOR_CONFIG.BLINK_DELAY_MS` | `1100` | Idle delay before blink resumes |
-| `EDGE_FADE.ZONE` | `20` | Pixels from editor rect edge over which cursor fades out (top + bottom symmetric) |
-| `TRANSITION.TIERS` | `≤30→0.07s, ≤150→0.15s, ≤500→0.21s, >500→0.30s` | Distance-banded cursor transition duration |
-Open `src/styles/index.scss` to tweak visual style. Its cursor transition is the CSS fallback; normal cursor updates write the distance-based duration and curve from `src/modules/cursor.ts`:
+当你重新开始输入，光标会立即回到工作状态。
 
-```scss
-#zentype-cursor {
-  width: 3px;                                      // Cursor width
-  background: var(--zt-cursor-color, #5d8cd7);     // Color (light theme)
-  transition: transform 0.15s cubic-bezier(...);   // CSS fallback curve
-  animation: zentype-breathe 3s 1.5s ...;          // Blink animation
-}
-```
+靠近编辑区域边缘时，光标会逐渐淡出。回到可见区域后，它会重新出现。
 
-`pnpm run dev` rebuilds on save; SiYuan hot-reloads in 1-2 seconds.
+整个过程只服务于一个目标。
 
-## DebugKit (dev build only)
+让你随时知道自己在哪里。
 
-Development builds provide the session-oriented DebugKit; production builds do not bundle it. See [`docs/DEBUGKIT.md`](docs/DEBUGKIT.md) for the bridge and console API workflow.
+## 打字机模式
 
-### Edge Behavior (v2.6.6)
+写长文时，光标经常会慢慢移动到屏幕底部。
 
-When the cursor scrolls off the visible editor area (top or bottom), it stays at the last visible position and smoothly fades to 0 opacity over `EDGE_FADE.ZONE` pixels. Returning to the viewport fades it back in. Top and bottom are now symmetric.
+等它离开舒适区域以后，再手动滚动页面，会打断思路。
 
-## Roadmap
+zenType 会让输入位置保持在屏幕比较舒服的位置。
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the full design.
+写作过程中，页面会跟随你的输入移动，让你可以继续向前写。
+
+它不会强行控制你的浏览。
+
+当你滚动页面、点击其他位置、选择文字或者切换内容时，自动跟随会暂时让开。
+
+重新开始输入以后，写作状态会恢复。
+
+zenType 希望页面服务于写作，而不是让写作者适应页面。
+
+## 涟漪聚焦
+
+写作时，眼睛通常只需要关注当前一句。
+
+但周围内容仍然重要。
+
+zenType 会让当前句保持清晰，同时降低周围内容的视觉干扰。
+
+离当前位置越远，视觉权重越低。
+
+上下文依然存在，只是不再和当前内容争夺注意力。
+
+句子之间移动时，焦点会平滑过渡。
+
+快速上下移动、反复修改句子边界时，视觉状态也会跟随当前编辑位置变化。
+
+输入中的文字会优先保持清晰。
+
+动画服务于阅读和写作，不会抢走你的注意力。
+
+## 真实编辑中的连续感
+
+普通输入很简单。
+
+真正困难的是那些会改变文档结构的操作。
+
+例如：
+
+- Enter 创建新块
+- Backspace 合并内容
+- Tab 和 Shift+Tab 调整列表层级
+
+这些操作会改变编辑器内部结构。
+
+zenType 会等待内容变化稳定后重新连接视觉状态。
+
+因此换行、合并段落、调整列表时，光标、页面和焦点不会各自移动。
+
+你看到的是一次连续的编辑过程。
+
+## 对嵌套内容的处理
+
+列表和层级结构需要特殊处理。
+
+简单地给每一层内容降低透明度，会让深层列表越来越难阅读。
+
+zenType 会保留当前编辑路径的清晰度。
+
+正在编辑的项目保持突出。
+
+相关父级保留必要信息。
+
+远离当前内容的分支逐渐降低视觉存在感。
+
+这样既能保持层级关系，也不会让复杂列表失去可读性。
+
+## zenType 的设计原则
+
+### 自动行为应该帮助写作
+
+插件可以主动移动页面和调整视觉状态。
+
+但当用户主动操作时，控制权会回到用户手中。
+
+### 动画应该解释变化
+
+动画不是为了展示效果。
+
+它应该告诉你。
+
+刚刚发生了什么。
+
+现在关注哪里。
+
+下一步应该看哪里。
+
+### 写作内容永远优先
+
+视觉效果可以变化。
+
+文档内容不会被修改。
+
+zenType 尽量把效果放在显示层，不改变你的实际笔记结构。
+
+## 安装
+
+1. 从 [Releases](../../releases) 下载最新 Release zip
+2. 打开思源笔记
+3. 进入设置 → 插件
+4. 选择从本地安装插件
+5. 选择下载的 zip 文件
+
+## 使用
+
+首次安装后，三个模块默认开启。
+
+### 顶栏按钮
+
+顶栏图标可以快速切换打字机模式和涟漪聚焦。
+
+顺滑光标保持独立运行。
+
+### 命令面板
+
+打开思源命令面板，搜索 `zenType`。
+
+可以分别控制各个功能。
+
+## 特殊情况
+
+### 选择文字
+
+拖选内容时，涟漪聚焦会暂时退出。
+
+这样阅读和检查文字时不会受到视觉变化影响。
+
+### 只读状态
+
+只读内容不会触发打字机滚动。
+
+回到可编辑状态后，写作体验会恢复。
+
+### 嵌入内容
+
+视频、iframe、PDF 等嵌入内容会作为完整内容参与视觉处理。
+
+打字机模式不会尝试在嵌入区域内部移动。
+
+## 从 siyuan-zen 升级
+
+v2.6.1 开始，插件名称从 `siyuan-zen` 改为 `zenType`。
+
+思源会把两个名称识别为不同插件。
+
+升级时请先卸载旧版 `siyuan-zen`，再安装 `zenType`。
+
+完整版本记录请查看 [CHANGELOG](docs/CHANGELOG.md)。
+
+## 了解更多
+
+设计思路请查看 [DESIGN.md](docs/DESIGN.md)。
+
+开发诊断工具请查看 [DebugKit](docs/DEBUGKIT.md)。
 
 ## License
 

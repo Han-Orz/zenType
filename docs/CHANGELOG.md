@@ -1,5 +1,29 @@
 # Changelog
 
+## v2.8.0 (2026-09-07) — Sentence Transition Engine + Structural Editing Stability
+
+本版本完成句级视觉过渡、结构化编辑和调试诊断链路的最终收敛，重点提升长文写作中光标、页面与涟漪焦点的连续性。
+
+### Added
+- **可中断的句级过渡引擎**：句子焦点切换使用独立的 presentation slot 和共享 rAF 驱动，快速移动或连续编辑时可以接续当前过渡，不反复重启动画。
+- **结构化编辑协调**：统一处理 Enter、Backspace、列表重排和结构替换期间的滚动、FLIP 位移与 Ripple 视觉状态交接。
+- **DebugKit 会话诊断**：开发构建提供按 session 保存的调试采集、时序摘要、光标/块/marker 几何快照、FLIP 与 Ripple forensic 事件，以及 build fingerprint；正式构建不包含采集逻辑。
+
+### Changed
+- **Ripple 句级焦点**：支持跨文本修改、句界变化、块合并和结构替换保持焦点连续，并通过 start-anchor identity 重新绑定新的文本拓扑。
+- **Typewriter FLIP**：改进内容空间几何就绪、嵌套列表目标去重、动画中断重基线和最终光标对齐，减少结构编辑时的跳动与残留过渡。
+- **光标与滚动协作**：区分 Typewriter 驱动的滚动，统一首帧时序，并在非键盘滚动、编辑器切换和重新获得光标时稳定视觉位置。
+- **构建与打包**：发布构建清理输出目录，并使用显式文件白名单生成 `package.zip`，同时打入中英文 README、预览图和插件元数据。
+
+### Fixed
+- 修复连续输入或快速跨句移动时句级 fade 被重启、提前释放或视觉状态残留的问题。
+- 修复文本编辑、块边界合并和列表 reparent 后 Ripple opacity、句级 highlight 与当前目标不同步的问题。
+- 修复 FLIP 与 Ripple transition 交叠时的样式覆盖、布局读取时序和旧一轮 cleanup 影响新一轮动画的问题。
+- 修复结构化编辑时序受刷新率影响，以及用户滚动、选择和输入会话边界判断不稳定的问题。
+
+### Engineering
+- 新增并扩展 characterization、结构化编辑、Typewriter target resolver、Ripple sentence transition、DebugKit 和构建指纹回归测试。
+
 ## v2.7.0 (2026-09-01) — Nested Ripple
 
 ### Added

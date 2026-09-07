@@ -413,7 +413,7 @@ keydown Enter / 行首 Backspace:
 
 #### 3.7.2 FLIP 平滑 reflow（`animateBlockShift`）
 
-让"下方块被自然推下去"的瞬间不突兀 —— 用 FLIP（First-Last-Invert-Play）技术。当前实现正常路径会**围绕当前选区起止块采样前后 sibling 窗口 + 沿祖先层级采样**（默认半径 `FLIP_BLOCK_RADIUS = 30`），避免长文档全量扫描；选择区容器异常时保留全量查询作为 fallback：
+让"下方块被自然推下去"的瞬间不突兀 —— 用 FLIP（First-Last-Invert-Play）技术。当前实现正常路径会**围绕当前选区起止块采样前后 sibling 窗口 + 沿祖先层级采样**（默认半径 `FLIP_BLOCK_RADIUS = 30`），避免长文档全量扫描；如果无法可靠建立局部 block boundary，则直接放弃本次 FLIP enhancement，不扫描整个编辑器：
 
 ```typescript
 function animateBlockShift(editor: HTMLElement, range: Range): void {
@@ -970,7 +970,7 @@ subscribe(cb) → unsubscribe  // inputMode.ts:30-34
 | cursor.ts 子模块拆分 | 事件注册→`events.ts`、滚动绑定→`scrollBindings.ts`、switch-settle→`switchSettle.ts`、ResizeObserver→`resizeBindings.ts`、popover 拖动→`popoverDrag.ts`、边缘箭头→`edgeArrow.ts`（此前已完成） | cursor.ts 从 674 行降到 ~450 行，职责集中为核心循环 + EventBus 适配，降低后续修改跨行为风险 |
 | inputModeTriggers 适配层 | 所有 `inputMode.setBothOn/Off()` 调用集中到 `inputModeTriggers.ts` 的 9 个语义函数；`cursor/events.ts`、`typewriter.ts`、`index.ts` 通过语义函数触发 | 消除 Shotgun Surgery：修改"什么时候开启/退出聚焦和打字机"时只需改一处（Brooks sweep #2 修复） |
 | 上下文注入模式 | 子模块接收 context 对象（如 `getCursorElement`、`queueUpdate`、`pauseBreathe`、`isKeyboardUpdatePending`），不直接闭包捕获父模块状态 | 子模块可独立理解/测试，与 cursor.ts 保持松耦合 |
-| FLIP 采样优化 | 从全编辑器扫描改为围绕选区 sibling 窗口 + 祖先层级采样（`FLIP_BLOCK_RADIUS = 30`） | 减少长文档 DOM 遍历开销，保留 fallback 到全量扫描 |
+| FLIP 采样优化 | 从全编辑器扫描改为围绕选区 sibling 窗口 + 祖先层级采样（`FLIP_BLOCK_RADIUS = 30`） | 减少长文档 DOM 遍历开销；无法可靠建立局部 block boundary 时放弃本次 FLIP enhancement，不扫描整个编辑器 |
 
 ### 9.12 明确推迟项
 
