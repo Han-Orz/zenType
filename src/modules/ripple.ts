@@ -1,167 +1,171 @@
 import { MOTION, RIPPLE_LEVELS, SENTENCE_ALPHA } from "../config";
+import { approach } from "../motion";
 import type { EditorFrame } from "../types";
 import { resolveRangeTextPoint } from "../utils/rangeTextPoint";
 import { splitSentences, resolveActiveSentenceRanges, type SentenceRange } from "./ripple/sentenceModel";
+import { projectText, sentenceRange, mapUnchangedBoundaries, type TextEntry } from "./ripple/textProjection";
 
-type TextEntry = { node: Text; start: number; end: number };
-type SentencePlan = { ranges: Range[]; active: number[]; color: string; reset: boolean };
-type RipplePlan = { targets: Map<HTMLElement, number> | null; sentences: SentencePlan | null };
-const names = ["zentype-sentence-dim", "zentype-sentence-enter", "zentype-sentence-leave"];
+type BlockPaint = { value: number; target: number; original: string; written: string; hadClass: boolean };
+type SentencePaint = SentenceRange & { range: Range; value: number; target: number };
 
 function collectTargets(block: HTMLElement, editor: HTMLElement): Map<HTMLElement, number> {
   const targets = new Map<HTMLElement, number>();
   let branch = block;
   let depth = 0;
   while (branch !== editor && branch.parentElement) {
-    const parent = branch.parentElement;
-    const siblings = Array.from(parent.children).filter((child): child is HTMLElement =>
-      child instanceof HTMLElement && (child.hasAttribute("data-node-id") || child.classList.contains("protyle-action")));
-    const index = siblings.indexOf(branch);
-    for (let i = 0; i < siblings.length; i++) {
-      const sibling = siblings[i];
-      if (sibling === branch) continue;
-      const distance = sibling.classList.contains("protyle-action") ? depth : depth + Math.max(1, Math.abs(i - index));
-      targets.set(sibling, RIPPLE_LEVELS[Math.min(distance, RIPPLE_LEVELS.length - 1)]);
+    // Bound the visible neighborhood without scanning every block in a large document.
+    for (const direction of ["previousElementSibling", "nextElementSibling"] as const) {
+      let sibling = branch[direction];
+      for (let distance = 1; sibling && distance <= 48; sibling = sibling[direction]) {
+        if (!(sibling instanceof HTMLElement) || !sibling.matches("[data-node-id], .protyle-action")) continue;
+        targets.set(sibling, RIPPLE_LEVELS[Math.min(sibling.classList.contains("protyle-action") ? depth : depth + distance, RIPPLE_LEVELS.length - 1)]);
+        distance++;
+      }
     }
-    if (parent.dataset.type === "NodeListItem") depth++;
-    branch = parent;
+    if (branch.parentElement.dataset.type === "NodeListItem") depth++;
+    branch = branch.parentElement;
   }
   return targets;
 }
 
 export function createRipple() {
   const style = document.createElement("style");
-  document.head.appendChild(style);
-  let applied = new Map<HTMLElement, string>();
+  document.head.append(style);
+  const supported = typeof Highlight !== "undefined" && !!CSS.highlights &&
+    CSS.supports("color", "rgb(from currentColor r g b / calc(alpha * 0.6))");
+  const names = Array.from({ length: 65 }, (_, i) => "zentype-remake-sentence-" + i);
+  if (supported) style.textContent = names.map((name, i) =>
+    "::highlight(" + name + ") { color: rgb(from currentColor r g b / calc(alpha * " + (i / 64) + ")); }").join("\n");
+  const blocks = new Map<HTMLElement, BlockPaint>();
+  let editable: HTMLElement | null = null;
   let block: HTMLElement | null = null;
+  let text = "";
   let entries: TextEntry[] = [];
-  let sentences: SentenceRange[] = [];
-  let ranges: Range[] = [];
-  let active: number[] = [];
-  let color = "";
-  let transition: { entering: number[]; leaving: number[]; started: number } | null = null;
-  const supported = typeof Highlight !== "undefined" && typeof CSS !== "undefined" && !!CSS.highlights &&
-    CSS.supports("color", "color-mix(in srgb, black 60%, transparent)");
+  let sentences: SentencePaint[] = [];
+  let lastTime = 0;
+  let registered = new Map<number, Range[]>();
 
-  function rangeFor(sentence: SentenceRange): Range | null {
-    const first = entries.find(entry => entry.end > sentence.start);
-    const last = entries.find(entry => entry.end >= sentence.end && entry.start < sentence.end);
-    if (!first || !last) return null;
-    const range = document.createRange();
-    range.setStart(first.node, sentence.start - first.start);
-    range.setEnd(last.node, sentence.end - last.start);
-    return range;
+  function clearSentences() {
+    if (supported) for (const bucket of registered.keys()) CSS.highlights.delete(names[bucket]);
+    registered.clear();
+    sentences = [];
+    entries = [];
+    text = "";
+    editable = null;
   }
-
-  function prepare(frame: EditorFrame, dirty: boolean, structureDirty: boolean): RipplePlan {
+  function release(element: HTMLElement, paint: BlockPaint) {
+    if (element.style.getPropertyValue("--zentype-dim") === paint.written) {
+      if (paint.original) element.style.setProperty("--zentype-dim", paint.original);
+      else element.style.removeProperty("--zentype-dim");
+    }
+    if (!paint.hadClass) element.classList.remove("zentype-ripple-block");
+    blocks.delete(element);
+  }
+  function prepare(frame: EditorFrame, contentDirty: boolean, structureDirty: boolean, enabled: boolean) {
+    if (!enabled) {
+      for (const paint of blocks.values()) paint.target = 1;
+      for (const paint of sentences) paint.target = 1;
+      block = null;
+      return;
+    }
+    if (!frame.block || !frame.editable || !frame.range) {
+      // Invalid live ranges are never retained across a structural replacement.
+      if (contentDirty || structureDirty) clearSentences();
+      return;
+    }
     const changed = block !== frame.block;
-    const targets = changed || structureDirty ? collectTargets(frame.block, frame.editor) : null;
-    if (!supported) { block = frame.block; return { targets, sentences: null }; }
-    const reset = changed || dirty;
-    if (reset) {
-      entries = [];
-      const walker = document.createTreeWalker(frame.block, NodeFilter.SHOW_TEXT);
-      let text = "";
-      let node: Node | null;
-      while ((node = walker.nextNode())) {
-        const value = node.nodeValue ?? "";
-        entries.push({ node: node as Text, start: text.length, end: text.length + value.length });
-        text += value;
+    if (changed || structureDirty) {
+      const targets = collectTargets(frame.block, frame.editor);
+      for (const [element, paint] of blocks) {
+        let covered = false;
+        for (let parent = element.parentElement; parent && parent !== frame.editor; parent = parent.parentElement) {
+          if (targets.has(parent)) { covered = true; break; }
+        }
+        if (!element.isConnected || element.contains(frame.block) || covered) release(element, paint);
+        else paint.target = targets.get(element) ?? 1;
       }
-      sentences = splitSentences(text);
-      ranges = sentences.map(rangeFor).filter((range): range is Range => range !== null);
-      color = getComputedStyle(frame.block).color;
+      for (const [element, target] of targets) {
+        const paint = blocks.get(element);
+        if (paint) paint.target = target;
+        else blocks.set(element, { value: 1, target, original: element.style.getPropertyValue("--zentype-dim"),
+          written: "", hadClass: element.classList.contains("zentype-ripple-block") });
+      }
       block = frame.block;
     }
-    const point = resolveRangeTextPoint(frame.range.startContainer, frame.range.startOffset);
-    const entry = point ? entries.find(entry => entry.node === point.textNode) : null;
-    const selected = entry && point
-      ? resolveActiveSentenceRanges(sentences, entry.start + point.offset, entries.at(-1)?.end ?? 0)
-      : [];
-    const nextActive = selected.map(sentence => sentences.indexOf(sentence));
-    if (!reset && nextActive.length === active.length && nextActive.every((value, index) => value === active[index])) {
-      return { targets, sentences: null };
+    if (!supported) return;
+    if (editable !== frame.editable || contentDirty || structureDirty) {
+      const projection = projectText(frame.editable);
+      if (!projection) { clearSentences(); return; }
+      const boundaries = splitSentences(projection.text);
+      if (boundaries.length > 256) { clearSentences(); return; }
+      const reusable = editable === frame.editable
+        ? mapUnchangedBoundaries(text, projection.text, sentences) : [];
+      const previous = sentences;
+      sentences = boundaries.flatMap(boundary => {
+        const range = sentenceRange(projection.entries, boundary);
+        if (!range) return [];
+        const index = reusable.findIndex(old => old?.start === boundary.start && old.end === boundary.end);
+        return [{ ...boundary, range, value: index < 0 ? 1 : previous[index].value, target: 1 }];
+      });
+      entries = projection.entries;
+      text = projection.text;
+      editable = frame.editable;
     }
-    return { targets, sentences: { ranges, active: nextActive, color, reset } };
+    const point = resolveRangeTextPoint(frame.range.startContainer, frame.range.startOffset);
+    const entry = point ? entries.find(item => item.node === point.textNode) : null;
+    if (!entry || !point) { clearSentences(); return; }
+    const active = resolveActiveSentenceRanges(sentences, entry.start + point.offset, text.length);
+    for (const paint of sentences) paint.target = active.includes(paint) ? 1 : SENTENCE_ALPHA;
   }
 
-  function highlight(name: string, indexes: number[]) {
-    const selected = indexes.map(index => ranges[index]).filter((range): range is Range => !!range);
-    if (selected.length) CSS.highlights.set(name, new Highlight(...selected));
-    else CSS.highlights.delete(name);
-  }
-
-  function register() {
-    const moving = [...(transition?.entering ?? []), ...(transition?.leaving ?? [])];
-    highlight(names[0], ranges.map((_, index) => index).filter(index => !active.includes(index) && !moving.includes(index)));
-    highlight(names[1], transition?.entering ?? []);
-    highlight(names[2], transition?.leaving ?? []);
+  function render(now: number, reducedMotion: boolean): boolean {
+    const elapsed = lastTime ? Math.min(64, now - lastTime) : 16;
+    lastTime = now;
+    let moving = false;
+    for (const [element, paint] of blocks) {
+      if (!element.isConnected) { release(element, paint); continue; }
+      paint.value = approach(paint.value, paint.target, elapsed, reducedMotion ? 0 : 80);
+      if (Math.abs(paint.value - paint.target) < 0.002) paint.value = paint.target;
+      else moving = true;
+      if (paint.value === 1 && paint.target === 1) { release(element, paint); continue; }
+      const value = paint.value.toFixed(4);
+      if (value !== paint.written || !element.classList.contains("zentype-ripple-block")) {
+        paint.written = value;
+        element.style.setProperty("--zentype-dim", value);
+        element.classList.add("zentype-ripple-block");
+      }
+    }
+    if (!supported) return moving;
+    const buckets = new Map<number, Range[]>();
+    for (const paint of sentences) {
+      paint.value = approach(paint.value, paint.target, elapsed,
+        reducedMotion ? 0 : (paint.target === 1 ? MOTION.focusEnterMs : MOTION.focusLeaveMs) / 3);
+      if (Math.abs(paint.value - paint.target) < 0.002) paint.value = paint.target;
+      else moving = true;
+      const bucket = Math.round(paint.value * 64);
+      if (bucket === 64) continue;
+      const ranges = buckets.get(bucket) ?? [];
+      ranges.push(paint.range);
+      buckets.set(bucket, ranges);
+    }
+    for (const bucket of registered.keys()) if (!buckets.has(bucket)) CSS.highlights.delete(names[bucket]);
+    for (const [bucket, ranges] of buckets) {
+      const old = registered.get(bucket);
+      if (!old || old.length !== ranges.length || ranges.some((range, i) => old[i] !== range)) {
+        CSS.highlights.set(names[bucket], new Highlight(...ranges));
+      }
+    }
+    registered = buckets;
+    if (!block && !moving) clearSentences();
+    return moving;
   }
 
   function clear() {
-    if (block === null && applied.size === 0) return;
-    for (const [element, value] of applied) {
-      if (element.style.getPropertyValue("--zentype-dim") === value) element.style.removeProperty("--zentype-dim");
-      element.classList.remove("zentype-ripple-block");
-    }
-    applied.clear();
-    if (supported) names.forEach(name => CSS.highlights.delete(name));
-    style.textContent = "";
+    for (const [element, paint] of blocks) release(element, paint);
+    clearSentences();
     block = null;
-    entries = [];
-    sentences = [];
-    ranges = [];
-    active = [];
-    transition = null;
+    lastTime = 0;
   }
-
-  function render(plan: RipplePlan, now: number, reducedMotion: boolean): boolean {
-    if (plan.targets) {
-      for (const [element, value] of applied) {
-        if (plan.targets.has(element)) continue;
-        if (element.style.getPropertyValue("--zentype-dim") === value) element.style.removeProperty("--zentype-dim");
-        element.classList.remove("zentype-ripple-block");
-      }
-      const next = new Map<HTMLElement, string>();
-      for (const [element, opacity] of plan.targets) {
-        const value = String(opacity);
-        if (applied.get(element) !== value || !element.classList.contains("zentype-ripple-block")) {
-          element.style.setProperty("--zentype-dim", value);
-          element.classList.add("zentype-ripple-block");
-        }
-        next.set(element, value);
-      }
-      applied = next;
-    }
-    if (!supported) return false;
-    if (plan.sentences) {
-      const next = plan.sentences;
-      const entering = next.active.filter(index => !active.includes(index));
-      const leaving = active.filter(index => !next.active.includes(index));
-      transition = !next.reset && !reducedMotion && (entering.length || leaving.length)
-        ? { entering, leaving, started: now } : null;
-      active = next.active;
-      ranges = next.ranges;
-      color = next.color;
-      register();
-    }
-    let enterAlpha = 1;
-    let leaveAlpha = SENTENCE_ALPHA;
-    if (transition) {
-      const elapsed = now - transition.started;
-      const enter = Math.min(1, elapsed / MOTION.focusEnterMs);
-      const leave = Math.min(1, elapsed / MOTION.focusLeaveMs);
-      enterAlpha = SENTENCE_ALPHA + (1 - SENTENCE_ALPHA) * (1 - Math.pow(1 - enter, 3));
-      leaveAlpha = 1 - (1 - SENTENCE_ALPHA) * (1 - Math.pow(1 - leave, 3));
-      if (reducedMotion || leave === 1) { transition = null; register(); }
-    }
-    const cssColor = (alpha: number) => "color-mix(in srgb, " + color + " " + (alpha * 100).toFixed(2) + "%, transparent)";
-    if (color) {
-      const css = names.map((name, index) => "::highlight(" + name + ") { color: " + cssColor([SENTENCE_ALPHA, enterAlpha, leaveAlpha][index]) + "; }").join("\n");
-      if (style.textContent !== css) style.textContent = css;
-    }
-    return transition !== null;
-  }
-
-  return { prepare, render, clear, destroy() { clear(); style.remove(); } };
+  return { prepare, render, clear, owns: (element: HTMLElement) => blocks.has(element),
+    destroy() { clear(); style.remove(); } };
 }

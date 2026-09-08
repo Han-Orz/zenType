@@ -1,3 +1,5 @@
+export const BUILD_LABEL = "v2.9.0-remake.1";
+
 export const MOTION = {
   caretTypingMs: 55,
   caretNavigationMs: 110,

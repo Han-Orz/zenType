@@ -1,41 +1,38 @@
-# zenType 2.9.0
+# zenType v2.9.0-remake.1
 
-Smooth caret, typewriter scrolling, and ripple focus for SiYuan. This is the first v2.9 rewrite, ready for hands-on validation in SiYuan.
+Smooth cursor, typewriter scrolling and ripple focus for SiYuan. This is a new baseline informed by v2.8.1's writing experience; real SiYuan acceptance is still pending.
 
 ## Behavior
 
-- Short caret movements ease into place; large jumps snap. The caret breathes after inactivity.
-- Typewriter scrolling uses a comfort band after a 400ms typing pause. Visibility takes priority at viewport edges.
-- Ripple dims neighboring blocks and list branches, with sentence focus inside the current block.
-- Pointer interaction, manual scrolling, vertical navigation, blur, and editor switches end automatic following.
-- IME composition uses the native caret and pauses scrolling.
-- Invalid geometry, selections, read-only content, titles, databases, embedded editors, and popovers retain native behavior.
-- Reduced-motion preferences disable animation.
+The blue cursor continues from its displayed position, including during IME composition and ordinary editable changes. Scroll displacement transports the cursor without restarting its local motion. Clipping fades and idle breathing have separate opacity layers.
 
-Use the topbar button or Ctrl+Alt+Z to toggle typewriter and ripple together. Individual commands are available in the command palette. Both features are enabled by default and activate when writing in the document body.
+A missing caret rectangle gets a bounded 160ms recovery window; invalid ownership or exhausted recovery returns native behavior. IME uses the selection focus endpoint and pauses plugin comfort scrolling.
 
-## Build and try
+Typewriter motion starts from actual scroll positions, supports reverse retargeting, and yields to browsing and unexpected host scrolling. Ripple retains current brightness across navigation and unambiguous local text edits. New DOM bindings do not inherit historical animation identities.
 
-With dependencies already installed:
+The topbar button or Ctrl+Alt+Z toggles typewriter and ripple together. The smooth cursor remains independently enabled. Reduced motion disables movement and breathing.
+
+## Build and install
 
 ```sh
 npm run typecheck
+npm test
 npm run build:dev
 npm run build
 ```
 
-Development files are in `dev/`, production files in `dist/`, and the installable bundle is `package.zip`. Extract the bundle into your SiYuan workspace's `data/plugins/zenType/` directory and reload the plugin.
+Development output: `dev/`. Production output: `dist/`. Installable archive: `package.zip`.
 
-An existing development link can keep using `dev/`. To create one, run `node scripts/make_dev_link.js --workspace <workspace-path>`; it refuses to overwrite an existing plugin directory. `npm run dev` watches source changes. There is no DebugKit or debug bridge.
+Disable zenType, back up the existing installation outside the plugins directory, extract the archive into your SiYuan workspace's `data/plugins/zenType/`, then enable it. Do not run two copies. The topbar tooltip identifies `v2.9.0-remake.1`; the numeric plugin manifest version is `2.9.0`.
 
-Try IME composition, rapid navigation, repeated Enter/Backspace, list indentation, manual scrolling, split editors, and disabling the plugin. Verify native caret behavior returns when appropriate.
+Existing development links can use `dev/`. To create one, use `node scripts/make_dev_link.js --workspace <workspace-path>`; it refuses to overwrite an existing installation.
 
-## Architecture
+## Boundaries
 
-One input entry point, one frame scheduler, and three direct effects. Geometry reads precede visual writes. No structural FLIP, settle transactions, animation ownership handoffs, or persistent sentence identities.
+Host research baseline: SiYuan v3.8.3. Titles, databases and query embeds stay native. Split and popup document editors require matching official active editor, focus and Selection ownership.
 
-Text and structure edits settle to the current state. Navigation through stable text has at most one entering/leaving sentence transition.
+No structural FLIP, transaction settling engine, or cross-replacement visual handoff. Sentence focus requires CSS Highlights, relative colors and Intl.Segmenter. It falls back to block focus above 32,768 UTF-16 units, 2,048 text nodes or 256 sentences per editable. Block focus visits up to 48 content siblings on each side at each ancestor level.
 
-Historical tests are unchanged and were not run or adapted for this rewrite. Current validation consists of type checking, builds, and hands-on SiYuan feedback.
+Automated checks cover motion interruption, scroll boundaries, local sentence boundaries and cursor presentation. They do not establish real IME, theme or host DOM replacement behavior. Old architecture-specific tests are available in v2.8.1 history.
 
-See [the implementation spec](docs/DESIGN.md). Motion settings live in `src/config.ts`.
+See [the design document](docs/DESIGN.md) and [Chinese installation notes](README_zh-CN.md). Motion parameters are in `src/config.ts`.

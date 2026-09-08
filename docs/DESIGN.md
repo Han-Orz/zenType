@@ -1,47 +1,63 @@
-# zenType 2.9 implementation
+# v2.9.0-remake.1 baseline
 
 ## Ownership
 
-- `index.ts`: plugin commands, persisted feature switches, host lifecycle events, stylesheet.
-- `session.ts`: DOM input events, active writing editor, IME/pointer suspension, dirty flags, observers, one rAF handle.
-- `utils/editorScope.ts`: validate the active editable body and read one frame of caret/viewport geometry. Titles, popovers, databases and embedded editors stay native.
-- `modules/cursor.ts`: one custom caret, native-caret ownership class, one idle breathing timer.
-- `modules/typewriter.ts`: one bounded scroll endpoint and an exponential approach. No events, timers or rAF.
-- `modules/ripple.ts`: collect siblings along the focus ancestry, apply private dim styles, cache the current block's text nodes/sentences, animate one entering/leaving batch.
-- `modules/ripple/sentenceModel.ts`: Intl.Segmenter and positional boundary semantics. Missing platform support disables sentence focus.
+One WritingSession owns document events, an active host binding, observers, one rAF and one idle wake timer. Cursor, Typewriter and Ripple import no other effect. Their numerical motion state survives target changes; document identities do not become animation identities.
 
-No feature imports another feature. No shared event bus, structural transactions, DOM identity model, or animation framework.
+The host adapter validates official active Protyle, DOM focus, Selection endpoints and editability. Frame data can carry a valid editor with missing caret geometry. A composition range uses its focus endpoint, never rewrites the browser Selection, and remains distinct from an ordinary selection.
+
+Session intent is separate from geometry. Input establishes writing intent; browsing cancels automatic scrolling. Composition belongs to an editor. Editor switches discard old effect bindings. Lifecycle and DOM events invalidate observations, never certify transaction completion.
 
 ## Frame
 
-Events mark geometry/text/structure dirty and request the same frame. Ordinary input performs no layout measurement or synchronous Ripple application.
+Events mark dirty fields and enqueue one frame. Mutation callbacks inspect affected records without geometry reads; plugin presentation attributes are not observed. Text dirtiness is limited to the current editable. Structure changes invalidate the local text projection and ancestry.
 
-The frame validates Selection, reads caret and viewport geometry, prepares changed Ripple targets/ranges, and calculates the next scroll position. It then removes presentation attributes copied into new host nodes, writes scroll position, places the custom caret with the same scroll delta, and applies Ripple.
+A frame resolves host facts when dirty, moving the viewport, or within a bounded recovery observation window. Cursor-only interpolation and Ripple-only fades reuse the last valid geometry. Geometry and text projection precede scroll/overlay/highlight writes, except presentation cleanup which removes cloned plugin attributes before sampling.
 
-Sentence-only animation advances colors without re-reading geometry. Scrolling reads current geometry. Idle has no JavaScript rAF loop.
+The actual scrollTop after a write is authoritative. The frame transports measured caret geometry by that actual delta. Cursor separately transports its current and target positions by changes in the scroll container origin, outer scroll and shared nested scrollers. Only the remaining local difference is interpolated.
 
-The MutationObserver watches the current editor's childList, characterData and contenteditable changes. A separate root observer invalidates theme colors. One ResizeObserver watches the editor and scroll viewport. Plugin CSS attributes are not observed.
+After motion settles there is no continuous JavaScript loop. A single delayed wake starts CSS breathing. Resize, fonts, viewport events and theme changes invalidate observations.
 
-## Invariants
+## Effects
 
-1. Never change document text, Selection or undo history.
-2. Hide native caret only while a valid custom caret is visible. Invalid geometry restores native behavior.
-3. IME composition pauses auto-scroll and uses native caret. Commit resumes writing.
-4. Pointer activity, manual scrolling, vertical navigation, blur and editor switches stop automatic following.
-5. Auto-scroll clamps to document bounds. Comfort centering may wait; viewport-edge visibility cannot.
-6. Focus ancestry remains undimmed. Only direct content/markers and sibling branch roots receive dim styles.
-7. Structural edits have no animation identity. Copied private attributes are discarded from added subtrees before applying current styles.
-8. Unload releases events, observers, frames, timers, private attributes and Highlight registrations.
-9. Reduced motion keeps functional results without movement or breathing animation.
+### Cursor
 
-## Motion
+Maintains current/target position and height, last valid sample, current native-caret owner and motion time. A new editable within the same editor transfers ownership without resetting motion. Exponential approach has no old start/end timeline and supports reversal.
 
-Configuration is in `src/config.ts`: caret 55ms while typing / 110ms for navigation, breathing after 1100ms, scrolling response 65ms, typing pause 400ms, sentence acquisition 180ms / release 280ms. Block opacity uses a 240ms CSS transition.
+Missing geometry retains the previous presentation for at most 160ms, retries, then releases ownership. This is a recovery budget, not a claimed SiYuan settling duration. Ordinary IME does not enter this fallback merely because the Selection is noncollapsed.
 
-Large caret jumps and viewport tracking snap. Short movements ease out. Scroll retargets use current position and the newest bounded endpoint. Text/DOM edits settle sentence presentation immediately; stable-text navigation replaces the previous entering/leaving batch. Shared sentence boundaries keep both adjacent sentences active.
+The overlay handles viewport clipping/edge fade; its inner ink handles breathing. Neither changes the editor layout or Selection. Out-of-view ownership does not trigger scrolling.
 
-## Validation
+### Typewriter
 
-The initial rewrite uses type checking and development/production builds. Existing tests are unchanged and deliberately not run or migrated. Build success is not evidence of real input latency or IME behavior. The next acceptance step is hands-on SiYuan use: Chinese IME, long paragraphs, nested lists, fast navigation, repeated structural editing, wheel interruption, split-editor switching, and unload/reload.
+Uses a comfort band, hysteresis anchor, target, previous frame time and last actual write. New targets start from real scrollTop. An unexpected host scroll drops the old target. Manual browsing explicitly disables following until the next edit.
 
-No DebugKit hooks or network collectors. Earlier architecture notes and changelog entries describe older versions; v2.9 follows this document and current source.
+Comfort adjustments wait for a short typing pause; proximity to an edge starts following early. Already clipped carets get immediate visibility correction. All writes clamp to current bounds. Composition pauses plugin scrolling while native scrolling remains available.
+
+### Ripple
+
+Block presentation is a map of current/target alpha and owned private style values. Focus ancestors are neutral; sibling branch roots dim without nested opacity multiplication. Retired bindings return toward 1 before releasing. Detached nodes are released immediately.
+
+Sentence projection excludes noneditable subtrees and nested block nodes. Intl.Segmenter provides UTF-16 boundaries. Current alphas are reused only for identical mapped boundaries in the same editable, using the unchanged prefix/suffix around a local edit. There is no block-ID recovery or ordinal identity system.
+
+CSS Highlight registrations are grouped into 65 alpha buckets with fixed rules. Relative currentColor preserves underlying text colors. Only changed bucket memberships are registered; there is no per-frame stylesheet regeneration. New bindings start neutral, while surviving bindings retain current alpha.
+
+Work limits are explicit: 32,768 UTF-16 units, 2,048 text nodes, 256 sentences; exceeding them keeps block focus. Ancestry targets are bounded to 48 content siblings per direction per level.
+
+## Lifecycle and failure
+
+Blur, external focus, ordinary selection and destruction release presentation. A null focusout target merely invalidates observations because node replacement can remove focus targets. Copied plugin attributes on added nodes are cleaned without adopting old motion identities; still-owned reparented nodes retain their local values.
+
+Unload releases listeners, observers, frame/timer, private styles, highlights and cursor. Unexpected frame exceptions restore native presentation and stop the session until valid user activity or lifecycle refresh. No document mutation API, selection repair, event cancellation, tracked ranges, FLIP or structural transaction coordinator is used.
+
+## Evidence and limits
+
+Host snapshot: [SiYuan 8641553a](https://github.com/siyuan-note/siyuan/tree/8641553a1f07374001902d3ce773285db1292b2d).
+
+- [Active editor resolution](https://github.com/siyuan-note/siyuan/blob/8641553a1f07374001902d3ce773285db1292b2d/app/src/plugin/API.ts#L238) also consults Selection; DOM focus still needs validation.
+- [Host caret scrolling](https://github.com/siyuan-note/siyuan/blob/8641553a1f07374001902d3ce773285db1292b2d/app/src/protyle/wysiwyg/caretScroll.ts#L55) can write scrollTop in another rAF.
+- [Content replacement](https://github.com/siyuan-note/siyuan/blob/8641553a1f07374001902d3ce773285db1292b2d/app/src/protyle/util/onGet.ts#L317) can replace nodes and restore scrollTop.
+- [Composition completion](https://github.com/siyuan-note/siyuan/blob/8641553a1f07374001902d3ce773285db1292b2d/app/src/protyle/wysiwyg/index.ts#L4007) includes asynchronous handling.
+- [Highlight currentColor](https://drafts.csswg.org/css-pseudo-4/#highlight-text) derives from underlying highlight/text colors.
+
+Pure motion and presentation checks are not host integration tests. Actual IME variants, empty-block geometry, bidi/wrapped boundaries, nested clipping, popup stacking, replacement timing and theme interference still require SiYuan feedback. The baseline keeps those uncertainties visible instead of building speculative compatibility machinery.

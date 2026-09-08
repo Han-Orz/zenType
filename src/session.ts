@@ -19,252 +19,255 @@ export function createWritingSession(initial: Features): WritingSession {
   const ripple = createRipple();
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
   const listeners = new AbortController();
-  let pendingFrame: number | null = null;
-  let pauseTimer: ReturnType<typeof setTimeout> | null = null;
-  let inputEditor: HTMLElement | null = null;
+  let pending: number | null = null;
+  let wake: ReturnType<typeof setTimeout> | null = null;
+  let frame: EditorFrame | null = null;
   let observedEditor: HTMLElement | null = null;
   let observedScroll: HTMLElement | null = null;
-  let composing = false;
+  let writingEditor: HTMLElement | null = null;
+  let composingEditor: HTMLElement | null = null;
   let pointerDown = false;
+  let blocked = false;
   let disposed = false;
   let geometryDirty = true;
   let contentDirty = true;
   let structureDirty = true;
-  let viewportMoved = true;
   let lastInput = -Infinity;
-  let caretSuspended = false;
-  const addedRoots = new Set<HTMLElement>();
+  let retryUntil = 0;
+  const added = new Set<HTMLElement>();
 
   function queue() {
-    if (!disposed && pendingFrame === null) pendingFrame = requestAnimationFrame(update);
+    if (!disposed && pending === null) pending = requestAnimationFrame(update);
   }
-
   function refresh() {
-    geometryDirty = true;
-    contentDirty = true;
-    structureDirty = true;
+    geometryDirty = contentDirty = structureDirty = true;
+    retryUntil = performance.now() + 160;
     queue();
   }
-
-  function cancelPause() {
-    if (pauseTimer !== null) clearTimeout(pauseTimer);
-    pauseTimer = null;
+  function clearWake() {
+    if (wake !== null) clearTimeout(wake);
+    wake = null;
   }
-
-  function suspend() {
-    caretSuspended = true;
-    inputEditor = null;
-    cancelPause();
-    typewriter.cancel();
-    ripple.clear();
-    cursor.hide();
-    viewportMoved = true;
-    geometryDirty = true;
-    queue();
+  function wakeAfter(delay: number) {
+    clearWake();
+    wake = setTimeout(() => { wake = null; geometryDirty = true; queue(); }, delay);
   }
-
-  function rememberAddedNodes(records: MutationRecord[]) {
+  function remember(records: MutationRecord[]) {
     for (const record of records) {
-      for (const node of record.addedNodes) {
-        if (node instanceof HTMLElement) addedRoots.add(node);
+      if (record.type === "childList") {
+        structureDirty = true;
+        for (const node of record.addedNodes) if (node instanceof HTMLElement) added.add(node);
       }
+      if (!frame?.editable || frame.editable.contains(record.target) ||
+          (record.target instanceof Element && record.target.contains(frame.editable))) contentDirty = true;
     }
+    if (records.length) geometryDirty = true;
   }
-
-  const mutation = new MutationObserver(records => {
-    structureDirty = structureDirty || records.some(record => record.type === "childList");
-    rememberAddedNodes(records);
-    contentDirty = records.some(record => record.type === "childList" || record.type === "characterData") || contentDirty;
-    geometryDirty = true;
-    queue();
-  });
-  const resize = new ResizeObserver(() => {
-    geometryDirty = true;
-    viewportMoved = true;
-    queue();
-  });
+  const mutation = new MutationObserver(records => { remember(records); queue(); });
+  const resize = new ResizeObserver(() => { geometryDirty = true; queue(); });
   const theme = new MutationObserver(refresh);
   theme.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme-mode", "data-light-theme", "data-dark-theme"] });
 
-  function cleanAddedNodes() {
-    rememberAddedNodes(mutation.takeRecords());
-    // Host replacements can clone our presentation attributes. Discard them;
-    // the new DOM receives the current state, never an old animation identity.
-    const selector = ".zentype-ripple-block, .zentype-custom-caret-active";
-    for (const root of addedRoots) {
-      const elements = [root, ...root.querySelectorAll<HTMLElement>(selector)];
-      for (const element of elements) {
-        element.classList.remove("zentype-ripple-block", "zentype-custom-caret-active");
-        element.style.removeProperty("--zentype-dim");
+  function cleanClones() {
+    remember(mutation.takeRecords());
+    for (const root of added) {
+      if (!root.isConnected) continue;
+      for (const element of [root, ...root.querySelectorAll<HTMLElement>(".zentype-ripple-block, .zentype-custom-caret-active")]) {
+        if (!ripple.owns(element)) {
+          element.classList.remove("zentype-ripple-block");
+          element.style.removeProperty("--zentype-dim");
+        }
+        if (element !== frame?.editable) element.classList.remove("zentype-custom-caret-active");
       }
     }
-    addedRoots.clear();
+    added.clear();
   }
-
-  function observe(frame: EditorFrame | null) {
-    if (observedEditor === frame?.editor && observedScroll === frame?.scroll) return;
-    rememberAddedNodes(mutation.takeRecords());
+  function observe(next: EditorFrame | null) {
+    if (observedEditor === next?.editor && observedScroll === next?.scroll) return;
+    remember(mutation.takeRecords());
     mutation.disconnect();
     resize.disconnect();
-    observedEditor = frame?.editor ?? null;
-    observedScroll = frame?.scroll ?? null;
-    if (frame) {
-      mutation.observe(frame.editor, { subtree: true, childList: true, characterData: true,
-        attributes: true, attributeFilter: ["contenteditable"] });
-      resize.observe(frame.editor);
-      resize.observe(frame.scroll);
+    observedEditor = next?.editor ?? null;
+    observedScroll = next?.scroll ?? null;
+    if (next) {
+      mutation.observe(next.editor, { subtree: true, childList: true, characterData: true,
+        attributes: true, attributeFilter: ["contenteditable", "data-readonly"] });
+      resize.observe(next.editor);
+      resize.observe(next.scroll);
     }
-    contentDirty = true;
-    structureDirty = true;
-    viewportMoved = true;
+    contentDirty = structureDirty = true;
+  }
+  function stopWriting() {
+    writingEditor = null;
+    typewriter.cancel();
+    clearWake();
+  }
+  function suspend() {
+    blocked = true;
+    composingEditor = null;
+    stopWriting();
+    cursor.hide();
+    ripple.clear();
+    frame = null;
+    observe(null);
   }
 
   function update(now: number) {
-    pendingFrame = null;
+    pending = null;
     if (disposed) return;
-    if (composing || pointerDown || document.hidden || caretSuspended) {
-      cleanAddedNodes();
-      cursor.hide();
-      typewriter.cancel();
-      ripple.clear();
-      return;
-    }
     try {
-      if (!geometryDirty && !typewriter.isMoving()) {
-        if (ripple.render({ targets: null, sentences: null }, now, reducedMotion.matches)) queue();
-        return;
+      cleanClones();
+      if (blocked || document.hidden) return;
+      let sampled = false;
+      if (geometryDirty || typewriter.isMoving() || now < retryUntil) {
+        sampled = true;
+        const next = readEditorFrame(reducedMotion.matches, composingEditor, frame?.editor);
+        geometryDirty = false;
+        if (!next) {
+          cursor.hide();
+          ripple.clear();
+          typewriter.cancel();
+          frame = null;
+          observe(null);
+          return;
+        }
+        if (frame && frame.editor !== next.editor) {
+          cursor.hide();
+          ripple.clear();
+          typewriter.cancel();
+          if (writingEditor !== next.editor) writingEditor = null;
+          if (composingEditor !== next.editor) composingEditor = null;
+        }
+        frame = next;
+        observe(frame);
       }
-      const frame = readEditorFrame(reducedMotion.matches);
-      geometryDirty = false;
-      if (!frame) {
-        cleanAddedNodes();
+      if (!frame) return;
+      if (frame.selection === "range") {
         cursor.hide();
-        typewriter.cancel();
+        stopWriting();
         ripple.clear();
         return;
       }
-      observe(frame);
-      const active = inputEditor === frame.editor;
-      const plan = active && features.ripple ? ripple.prepare(frame, contentDirty, structureDirty) : null;
-      const nextScroll = typewriter.next(frame, now, active && features.typewriter, lastInput, !viewportMoved);
-      contentDirty = false;
-      structureDirty = false;
-      // All geometry and sentence color reads precede these visual writes.
-      cleanAddedNodes();
-      if (nextScroll !== frame.scrollTop) frame.scroll.scrollTop = nextScroll;
-      cursor.render(frame, nextScroll - frame.scrollTop, viewportMoved || nextScroll !== frame.scrollTop, now - lastInput < MOTION.typingPauseMs);
-      let animating = false;
-      if (plan) animating = ripple.render(plan, now, frame.reducedMotion);
-      else ripple.clear();
-      viewportMoved = false;
-      if (typewriter.isMoving() || animating) queue();
-    } catch (error) {
-      cursor.hide();
-      typewriter.cancel();
-      ripple.clear();
-      console.error("[zenType] frame failed; native caret restored", error);
-    }
-  }
-
-  function activate(editable: HTMLElement | null) {
-    if (!editable) return;
-    caretSuspended = false;
-    inputEditor = editable.closest<HTMLElement>(".protyle-wysiwyg");
-    lastInput = performance.now();
-    cancelPause();
-    pauseTimer = setTimeout(() => {
-      pauseTimer = null;
-      geometryDirty = true;
-      queue();
-    }, MOTION.typingPauseMs + 1);
-  }
-
-  function handle(event: Event) {
-    const editable = ["input", "keydown", "focusin", "pointerup", "compositionstart", "compositionend"].includes(event.type)
-      ? editableAt(event.target) : null;
-    if (editable) {
-      caretSuspended = false;
-    }
-    switch (event.type) {
-      case "input": {
-        const input = event as InputEvent;
-        if (!editable) return;
-        if (!input.isComposing && !composing && input.inputType !== "insertFromPaste" && input.inputType !== "insertFromDrop") activate(editable);
-        contentDirty = true;
-        break;
+      const writing = writingEditor === frame.editor;
+      const composing = composingEditor === frame.editor;
+      if (features.ripple && (sampled || contentDirty || structureDirty)) ripple.prepare(frame, contentDirty, structureDirty, writing);
+      contentDirty = structureDirty = false;
+      const requested = typewriter.next(frame, now, features.typewriter && writing && !composing && !pointerDown, lastInput);
+      if (requested !== frame.scrollTop) frame.scroll.scrollTop = requested;
+      const actual = frame.scroll.scrollTop;
+      typewriter.written(actual);
+      const delta = actual - frame.scrollTop;
+      if (frame.caret) frame.caret = { ...frame.caret, y: frame.caret.y - delta };
+      frame.scrollTop = actual;
+      const cursorMoving = cursor.render(frame, now, composing || now - lastInput < MOTION.typingPauseMs);
+      const rippleMoving = features.ripple && ripple.render(now, reducedMotion.matches);
+      if (cursorMoving && !frame.caret) geometryDirty = true;
+      if (cursorMoving || typewriter.isMoving() || rippleMoving || now < retryUntil) queue();
+      else if (wake === null && !reducedMotion.matches && !composing) {
+        // One idle wake starts CSS breathing; no perpetual JavaScript idle loop.
+        const delay = cursor.wakeDelay(now);
+        if (delay !== null) wakeAfter(delay);
       }
+    } catch (error) {
+      suspend();
+      console.error("[zenType] presentation released after frame failure", error);
+    }
+  }
+
+  function activate(editable: HTMLElement) {
+    writingEditor = editable.closest<HTMLElement>(".protyle-wysiwyg");
+    lastInput = performance.now();
+    wakeAfter(MOTION.typingPauseMs + 1);
+  }
+  function handle(event: Event) {
+    const editable = editableAt(event.target);
+    switch (event.type) {
+      case "focusin":
+        if (editable) { blocked = false; retryUntil = performance.now() + 160; }
+        break;
+      case "focusout":
+        if ((event as FocusEvent).relatedTarget && !editableAt((event as FocusEvent).relatedTarget)) { suspend(); return; }
+        retryUntil = performance.now() + 160;
+        break;
+      case "beforeinput":
+      case "input":
+        if (!editable) return;
+        blocked = false;
+        activate(editable);
+        contentDirty = true;
+        if ((event as InputEvent).isComposing) composingEditor = editable.closest<HTMLElement>(".protyle-wysiwyg");
+        break;
       case "keydown": {
         const key = event as KeyboardEvent;
-        if (!editable || key.isComposing || key.defaultPrevented) return;
-        if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Escape"].includes(key.key)) suspend();
-        if (key.key !== "Escape") caretSuspended = false;
-        if (!key.ctrlKey && !key.metaKey && !key.altKey && ["Enter", "Backspace", "Delete"].includes(key.key)) activate(editable);
+        if (!editable || key.defaultPrevented) return;
+        blocked = false;
+        if (key.isComposing) break;
+        if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", "Escape"].includes(key.key)) stopWriting();
+        if (!key.ctrlKey && !key.metaKey && !key.altKey && ["Enter", "Backspace", "Delete", "Tab"].includes(key.key)) {
+          activate(editable);
+          retryUntil = performance.now() + 160;
+        }
         break;
       }
       case "compositionstart":
         if (!editable) return;
-        composing = true;
-        cancelPause();
-        typewriter.cancel();
-        cursor.hide();
-        ripple.clear();
-        return;
-      case "compositionend":
-        composing = false;
+        blocked = false;
+        composingEditor = editable.closest<HTMLElement>(".protyle-wysiwyg");
         activate(editable);
+        typewriter.cancel();
+        break;
+      case "compositionend":
+        composingEditor = null;
+        if (editable) { blocked = false; activate(editable); }
         contentDirty = true;
+        retryUntil = performance.now() + 160;
         break;
       case "pointerdown":
         pointerDown = true;
-        suspend();
-        return;
+        stopWriting();
+        break;
       case "pointerup":
       case "pointercancel":
         pointerDown = false;
+        if (editable) blocked = false;
+        retryUntil = performance.now() + 160;
         break;
       case "wheel":
       case "touchmove":
-        suspend();
-        return;
+        stopWriting();
+        break;
       case "scroll":
         if (event.target instanceof Element && observedScroll &&
             event.target !== observedScroll && !observedScroll.contains(event.target) && !event.target.contains(observedScroll)) return;
-        viewportMoved = true;
-        if (document.hasFocus() && !pointerDown) caretSuspended = false;
         break;
       case "blur":
-      case "visibilitychange":
-        composing = false;
         pointerDown = false;
         suspend();
         return;
-      case "focusout":
-        if (!editableAt((event as FocusEvent).relatedTarget)) {
-          composing = false;
-          suspend();
-          return;
-        }
-        break;
-      case "resize":
-        viewportMoved = true;
+      case "visibilitychange":
+        if (document.hidden) { pointerDown = false; suspend(); return; }
+        blocked = false;
         break;
     }
     geometryDirty = true;
     queue();
   }
 
-  for (const name of ["input", "keydown", "compositionstart", "compositionend", "selectionchange", "pointerdown", "pointerup", "pointercancel", "wheel", "touchmove", "scroll", "focusin", "focusout", "visibilitychange"]) {
+  for (const name of ["beforeinput", "input", "keydown", "compositionstart", "compositionend", "selectionchange",
+    "pointerdown", "pointerup", "pointercancel", "wheel", "touchmove", "scroll", "focusin", "focusout", "visibilitychange"]) {
     document.addEventListener(name, handle, { capture: true, passive: true, signal: listeners.signal });
   }
   window.addEventListener("blur", handle, { signal: listeners.signal });
-  window.addEventListener("resize", handle, { passive: true, signal: listeners.signal });
-  window.visualViewport?.addEventListener("resize", handle, { passive: true, signal: listeners.signal });
-  window.visualViewport?.addEventListener("scroll", handle, { passive: true, signal: listeners.signal });
+  window.addEventListener("focus", () => { blocked = false; refresh(); }, { signal: listeners.signal });
+  window.addEventListener("resize", refresh, { passive: true, signal: listeners.signal });
+  window.visualViewport?.addEventListener("resize", refresh, { passive: true, signal: listeners.signal });
+  window.visualViewport?.addEventListener("scroll", refresh, { passive: true, signal: listeners.signal });
+  document.fonts?.addEventListener("loadingdone", refresh, { signal: listeners.signal });
   reducedMotion.addEventListener("change", refresh, { signal: listeners.signal });
   queue();
 
   return {
-    refresh, suspend,
+    refresh() { blocked = false; refresh(); }, suspend,
     configure(next) {
       features = { ...next };
       if (!features.typewriter) typewriter.cancel();
@@ -274,13 +277,12 @@ export function createWritingSession(initial: Features): WritingSession {
     destroy() {
       disposed = true;
       listeners.abort();
-      cleanAddedNodes();
+      cleanClones();
       mutation.disconnect();
       resize.disconnect();
       theme.disconnect();
-      cancelPause();
-      if (pendingFrame !== null) cancelAnimationFrame(pendingFrame);
-      pendingFrame = null;
+      clearWake();
+      if (pending !== null) cancelAnimationFrame(pending);
       typewriter.cancel();
       ripple.destroy();
       cursor.destroy();

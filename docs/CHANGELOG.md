@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.9.0-remake.1 (2026-09-08) — Real-host baseline
+
+- Shared host observation and one frame scheduler; effects retain independent numerical presentation state.
+- Continuous custom cursor during IME, local motion combined with actual scroll displacement, bounded geometry recovery, edge fade and breathing.
+- Retargetable comfort scrolling and per-sentence current-alpha transitions without cross-replacement animation identities.
+- Bounded editable text projection and neighborhood work; relative-color Highlights preserve inline colors.
+- Removed obsolete tests tied to deleted v2.8 internals; added focused motion, scrolling, sentence-boundary and cursor ownership checks.
+- Real SiYuan acceptance is pending. See README for installation and baseline limitations.
+
 ## v2.8.1 (2026-09-08) — Sentence Transition + Structural Editing Stability
 
 本版本完成句级视觉过渡、结构化编辑和调试诊断链路的最终收敛，并在实测收尾阶段修复句级动画连续性与反向滚动问题。首次发布代号由 2.8.0 定为 2.8.1。
