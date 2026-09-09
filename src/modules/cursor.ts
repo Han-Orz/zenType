@@ -23,8 +23,6 @@ export function createCursor(debug?: DebugRecorder) {
   let selecting = false;
   let settleUntil = 0;
   let stableFrames = 0;
-  let settleMode: "switch" | "structure" | null = null;
-  let structureReady = true;
   let brighten: Animation | null = null;
   let transport = { top: 0, left: 0 };
   let nestedScroll: EditorFrame["nestedScroll"] = [];
@@ -48,10 +46,9 @@ export function createCursor(debug?: DebugRecorder) {
     });
   }
 
-  function breathe(enabled: boolean, reducedMotion: boolean) {
+  function breathe(enabled: boolean, reducedMotion: boolean, opacity: string) {
     const active = ink.classList.contains("zentype-breathing");
     if (enabled === active) return;
-    const opacity = active ? getComputedStyle(ink).opacity : "1";
     brighten?.cancel();
     brighten = null;
     ink.classList.toggle("zentype-breathing", enabled);
@@ -72,8 +69,6 @@ export function createCursor(debug?: DebugRecorder) {
   function clearSettling() {
     settleUntil = 0;
     stableFrames = 0;
-    settleMode = null;
-    structureReady = true;
   }
 
   function hide(preserveOwner = false) {
@@ -100,10 +95,12 @@ export function createCursor(debug?: DebugRecorder) {
       editor = frame.editor;
       debugState("editor-change", frame, { now });
     }
+    // Sample ink before native-caret class writes can invalidate styles. Only a
+    // breathing interruption or geometry release needs computed brightness.
+    const inkOpacity = ink.classList.contains("zentype-breathing") || !frame.caret && current && brighten
+      ? getComputedStyle(ink).opacity : ink.style.opacity;
     const ownerChanged = bindOwner(frame.editable);
-    // Transport the last displayed cursor before checking a new geometry
-    // sample. Structural settling keeps the old presentation in place, but a
-    // host scroll during that short window must still move it with the page.
+    // Transport the last displayed cursor before approaching the authoritative target.
     const offset = { top: frame.origin.y - frame.scrollTop, left: frame.origin.x - frame.scrollLeft };
     if (current && target) {
       let dx = offset.left - transport.left;
@@ -125,18 +122,15 @@ export function createCursor(debug?: DebugRecorder) {
       stableFrames = next ? target && Math.hypot(next.x - target.x, next.y - target.y) <= 0.15 &&
         Math.abs(next.height - target.height) <= 0.15 ? stableFrames + 1 : 1 : 0;
       target = next;
-      const threshold = settleMode === "structure" ? MOTION.structuralStableFrames : MOTION.switchStableFrames;
       const settled = frame.reducedMotion || now >= settleUntil ||
-        (settleMode !== "structure" || structureReady) && stableFrames >= threshold;
+        stableFrames >= MOTION.switchStableFrames;
       if (!settled) {
-        debugState(settleMode === "structure" ? "structure-settling" : "switch-settling", frame, { now });
+        debugState("switch-settling", frame, { now });
         return true;
       }
-      const mode = settleMode;
-      debugState(mode === "structure" ? "structure-settled" : "switch-settled", frame,
-        { now, deadline: now >= settleUntil, structureReady });
+      debugState("switch-settled", frame, { now, deadline: now >= settleUntil });
       clearSettling();
-      if (mode === "switch" && target && !frame.reducedMotion) {
+      if (target && !frame.reducedMotion) {
         brighten = ink.animate([{ opacity: 0 }, { opacity: 1 }], {
           duration: MOTION.caretBrightenMs, easing: "ease-in-out",
         });
@@ -149,7 +143,7 @@ export function createCursor(debug?: DebugRecorder) {
     } else if (frame.caretless) {
       // The caret is on a block with no text position (separator, image). Fade at
       // once rather than freezing the overlay on the previous line for a budget.
-      return fadeOut(now, frame.reducedMotion, "caretless");
+      return fadeOut(now, frame.reducedMotion, "caretless", inkOpacity);
     } else if (!current && alpha === 0) {
       hide(true);
       return false;
@@ -158,7 +152,7 @@ export function createCursor(debug?: DebugRecorder) {
       // boundary with no rectangle). Fading out beats freezing the overlay at a
       // position that is no longer the caret: the user asked for a smooth
       // disappearance rather than a misplaced cursor.
-      return fadeOut(now, frame.reducedMotion, "missing-geometry");
+      return fadeOut(now, frame.reducedMotion, "missing-geometry", inkOpacity);
     }
     if (!target) {
       debugState("render-without-target", frame, { now });
@@ -188,7 +182,7 @@ export function createCursor(debug?: DebugRecorder) {
     const edge = Math.min(current.y + current.height - view.top, view.bottom - current.y);
     const visible = current.x >= view.left && current.x <= view.right && edge > 0;
     const breathing = !frame.reducedMotion && !typing && !interacting && !moving && now - lastMotion >= MOTION.breatheDelayMs;
-    breathe(breathing, frame.reducedMotion);
+    breathe(breathing, frame.reducedMotion, inkOpacity);
     alpha = approach(alpha, 1, elapsed, frame.reducedMotion ? 0 : MOTION.caretFadeInMs / 3);
     if (alpha > 0.995) alpha = 1;
     element.style.opacity = String(visible ? alpha * clamp(edge / Math.max(MOTION.edgeFadeMinHeightPx, current.height), 0, 1) : 0);
@@ -212,12 +206,12 @@ export function createCursor(debug?: DebugRecorder) {
   }
 
   /** Fade only the overlay; valid editor bindings keep native caret suppressed. */
-  function fadeOut(now: number, reducedMotion: boolean, reason = "release"): boolean {
+  function fadeOut(now: number, reducedMotion: boolean, reason = "release", sampledOpacity?: string): boolean {
     if (current) {
       // Freeze displayed ink once so geometry loss cannot brighten a breathing
       // cursor before fading it. Subsequent fade frames do not read styles.
-      const opacity = brighten || ink.classList.contains("zentype-breathing")
-        ? getComputedStyle(ink).opacity : ink.style.opacity;
+      const opacity = sampledOpacity ?? (brighten || ink.classList.contains("zentype-breathing")
+        ? getComputedStyle(ink).opacity : ink.style.opacity);
       brighten?.cancel();
       brighten = null;
       ink.classList.remove("zentype-breathing");
@@ -235,6 +229,8 @@ export function createCursor(debug?: DebugRecorder) {
   }
 
   return { render, hide,
+    /** Binding may change while Session withholds a new visual target. */
+    retainOwner(editable: HTMLElement | null) { bindOwner(editable); lastTime = 0; },
     /**
      * Release presentation without a selection involved (no measurable caret, no
      * valid host frame). Fading keeps the transition smooth instead of the cursor
@@ -242,24 +238,26 @@ export function createCursor(debug?: DebugRecorder) {
      */
     release(now: number, reducedMotion: boolean) {
       clearSettling();
-      bindOwner(null);
       if (element.hidden) { hide(); return false; }
-      return fadeOut(now, reducedMotion, "release");
+      const fading = fadeOut(now, reducedMotion, "release");
+      bindOwner(null);
+      return fading;
     },
     yieldSelection(now: number, reducedMotion: boolean, editable: HTMLElement | null = owner) {
       clearSettling();
-      bindOwner(editable);
       if (!selecting) {
         // Already released: nothing to fade, and sampling the ink here would
         // force a style read on every frame a selection stays open.
-        if (element.hidden) { hide(true); return false; }
+        if (element.hidden) { hide(true); bindOwner(editable); return false; }
         // alpha already holds the logical overlay alpha; sampling
         // element.style.opacity here would restart the fade from the clipped
         // edge-fade product instead of from the displayed cursor.
         selecting = true;
         lastTime = 0;
       }
-      return fadeOut(now, reducedMotion, "selection");
+      const fading = fadeOut(now, reducedMotion, "selection");
+      bindOwner(editable);
+      return fading;
     },
     wakeDelay(now: number) {
       return current && !ink.classList.contains("zentype-breathing")
@@ -270,22 +268,6 @@ export function createCursor(debug?: DebugRecorder) {
     },
     /** True while the overlay waits out a switched editor's animation. */
     isSettling() { return settleUntil !== 0; },
-    /** Begin a bounded same-editor geometry settle after a structural edit. */
-    stabilize(now: number, deadline: number) {
-      settleUntil = deadline;
-      stableFrames = 0;
-      settleMode = "structure";
-      structureReady = false;
-      debug?.record("cursor", "structure-start", { now, deadline });
-    },
-    /** The host has delivered a block-level mutation for the pending edit. */
-    markStructureReady() {
-      structureReady = true;
-    },
-    /** User navigation takes precedence over a pending structural settle. */
-    cancelStructuralSettle() {
-      if (settleMode === "structure") clearSettling();
-    },
     /**
      * The host switched editor (tab, split, popup). Themed switch animations keep
      * moving the caret geometry. Reveal after consecutive stable samples, bounded
@@ -295,8 +277,6 @@ export function createCursor(debug?: DebugRecorder) {
       hide();
       editor = nextEditor;
       settleUntil = now + MOTION.switchSettleMs;
-      settleMode = "switch";
-      structureReady = true;
       debug?.record("cursor", "switch-start", { settleMs: MOTION.switchSettleMs });
     },
     destroy() { hide(); element.remove(); } };

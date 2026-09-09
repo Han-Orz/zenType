@@ -10,6 +10,7 @@ import { initDebugHook } from "../src/modules/debugHook";
 import { mapUnchangedBoundaries, projectText } from "../src/modules/ripple/textProjection";
 import { splitSentences, resolveActiveSentenceRanges } from "../src/modules/ripple/sentenceModel";
 import type { EditorFrame } from "../src/types";
+import { createStructureGate } from "../src/structure";
 
 function frame(overrides: Partial<EditorFrame> = {}): EditorFrame {
   return { root: {} as HTMLElement, editor: {} as HTMLElement, scroll: {} as HTMLElement,
@@ -136,7 +137,7 @@ test("cursor transports scroll, transfers editable ownership, and survives a sho
   }
 });
 
-test("text projection removes cloned color attributes and preserves owned parents", () => {
+test("text projection reports cloned colors without writing during the read phase", () => {
   const savedDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
   const savedFilter = Object.getOwnPropertyDescriptor(globalThis, "NodeFilter");
   function parent() {
@@ -157,9 +158,11 @@ test("text projection removes cloned color attributes and preserves owned parent
     },
   } });
   try {
-    const projection = projectText({} as HTMLElement, new Map([[owned, {}]]));
+    const clones: HTMLElement[] = [];
+    const projection = projectText({} as HTMLElement, new Map([[owned, {}]]), clones);
     assert.equal(projection?.text, "ownedclone");
-    assert.equal(cloned.style.getPropertyValue("--zentype-text-color"), "");
+    assert.deepEqual(clones, [cloned]);
+    assert.equal(cloned.style.getPropertyValue("--zentype-text-color"), "rgb(20, 30, 40)");
     assert.equal(owned.style.getPropertyValue("--zentype-text-color"), "rgb(20, 30, 40)");
   } finally {
     if (savedDocument) Object.defineProperty(globalThis, "document", savedDocument);
@@ -175,7 +178,10 @@ function withPresentation(run: (body: PaintElement) => void) {
     document: { body, head: new PaintElement(), createElement: () => new PaintElement() },
     HTMLElement: PaintElement, Element: PaintElement,
     CSS: { supports: () => false },
-    getComputedStyle: () => ({ opacity: "0.4", color: "rgb(200, 210, 220)" }),
+    getComputedStyle: (element: PaintElement) => ({
+      opacity: element.classes.has("zentype-breathing") ? "0.4" : element.style.opacity || "1",
+      color: "rgb(200, 210, 220)",
+    }),
   };
   const saved = Object.fromEntries(Object.keys(values).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const [key, value] of Object.entries(values)) Object.defineProperty(globalThis, key, { configurable: true, value });
@@ -193,7 +199,8 @@ class PaintElement extends ElementStub {
   nextElementSibling: PaintElement | null = null;
   dataset: Record<string, string> = {};
   isConnected = true;
-  animations: Array<{ frames: Keyframe[]; currentTime: number; cancel(): void; onfinish: (() => void) | null }> = [];
+  animations: Array<{ frames: Keyframe[]; currentTime: number; playState: string;
+    cancel(): void; pause(): void; play(): void; finish(): void; onfinish: (() => void) | null }> = [];
   constructor() {
     super();
     Object.assign(this.style, {
@@ -208,7 +215,11 @@ class PaintElement extends ElementStub {
     return !!element && (element === this || this.contains(element.parentElement));
   }
   animate(frames: Keyframe[]) {
-    const animation = { frames, currentTime: 0, cancel() {}, onfinish: null as (() => void) | null };
+    const animation = { frames, currentTime: 0, playState: "running",
+      cancel() { this.playState = "idle"; }, pause() { this.playState = "paused"; },
+      play() { this.playState = "running"; },
+      finish() { this.currentTime = MOTION.blockFadeMs; this.playState = "finished"; this.onfinish?.(); },
+      onfinish: null as (() => void) | null };
     this.animations.push(animation);
     return animation;
   }
@@ -319,19 +330,23 @@ test("editor switch reveals after eight stable samples and resets on geometry ch
   cursor.destroy();
 }));
 
-test("structural edits hold a transient caret until the host block mutation settles", () => withPresentation(body => {
+test("shared authority withholds a transient caret until mutation and geometry settle", () => withPresentation(body => {
   const cursor = createCursor();
+  const gate = createStructureGate();
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
   cursor.render(input, 1000, true);
   const overlay = body.children[0];
   const original = overlay.style.transform;
-  cursor.stabilize(1016, 1176);
-  cursor.render({ ...input, caret: { x: 500, y: 300, height: 20 } }, 1032, true);
+  gate.intent(input.editor, 1016);
+  assert.equal(gate.sample({ ...input, caret: { x: 500, y: 300, height: 20 } }, 1032), "wait");
   assert.equal(overlay.style.transform, original);
-  cursor.markStructureReady();
-  cursor.render({ ...input, caret: { x: 200, y: 300, height: 20 } }, 1048, true);
+  gate.mutation(input.editor, 1040, "structural");
+  const final = { ...input, caret: { x: 200, y: 300, height: 20 } };
+  assert.equal(gate.sample(final, 1048), "wait");
   assert.equal(overlay.style.transform, original);
-  cursor.render({ ...input, caret: { x: 200, y: 300, height: 20 } }, 1064, true);
+  assert.equal(gate.sample(final, 1064), "wait");
+  assert.equal(gate.sample(final, 1088), "commit");
+  cursor.render(final, 1088, true);
   assert.notEqual(overlay.style.transform, `translate3d(500px,${300 - MOTION.caretLiftPx}px,0)`);
   cursor.destroy();
 }));
@@ -497,7 +512,7 @@ test("ancestor markers share the alpha of their direct list content", () => with
   ripple.destroy();
 }));
 
-test("merged block releases copied Ripple opacity to its original host style", () => withPresentation(() => {
+test("replacement handoff never writes host opacity or repairs ambiguous legacy values", () => withPresentation(() => {
   for (const connected of [false, true]) for (const original of ["", "0.7"]) {
     for (const replacementStyle of ["0.4", "0.8", ""]) {
       const editor = new PaintElement();
@@ -514,19 +529,19 @@ test("merged block releases copied Ripple opacity to its original host style", (
         block: active as unknown as HTMLElement, editable: active as unknown as HTMLElement, range: {} as Range });
       ripple.prepare(input, false, true, true);
       old.animations[0].currentTime = MOTION.blockFadeMs;
-      assert.equal(old.style.opacity, "0.4");
+      assert.equal(old.style.opacity, original);
       const merged = new PaintElement();
       merged.dataset.nodeId = old.dataset.nodeId;
       merged.parentElement = editor;
       merged.style.opacity = replacementStyle;
-      // The observed replacement carries opacity but no Ripple class.
+      // Incoming opacity is host-owned, even when it equals a legacy Ripple level.
       old.isConnected = connected;
       active.isConnected = false;
       ripple.prepare({ ...input, block: merged as unknown as HTMLElement,
         editable: merged as unknown as HTMLElement }, true, true, true);
-      assert.equal(merged.style.opacity, "1");
+      assert.equal(merged.style.opacity, replacementStyle);
       merged.animations.at(-1)!.onfinish!();
-      const expected = replacementStyle === "0.4" ? original : replacementStyle;
+      const expected = replacementStyle;
       assert.equal(merged.style.opacity ?? "", expected);
       assert.equal(merged.classes.has("zentype-ripple-block"), false);
       ripple.clear();
@@ -536,7 +551,7 @@ test("merged block releases copied Ripple opacity to its original host style", (
   }
 }));
 
-test("structural recovery waits for an event or deadline instead of sampling every frame", () => withPresentation(() => {
+test("range selection cancels structural intent without leaving a recovery loop", () => withPresentation(() => {
   const callbacks = new Map<string, (event: unknown) => void>();
   const raf = new Map<number, FrameRequestCallback>();
   const timers = new Map<number, () => void>();
@@ -575,7 +590,7 @@ test("structural recovery waits for an event or deadline instead of sampling eve
     for (let i = 0; i < 10; i++) tick();
     assert.equal(reads, sampled);
     assert.equal(raf.size, 0);
-    assert.equal(timers.size, 1);
+    assert.equal(timers.size, 0);
     input = { ...input, selection: "caret" };
     callbacks.get("selectionchange")!({ type: "selectionchange", target: editable });
     tick();

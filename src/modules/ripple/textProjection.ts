@@ -1,7 +1,7 @@
 import type { SentenceRange } from "./sentenceModel";
 
 export interface TextEntry { node: Text; start: number; end: number }
-export function projectText(editable: HTMLElement, colorOwners: ReadonlyMap<HTMLElement, unknown>): { text: string; entries: TextEntry[] } | null {
+export function projectText(editable: HTMLElement, colorOwners: ReadonlyMap<HTMLElement, unknown>, clones: HTMLElement[]): { text: string; entries: TextEntry[] } | null {
   const entries: TextEntry[] = [];
   let text = "";
   const walker = document.createTreeWalker(editable, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
@@ -14,7 +14,7 @@ export function projectText(editable: HTMLElement, colorOwners: ReadonlyMap<HTML
   while ((node = walker.nextNode())) {
     const parent = node.parentElement;
     if (parent && !colorOwners.has(parent) && parent.style.getPropertyValue("--zentype-text-color")) {
-      parent.style.removeProperty("--zentype-text-color");
+      clones.push(parent);
     }
     const value = node.nodeValue ?? "";
     if (text.length + value.length > 32768 || entries.length >= 2048) return null;

@@ -5,6 +5,7 @@ import { createCursor } from "./modules/cursor";
 import { createTypewriter } from "./modules/typewriter";
 import { createRipple } from "./modules/ripple";
 import type { DebugRecorder } from "./debug/types";
+import { classifyMutations, createStructureGate, STRUCTURE_LIMITS } from "./structure";
 
 export interface WritingSession {
   configure(features: Features): void;
@@ -18,6 +19,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
   const cursor = createCursor(debug);
   const typewriter = createTypewriter();
   const ripple = createRipple(debug);
+  const structure = createStructureGate(debug);
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
   const listeners = new AbortController();
   let pending: number | null = null;
@@ -37,7 +39,6 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
   let lastInteraction = -Infinity;
   let clickEditor: HTMLElement | null = null;
   let retryUntil = 0;
-  let structuralUntil = 0;
   const added = new Set<HTMLElement>();
 
   function queue() {
@@ -57,25 +58,18 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     debug?.record("session", "wake-scheduled", { delay });
     wake = setTimeout(() => { wake = null; geometryDirty = true; queue(); }, delay);
   }
-  /** True when a node is a block itself or contains one, without scanning leaves. */
-  function holdsBlock(nodes: NodeList): boolean {
-    for (const node of nodes) {
-      if (!(node instanceof Element)) continue;
-      if (node.matches("[data-node-id], .protyle-action")) return true;
-      if (node.firstElementChild && node.querySelector("[data-node-id], .protyle-action")) return true;
-    }
-    return false;
-  }
   function remember(records: MutationRecord[]) {
-    if (records.length) debug?.recordMutations(records, frame);
-    for (const record of records) {
-      if (record.type === "childList") {
-        if (holdsBlock(record.addedNodes) || holdsBlock(record.removedNodes)) {
-          structureDirty = true;
-          cursor.markStructureReady();
-        }
-        for (const node of record.addedNodes) if (node instanceof HTMLElement) added.add(node);
-      }
+    if (!records.length) return;
+    debug?.recordMutations(records, frame);
+    const changes = classifyMutations(records);
+    if (changes.kind !== "text") structureDirty = true;
+    if (observedEditor && !blocked && !pointerDown) structure.mutation(observedEditor, performance.now(), changes.kind);
+    for (const node of changes.added) {
+      if (added.size >= STRUCTURE_LIMITS.nodes) break;
+      added.add(node);
+    }
+    if (changes.kind === "overflow") contentDirty = true;
+    for (const record of records.slice(0, STRUCTURE_LIMITS.records)) {
       if (!frame?.editable || frame.editable.contains(record.target) ||
           (record.target instanceof Element && record.target.contains(frame.editable))) contentDirty = true;
     }
@@ -86,18 +80,9 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
   const theme = new MutationObserver(() => { ripple.invalidateColors(); refresh(); });
   theme.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme-mode", "data-light-theme", "data-dark-theme"] });
 
-  function cleanClones() {
-    remember(mutation.takeRecords());
-    for (const root of added) {
-      if (!root.isConnected) continue;
-      for (const element of [root, ...root.querySelectorAll<HTMLElement>(".zentype-ripple-block, .zentype-custom-caret-active")]) {
-        if (!ripple.owns(element)) {
-          // Only a node carrying our own class can carry our inline opacity.
-          if (element.classList.contains("zentype-ripple-block")) element.style.removeProperty("opacity");
-          element.classList.remove("zentype-ripple-block");
-        }
-        if (element !== frame?.editable) element.classList.remove("zentype-custom-caret-active");
-      }
+  function cleanClones(editable = frame?.editable) {
+    for (const element of added) {
+      if (element !== editable) element.classList.remove("zentype-custom-caret-active");
     }
     added.clear();
   }
@@ -125,6 +110,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
   function suspend() {
     debug?.record("session", "suspend", { reason: "lifecycle" });
     blocked = true;
+    structure.cancel("lifecycle");
     composingEditor = null;
     stopWriting();
     cursor.hide();
@@ -159,6 +145,35 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         sampled = true;
         const next = readEditorFrame(reducedMotion.matches, composingEditor, frame?.editor);
         geometryDirty = false;
+        if (next && frame && next.editor !== frame.editor) structure.cancel("editor-switch");
+        const decision = structure.sample(next, now);
+        if (decision === "wait") {
+          // Only rebind old visual owners. No effect may consume a new target or
+          // write scrollTop until the shared gate publishes an authoritative frame.
+          const carry = ripple.rebind([...added]);
+          ripple.freeze();
+          carry();
+          if (next) cursor.retainOwner(next.editable);
+          typewriter.cancel();
+          cleanClones(next?.editable ?? frame?.editable);
+          if (next?.caret) { geometryDirty = true; queue(); }
+          else wakeAfter(structure.remaining(now));
+          return;
+        }
+        if (decision === "commit" || decision === "timeout" || decision === "overflow") {
+          structureDirty = contentDirty = true;
+          typewriter.cancel();
+          if (decision !== "commit") {
+            // A deadline bounds work; it is not proof of stable geometry. Release
+            // all presentation and await fresh activity instead of animating a guess.
+            cursor.hide(); ripple.clear(); stopWriting(); cleanClones();
+            frame = next;
+            observe(next);
+            debug?.record("session", "structure-release", { now, reason: decision });
+            return;
+          }
+          debug?.record("session", "structure-commit", { now, authority: "quiet-and-stable" });
+        }
         if (!next) {
           debug?.record("session", "frame-missing", {
             now,
@@ -206,18 +221,15 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         if (cursor.release(now, reducedMotion.matches)) queue();
         return;
       }
-      cleanClones();
-      if (frame.selection !== "caret" && !pointerDown && now < structuralUntil) {
-        wakeAfter(Math.max(1, structuralUntil - now));
-        return;
-      }
       if (frame.selection === "range") {
         stopWriting();
         // Same read-before-write order as the caret path: the selection fade reads
         // the ink opacity before Ripple invalidates the block set, otherwise the
         // first frame of a drag-selection forced the same document-scale recalc.
+        const commitRipple = ripple.sample(frame, false, false, false);
         const fading = cursor.yieldSelection(now, reducedMotion.matches, frame.editable);
-        ripple.prepare(frame, false, false, false);
+        commitRipple();
+        cleanClones();
         if (ripple.render(now, reducedMotion.matches) || fading) queue();
         debug?.record("session", "frame-commit", {
           now, selection: frame.selection, cursorMoving: fading, rippleMoving: false,
@@ -226,6 +238,8 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
       }
       const writing = writingEditor === frame.editor;
       const composing = composingEditor === frame.editor;
+      const commitRipple = sampled || contentDirty || structureDirty
+        ? ripple.sample(frame, contentDirty, structureDirty, features.ripple && writing) : null;
       const locate = clickEditor === frame.editor;
       clickEditor = null;
       const requested = typewriter.next(frame, now, features.typewriter && (writing || locate || typewriter.isLocating()) && !composing && !pointerDown, lastInput, locate);
@@ -246,7 +260,8 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         pointerDown || now - lastInteraction < MOTION.interactionHoldMs);
       const settling = cursor.isSettling();
       if (settling) geometryDirty = true;
-      if (sampled || contentDirty || structureDirty) ripple.prepare(frame, contentDirty, structureDirty, features.ripple && writing);
+      commitRipple?.();
+      cleanClones();
       contentDirty = structureDirty = false;
       const rippleMoving = ripple.render(now, reducedMotion.matches);
       debug?.record("typewriter", "frame", {
@@ -311,6 +326,11 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         blocked = false;
         activate(editable);
         contentDirty = true;
+        if (event.type === "beforeinput" && /^(insertParagraph|insertLineBreak|formatIndent|formatOutdent|historyUndo|historyRedo|deleteByCut|deleteByDrag)$/.test((event as InputEvent).inputType)) {
+          structure.intent(editable.closest<HTMLElement>(".protyle-wysiwyg")!, performance.now());
+        }
+        if (event.type === "input") structure.input();
+        structure.activity(performance.now(), event.type);
         if ((event as InputEvent).isComposing) composingEditor = editable.closest<HTMLElement>(".protyle-wysiwyg");
         break;
       case "keydown": {
@@ -318,19 +338,21 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         if (!editable || key.defaultPrevented) return;
         blocked = false;
         if (key.isComposing) break;
-        if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", "Escape"].includes(key.key)) stopWriting();
+        if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", "Escape"].includes(key.key)) {
+          structure.cancel("navigation"); stopWriting();
+        }
         if (!key.ctrlKey && !key.metaKey && !key.altKey && ["Enter", "Backspace", "Delete", "Tab"].includes(key.key)) {
           activate(editable);
           const now = performance.now();
           retryUntil = now + MOTION.recoveryMs;
-          structuralUntil = retryUntil;
-          cursor.stabilize(now, structuralUntil);
+          structure.intent(editable.closest<HTMLElement>(".protyle-wysiwyg")!, now);
         }
         break;
       }
       case "compositionstart":
         if (!editable) return;
         blocked = false;
+        structure.cancel("composition");
         composingEditor = editable.closest<HTMLElement>(".protyle-wysiwyg");
         activate(editable);
         typewriter.cancel();
@@ -343,8 +365,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         break;
       case "pointerdown":
         pointerDown = true;
-        structuralUntil = 0;
-        cursor.cancelStructuralSettle();
+        structure.cancel("pointer");
         stopWriting();
         break;
       case "pointerup":
@@ -355,8 +376,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         break;
       case "wheel":
       case "touchmove":
-        structuralUntil = 0;
-        cursor.cancelStructuralSettle();
+        structure.cancel(event.type);
         stopWriting();
         break;
       case "scroll": {
@@ -368,6 +388,9 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         if (target === observedScroll && typewriter.ownsScroll(observedScroll.scrollTop)) return;
         break;
       }
+      case "selectionchange":
+        structure.activity(performance.now(), "selection");
+        break;
       case "blur":
         pointerDown = false;
         suspend();
@@ -398,11 +421,14 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     refresh() { blocked = false; ripple.invalidateColors(); refresh(); }, suspend,
     configure(next) {
       features = { ...next };
+      structure.cancel("configure");
+      if (!features.ripple) ripple.clear();
       if (!features.typewriter) typewriter.cancel();
       refresh();
     },
     destroy() {
       disposed = true;
+      structure.cancel("destroy");
       listeners.abort();
       cleanClones();
       mutation.disconnect();

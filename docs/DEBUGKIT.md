@@ -33,7 +33,7 @@ WritingSession 已经拥有文档事件、MutationObserver、ResizeObserver、�
 
 - Session 记录事件、dirty flags、frame、scroll 写入和生命周期；
 - Cursor 记录现有渲染路径中的位置、目标、alpha、owner、呼吸和 release 状态；
-- Ripple 记录 target 数量、ownership handoff、release/transfer 计数和 sentence render 状态；
+- Ripple 记录 target / owner 数量、replacement carry、ownership commit 和 sentence render 状态；
 - DebugKit 只在 session start/stop、手动 capture 或事件记录时做有界快照；
 - DebugKit 不建立第二套 host observer、rAF 或 timer；
 - DebugKit 异常被隔离，不应进入 Session 的 presentation failure 路径。
@@ -58,6 +58,22 @@ const json = debug.exportRecording();
 导出发生在会话结束之后：如果当前仍在采集，`导出 DebugKit` 会先结束会话、提示“已结束，正在导出”，再导出这次已结束的记录；导出完成后不会自动重新开始，需要再次执行切换命令。
 
 ## 诊断限制
+
+### remake.2 结构事务
+
+Session 的 `structure-*` 事件来自共享 gate，不增加 snapshot、observer 或 scheduler：
+
+- `structure-intent`：输入可能编辑结构，尚无宿主证据。
+- `structure-begin` / `structure-evidence`：mutation classifier 发现结构变化或观察预算溢出。
+- `structure-activity`：input、Selection 或 mutation 打断了安静窗口。
+- `structure-sample`：当前 caret、quiet 时长、stableFrames、evidence 与决定。
+- `structure-stable` / `structure-commit`：安静窗口和连续几何采样通过，允许统一提交。
+- `structure-timeout` / `structure-release`：没有证明稳定，释放效果；不能把它当成成功提交。
+- `structure-cancel`：普通输入无结构证据、用户抢占或生命周期取消。
+
+Ripple 的 `presentation-hold`、`replacement-carry`、`ownership-commit` 与 `ownership-limit` 解释暂停、旧 owner 接管、最终计划和有界退让。`blockCount` 表示内存中持有的 WAAPI effects；正常 block 绘制不再生成 `.zentype-ripple-block` 或 inline opacity。动画 id 为 `zentype-ripple`，仅供诊断，不是 DOM 属性或 ownership registry。
+
+仓库未包含此次用户提到的原始 DebugKit JSON；不能把人工序列或代码推断标成 trace-derived evidence。本轮按用户要求不执行测试，真实宿主的 marker/布局连续性仍待确认。
 
 Full 快照可能读取 `getBoundingClientRect()`、`getComputedStyle()`、Selection 和有限 DOM 树，因此会改变极端时序。它适合定位事件顺序、结构替换和视觉 ownership 问题，不适合直接作为性能基线。
 
