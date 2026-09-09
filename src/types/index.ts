@@ -11,6 +11,10 @@ export interface EditorFrame {
   block: HTMLElement | null;
   range: Range | null;
   caret: CursorRect | null;
+  /** True when the caret logically exists but its block has no text position. */
+  caretless?: boolean;
+  /** Visual lift for this caret; absent means the configured default. */
+  caretLift?: number;
   selection: "caret" | "range" | "missing";
   viewport: { top: number; bottom: number; left: number; right: number };
   scrollViewport: { top: number; bottom: number; left: number };

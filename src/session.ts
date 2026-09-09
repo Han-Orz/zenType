@@ -33,7 +33,10 @@ export function createWritingSession(initial: Features): WritingSession {
   let contentDirty = true;
   let structureDirty = true;
   let lastInput = -Infinity;
+  let lastInteraction = -Infinity;
+  let clickEditor: HTMLElement | null = null;
   let retryUntil = 0;
+  let structuralUntil = 0;
   const added = new Set<HTMLElement>();
 
   function queue() {
@@ -41,7 +44,7 @@ export function createWritingSession(initial: Features): WritingSession {
   }
   function refresh() {
     geometryDirty = contentDirty = structureDirty = true;
-    retryUntil = performance.now() + 160;
+    retryUntil = performance.now() + MOTION.recoveryMs;
     queue();
   }
   function clearWake() {
@@ -52,10 +55,19 @@ export function createWritingSession(initial: Features): WritingSession {
     clearWake();
     wake = setTimeout(() => { wake = null; geometryDirty = true; queue(); }, delay);
   }
+  /** True when a node is a block itself or contains one, without scanning leaves. */
+  function holdsBlock(nodes: NodeList): boolean {
+    for (const node of nodes) {
+      if (!(node instanceof Element)) continue;
+      if (node.matches("[data-node-id], .protyle-action")) return true;
+      if (node.firstElementChild && node.querySelector("[data-node-id], .protyle-action")) return true;
+    }
+    return false;
+  }
   function remember(records: MutationRecord[]) {
     for (const record of records) {
       if (record.type === "childList") {
-        structureDirty = true;
+        if (holdsBlock(record.addedNodes) || holdsBlock(record.removedNodes)) structureDirty = true;
         for (const node of record.addedNodes) if (node instanceof HTMLElement) added.add(node);
       }
       if (!frame?.editable || frame.editable.contains(record.target) ||
@@ -65,7 +77,7 @@ export function createWritingSession(initial: Features): WritingSession {
   }
   const mutation = new MutationObserver(records => { remember(records); queue(); });
   const resize = new ResizeObserver(() => { geometryDirty = true; queue(); });
-  const theme = new MutationObserver(refresh);
+  const theme = new MutationObserver(() => { ripple.invalidateColors(); refresh(); });
   theme.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme-mode", "data-light-theme", "data-dark-theme"] });
 
   function cleanClones() {
@@ -74,8 +86,9 @@ export function createWritingSession(initial: Features): WritingSession {
       if (!root.isConnected) continue;
       for (const element of [root, ...root.querySelectorAll<HTMLElement>(".zentype-ripple-block, .zentype-custom-caret-active")]) {
         if (!ripple.owns(element)) {
+          // Only a node carrying our own class can carry our inline opacity.
+          if (element.classList.contains("zentype-ripple-block")) element.style.removeProperty("opacity");
           element.classList.remove("zentype-ripple-block");
-          element.style.removeProperty("--zentype-dim");
         }
         if (element !== frame?.editable) element.classList.remove("zentype-custom-caret-active");
       }
@@ -99,6 +112,7 @@ export function createWritingSession(initial: Features): WritingSession {
   }
   function stopWriting() {
     writingEditor = null;
+    clickEditor = null;
     typewriter.cancel();
     clearWake();
   }
@@ -116,23 +130,39 @@ export function createWritingSession(initial: Features): WritingSession {
     pending = null;
     if (disposed) return;
     try {
-      cleanClones();
-      if (blocked || document.hidden) return;
+      remember(mutation.takeRecords());
+      if (blocked || document.hidden) { cleanClones(); return; }
       let sampled = false;
-      if (geometryDirty || typewriter.isMoving() || now < retryUntil) {
+      // A typewriter frame only moves the container: the frame already transports
+      // the caret and the cursor by that displacement, so re-reading host geometry
+      // every frame of a comfort scroll is redundant work.
+      if (geometryDirty) {
         sampled = true;
         const next = readEditorFrame(reducedMotion.matches, composingEditor, frame?.editor);
         geometryDirty = false;
         if (!next) {
-          cursor.hide();
+          if (now < retryUntil && frame?.editor.isConnected && document.hasFocus() &&
+              (document.activeElement === document.body || frame.editor.contains(document.activeElement))) {
+            // Copied plugin styling must not survive a replacement just because
+            // geometry is temporarily unreadable. No host read follows here, so
+            // cleanup cannot invalidate anything.
+            cleanClones();
+            wakeAfter(Math.max(1, retryUntil - now));
+            return;
+          }
+          cleanClones();
+          // No valid frame: fade the overlay out instead of dropping it between
+          // two frames (a separator, an image block, a lost selection).
+          const fading = cursor.release(now, reducedMotion.matches);
           ripple.clear();
           typewriter.cancel();
           frame = null;
           observe(null);
+          if (fading) queue();
           return;
         }
         if (frame && frame.editor !== next.editor) {
-          cursor.hide();
+          cursor.switched();
           ripple.clear();
           typewriter.cancel();
           if (writingEditor !== next.editor) writingEditor = null;
@@ -141,32 +171,59 @@ export function createWritingSession(initial: Features): WritingSession {
         frame = next;
         observe(frame);
       }
-      if (!frame) return;
+      if (!frame) {
+        // Keep a release fade running without re-reading host geometry.
+        if (cursor.release(now, reducedMotion.matches)) queue();
+        return;
+      }
+      cleanClones();
+      if (frame.selection !== "caret" && !pointerDown && now < structuralUntil) {
+        wakeAfter(Math.max(1, structuralUntil - now));
+        return;
+      }
       if (frame.selection === "range") {
-        cursor.hide();
         stopWriting();
-        ripple.clear();
+        // Same read-before-write order as the caret path: the selection fade reads
+        // the ink opacity before Ripple invalidates the block set, otherwise the
+        // first frame of a drag-selection forced the same document-scale recalc.
+        const fading = cursor.yieldSelection(now, reducedMotion.matches);
+        ripple.prepare(frame, false, false, false);
+        if (ripple.render(now, reducedMotion.matches) || fading) queue();
         return;
       }
       const writing = writingEditor === frame.editor;
       const composing = composingEditor === frame.editor;
-      if (features.ripple && (sampled || contentDirty || structureDirty)) ripple.prepare(frame, contentDirty, structureDirty, writing);
-      contentDirty = structureDirty = false;
-      const requested = typewriter.next(frame, now, features.typewriter && writing && !composing && !pointerDown, lastInput);
-      if (requested !== frame.scrollTop) frame.scroll.scrollTop = requested;
-      const actual = frame.scroll.scrollTop;
+      const locate = clickEditor === frame.editor;
+      clickEditor = null;
+      const requested = typewriter.next(frame, now, features.typewriter && (writing || locate || typewriter.isLocating()) && !composing && !pointerDown, lastInput, locate);
+      let actual = frame.scrollTop;
+      if (requested !== frame.scrollTop) {
+        frame.scroll.scrollTop = requested;
+        actual = frame.scroll.scrollTop;
+      }
       typewriter.written(actual);
       const delta = actual - frame.scrollTop;
       if (frame.caret) frame.caret = { ...frame.caret, y: frame.caret.y - delta };
       frame.scrollTop = actual;
-      const cursorMoving = cursor.render(frame, now, composing || now - lastInput < MOTION.typingPauseMs);
-      const rippleMoving = features.ripple && ripple.render(now, reducedMotion.matches);
-      if (cursorMoving && !frame.caret) geometryDirty = true;
-      if (cursorMoving || typewriter.isMoving() || rippleMoving || now < retryUntil) queue();
-      else if (wake === null && !reducedMotion.matches && !composing) {
-        // One idle wake starts CSS breathing; no perpetual JavaScript idle loop.
-        const delay = cursor.wakeDelay(now);
-        if (delay !== null) wakeAfter(delay);
+      // Read phase before write phase. The cursor samples the ink opacity before
+      // Ripple invalidates a large part of the editor, so no frame forces a style
+      // recalc of its own invalidation (that recalc measured ~150ms on a long
+      // document, once per focus-mode entry and exit).
+      const cursorMoving = cursor.render(frame, now, composing || now - lastInput < MOTION.typingPauseMs,
+        pointerDown || now - lastInteraction < MOTION.interactionHoldMs);
+      const settling = cursor.isSettling();
+      if (settling) geometryDirty = true;
+      if (sampled || contentDirty || structureDirty) ripple.prepare(frame, contentDirty, structureDirty, features.ripple && writing);
+      contentDirty = structureDirty = false;
+      const rippleMoving = ripple.render(now, reducedMotion.matches);
+      if (cursorMoving || typewriter.isMoving() || rippleMoving || settling) queue();
+      else if ((wake === null || !frame.caret) && !composing) {
+        // Recovery and typing pauses share the idle wake with CSS breathing.
+        const cursorDelay = reducedMotion.matches ? Infinity : cursor.wakeDelay(now) ?? Infinity;
+        const pauseDelay = writing && now - lastInput < MOTION.typingPauseMs
+          ? MOTION.typingPauseMs + 1 - (now - lastInput) : Infinity;
+        const delay = Math.min(cursorDelay, pauseDelay, !frame.caret ? cursor.recoveryDelay(now) ?? Infinity : Infinity);
+        if (Number.isFinite(delay)) wakeAfter(delay);
       }
     } catch (error) {
       suspend();
@@ -181,13 +238,21 @@ export function createWritingSession(initial: Features): WritingSession {
   }
   function handle(event: Event) {
     const editable = editableAt(event.target);
+    if (["keydown", "pointerdown", "pointerup", "wheel", "touchmove", "scroll"].includes(event.type)) lastInteraction = performance.now();
     switch (event.type) {
+      case "click":
+        if (editable && !composingEditor && !(event as MouseEvent).shiftKey &&
+            (event as MouseEvent).detail <= 1 && window.getSelection()?.isCollapsed &&
+            !(event.target as Element).closest('[data-type="a"], a, button')) {
+          clickEditor = editable.closest<HTMLElement>(".protyle-wysiwyg");
+        }
+        break;
       case "focusin":
-        if (editable) { blocked = false; retryUntil = performance.now() + 160; }
+        if (editable) { blocked = false; retryUntil = performance.now() + MOTION.recoveryMs; }
         break;
       case "focusout":
         if ((event as FocusEvent).relatedTarget && !editableAt((event as FocusEvent).relatedTarget)) { suspend(); return; }
-        retryUntil = performance.now() + 160;
+        retryUntil = performance.now() + MOTION.recoveryMs;
         break;
       case "beforeinput":
       case "input":
@@ -205,7 +270,8 @@ export function createWritingSession(initial: Features): WritingSession {
         if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", "Escape"].includes(key.key)) stopWriting();
         if (!key.ctrlKey && !key.metaKey && !key.altKey && ["Enter", "Backspace", "Delete", "Tab"].includes(key.key)) {
           activate(editable);
-          retryUntil = performance.now() + 160;
+          retryUntil = performance.now() + MOTION.recoveryMs;
+          structuralUntil = retryUntil;
         }
         break;
       }
@@ -220,26 +286,33 @@ export function createWritingSession(initial: Features): WritingSession {
         composingEditor = null;
         if (editable) { blocked = false; activate(editable); }
         contentDirty = true;
-        retryUntil = performance.now() + 160;
+        retryUntil = performance.now() + MOTION.recoveryMs;
         break;
       case "pointerdown":
         pointerDown = true;
+        structuralUntil = 0;
         stopWriting();
         break;
       case "pointerup":
       case "pointercancel":
         pointerDown = false;
         if (editable) blocked = false;
-        retryUntil = performance.now() + 160;
+        retryUntil = performance.now() + MOTION.recoveryMs;
         break;
       case "wheel":
       case "touchmove":
+        structuralUntil = 0;
         stopWriting();
         break;
-      case "scroll":
-        if (event.target instanceof Element && observedScroll &&
-            event.target !== observedScroll && !observedScroll.contains(event.target) && !event.target.contains(observedScroll)) return;
+      case "scroll": {
+        const target = event.target;
+        if (!(target instanceof Element) || !observedScroll) break;
+        if (target !== observedScroll && !observedScroll.contains(target) && !target.contains(observedScroll)) return;
+        // A scrollTop this session just wrote is already carried by the frame.
+        // Only host-driven scrolling makes the sampled geometry stale.
+        if (target === observedScroll && typewriter.ownsScroll(observedScroll.scrollTop)) return;
         break;
+      }
       case "blur":
         pointerDown = false;
         suspend();
@@ -254,7 +327,7 @@ export function createWritingSession(initial: Features): WritingSession {
   }
 
   for (const name of ["beforeinput", "input", "keydown", "compositionstart", "compositionend", "selectionchange",
-    "pointerdown", "pointerup", "pointercancel", "wheel", "touchmove", "scroll", "focusin", "focusout", "visibilitychange"]) {
+    "pointerdown", "pointerup", "pointercancel", "click", "wheel", "touchmove", "scroll", "focusin", "focusout", "visibilitychange"]) {
     document.addEventListener(name, handle, { capture: true, passive: true, signal: listeners.signal });
   }
   window.addEventListener("blur", handle, { signal: listeners.signal });
@@ -267,11 +340,10 @@ export function createWritingSession(initial: Features): WritingSession {
   queue();
 
   return {
-    refresh() { blocked = false; refresh(); }, suspend,
+    refresh() { blocked = false; ripple.invalidateColors(); refresh(); }, suspend,
     configure(next) {
       features = { ...next };
       if (!features.typewriter) typewriter.cancel();
-      if (!features.ripple) ripple.clear();
       refresh();
     },
     destroy() {

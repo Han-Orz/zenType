@@ -6,7 +6,7 @@ Smooth cursor, typewriter scrolling and ripple focus for SiYuan. This is a new b
 
 The blue cursor continues from its displayed position, including during IME composition and ordinary editable changes. Scroll displacement transports the cursor without restarting its local motion. Clipping fades and idle breathing have separate opacity layers.
 
-A missing caret rectangle gets a bounded 160ms recovery window; invalid ownership or exhausted recovery returns native behavior. IME uses the selection focus endpoint and pauses plugin comfort scrolling.
+A missing caret rectangle keeps the current presentation for a bounded 160ms recovery window and is then recovered from the caret's own block rather than from the whole editable. Once the budget is spent, a collapsed caret with a live Range in the same editable keeps the presentation instead of returning native behavior; any other state releases it. IME uses the selection focus endpoint and pauses plugin comfort scrolling.
 
 Typewriter motion starts from actual scroll positions, supports reverse retargeting, and yields to browsing and unexpected host scrolling. Ripple retains current brightness across navigation and unambiguous local text edits. New DOM bindings do not inherit historical animation identities.
 
@@ -31,7 +31,7 @@ Existing development links can use `dev/`. To create one, use `node scripts/make
 
 Host research baseline: SiYuan v3.8.3. Titles, databases and query embeds stay native. Split and popup document editors require matching official active editor, focus and Selection ownership.
 
-No structural FLIP, transaction settling engine, or cross-replacement visual handoff. Sentence focus requires CSS Highlights, relative colors and Intl.Segmenter. It falls back to block focus above 32,768 UTF-16 units, 2,048 text nodes or 256 sentences per editable. Block focus visits up to 48 content siblings on each side at each ancestor level.
+No structural FLIP and no transaction settling engine. A same-node-id replacement hands over numeric brightness only (local baselines and ancestor seeding); there is no identity registry and no cross-block identity tracking. Sentence focus requires CSS Highlights, relative colors and Intl.Segmenter. It falls back to block focus above 32,768 UTF-16 units, 2,048 text nodes or 256 sentences per editable. Block focus visits up to 48 content siblings on each side at each ancestor level.
 
 Automated checks cover motion interruption, scroll boundaries, local sentence boundaries and cursor presentation. They do not establish real IME, theme or host DOM replacement behavior. Old architecture-specific tests are available in v2.8.1 history.
 

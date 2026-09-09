@@ -7,10 +7,19 @@ const dev = process.argv.includes('--dev');
 const watch = process.argv.includes('--watch');
 const outdir = path.join(__dirname, dev ? 'dev' : 'dist');
 const assets = ['plugin.json', 'icon.png', 'preview.png', 'README.md', 'README_zh-CN.md'];
-const files = ['index.js', 'index.js.map', ...assets];
+const files = ['index.js', ...assets];
 
 function copyAssets() {
   for (const name of assets) fs.copyFileSync(path.join(__dirname, name), path.join(outdir, name));
+}
+
+/** Only the two known output directories may be removed. */
+function cleanOutputDir() {
+  const resolved = path.resolve(outdir);
+  const allowed = new Set([path.join(__dirname, 'dev'), path.join(__dirname, 'dist')]);
+  if (!allowed.has(resolved)) throw new Error('Refusing to clean unexpected output directory: ' + resolved);
+  fs.rmSync(resolved, { recursive: true, force: true });
+  fs.mkdirSync(resolved, { recursive: true });
 }
 
 async function packageZip() {
@@ -31,7 +40,9 @@ async function packageZip() {
 }
 
 async function main() {
-  fs.mkdirSync(outdir, { recursive: true });
+  // A clean output directory keeps a renamed or dropped file from surviving as a
+  // stale artifact of an older build.
+  cleanOutputDir();
   const options = {
     entryPoints: [path.join(__dirname, 'src/index.ts')],
     outfile: path.join(outdir, 'index.js'),

@@ -9,7 +9,12 @@ const outdir = mkdtempSync(path.join(root, ".tmp-tests-"));
 try {
   const outfile = path.join(outdir, "remake.test.mjs");
   await build({ entryPoints: [path.join(root, "tests/remake.test.ts")], bundle: true,
-    platform: "node", format: "esm", outfile, sourcemap: "inline" });
+    platform: "node", format: "esm", outfile, sourcemap: "inline",
+    plugins: [{ name: "session-frame-fixture", setup(builder) {
+      builder.onLoad({ filter: /[\\/]utils[\\/]editorScope\.ts$/ }, () => ({ contents:
+        "export const readEditorFrame = (...args) => globalThis.sessionFixture.read(...args);" +
+        "export const editableAt = target => globalThis.sessionFixture.editableAt(target);" }));
+    } }] });
   const result = spawnSync(process.execPath, ["--test", outfile], { cwd: root, stdio: "inherit" });
   process.exitCode = result.status ?? 1;
 } finally {

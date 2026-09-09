@@ -1,7 +1,7 @@
 import type { SentenceRange } from "./sentenceModel";
 
 export interface TextEntry { node: Text; start: number; end: number }
-export function projectText(editable: HTMLElement): { text: string; entries: TextEntry[] } | null {
+export function projectText(editable: HTMLElement, colorOwners: ReadonlyMap<HTMLElement, unknown>): { text: string; entries: TextEntry[] } | null {
   const entries: TextEntry[] = [];
   let text = "";
   const walker = document.createTreeWalker(editable, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
@@ -12,6 +12,10 @@ export function projectText(editable: HTMLElement): { text: string; entries: Tex
   });
   let node: Node | null;
   while ((node = walker.nextNode())) {
+    const parent = node.parentElement;
+    if (parent && !colorOwners.has(parent) && parent.style.getPropertyValue("--zentype-text-color")) {
+      parent.style.removeProperty("--zentype-text-color");
+    }
     const value = node.nodeValue ?? "";
     if (text.length + value.length > 32768 || entries.length >= 2048) return null;
     entries.push({ node: node as Text, start: text.length, end: text.length + value.length });
@@ -30,8 +34,7 @@ export function sentenceRange(entries: TextEntry[], sentence: SentenceRange): Ra
   return range;
 }
 
-// Only boundaries outside a single changed interval can retain presentation.
-// This deliberately has no cross-block or replacement identity recovery.
+// Deletions may preserve a sentence's start even when its end disappears.
 export function mapUnchangedBoundaries(before: string, after: string, ranges: readonly SentenceRange[]): Array<SentenceRange | null> {
   let prefix = 0;
   while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++;
@@ -42,6 +45,6 @@ export function mapUnchangedBoundaries(before: string, after: string, ranges: re
   return ranges.map(range => {
     const start = range.start <= prefix ? range.start : range.start >= oldEnd ? range.start + delta : null;
     const end = range.end >= oldEnd ? range.end + delta : range.end <= prefix ? range.end : null;
-    return start === null || end === null ? null : { start, end };
+    return start === null || end === null && delta >= 0 ? null : { start, end: end ?? start };
   });
 }
