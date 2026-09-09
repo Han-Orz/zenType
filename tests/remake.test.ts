@@ -6,6 +6,7 @@ import { createRipple } from "../src/modules/ripple";
 import { createWritingSession } from "../src/session";
 import { createTypewriter } from "../src/modules/typewriter";
 import { createCursor } from "../src/modules/cursor";
+import { initDebugHook } from "../src/modules/debugHook";
 import { mapUnchangedBoundaries, projectText } from "../src/modules/ripple/textProjection";
 import { splitSentences, resolveActiveSentenceRanges } from "../src/modules/ripple/sentenceModel";
 import type { EditorFrame } from "../src/types";
@@ -119,9 +120,16 @@ test("cursor transports scroll, transfers editable ownership, and survives a sho
     cursor.render({ ...input, editable: secondOwner as unknown as HTMLElement, scrollTop: 30, caret: null }, 1048, true);
     assert.equal(overlay.hidden, false);
     cursor.render({ ...input, editable: secondOwner as unknown as HTMLElement, scrollTop: 30, caret: null }, 1300, true);
+    assert.equal(overlay.hidden, false);
+    const fading = Number(overlay.style.opacity);
+    for (let now = 1316; now <= 1556; now += 16) {
+      cursor.render({ ...input, editable: secondOwner as unknown as HTMLElement, scrollTop: 30, caret: null }, now, true);
+    }
+    assert.ok(fading > 0 && fading < 1);
     assert.equal(overlay.hidden, true);
-    assert.equal(secondOwner.classes.has("zentype-custom-caret-active"), false);
+    assert.equal(secondOwner.classes.has("zentype-custom-caret-active"), true);
     cursor.destroy();
+    assert.equal(secondOwner.classes.has("zentype-custom-caret-active"), false);
   } finally {
     if (previous) Object.defineProperty(globalThis, "document", previous);
     else Reflect.deleteProperty(globalThis, "document");
@@ -190,11 +198,12 @@ class PaintElement extends ElementStub {
     super();
     Object.assign(this.style, {
       getPropertyValue: (key: string) => this.style[key] ?? "",
+      getPropertyPriority: () => "",
       setProperty: (key: string, value: string) => { this.style[key] = value; },
       removeProperty: (key: string) => { delete this.style[key]; },
     });
   }
-  matches() { return !!this.dataset.nodeId; }
+  matches() { return !!this.dataset.nodeId || this.classes.has("protyle-action"); }
   contains(element: PaintElement | null): boolean {
     return !!element && (element === this || this.contains(element.parentElement));
   }
@@ -209,6 +218,41 @@ test("breathing CSS takes its delay, period and minimum alpha from config", () =
   assert.ok(CURSOR_MOTION_CSS.includes(`${MOTION.breatheCycleMs}ms`));
   assert.ok(CURSOR_MOTION_CSS.includes(`${MOTION.breatheAnimationDelayMs}ms`));
   assert.ok(CURSOR_MOTION_CSS.includes(`--zt-breathe-min-alpha: ${MOTION.breatheMinAlpha}`));
+});
+
+test("DebugKit defaults to full, records current-session evidence, and exports after stop", async () => {
+  const previousDebug = globalThis.__zentypeDebug;
+  const previousDebugHook = globalThis.__zentypeDebugHook;
+  const debug = initDebugHook();
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  try {
+    const started = await debug.start("debugkit-test");
+    assert.equal(started.profile, "full");
+    debug.record("session", "test-event", { value: 7, nested: { ok: true } });
+    debug.mark("circular-payload", { circular });
+    debug.recordFrame(frame(), { sampled: true });
+    await debug.stop();
+    assert.equal(debug.getState().active, false);
+    assert.ok(debug.getState().snapshotsCaptured >= 2);
+    assert.ok(debug.getRecentEvents().some(event => event.payload.name === "test-event"));
+    const bundle = JSON.parse(debug.exportRecording()) as {
+      schema: string;
+      session: { profile: string };
+      timeline: { events: unknown[] };
+      forensic: { events: unknown[] };
+    };
+    assert.equal(bundle.schema, "zentype-debug-bundle/v1");
+    assert.equal(bundle.session.profile, "full");
+    assert.ok(bundle.timeline.events.length > 0);
+    assert.ok(bundle.forensic.events.length > 0);
+  } finally {
+    debug.destroy();
+    if (previousDebug) globalThis.__zentypeDebug = previousDebug;
+    else delete globalThis.__zentypeDebug;
+    if (previousDebugHook) globalThis.__zentypeDebugHook = previousDebugHook;
+    else delete globalThis.__zentypeDebugHook;
+  }
 });
 
 test("cursor interrupts breathing from displayed opacity and fades through selection", () => withPresentation(body => {
@@ -231,6 +275,125 @@ test("cursor interrupts breathing from displayed opacity and fades through selec
   cursor.render(input, 3332, false);
   assert.equal(overlay.hidden, false);
   assert.ok(Number(overlay.style.opacity) < 1);
+  cursor.destroy();
+}));
+
+test("geometry release freezes breathing and reaches 95 percent fade in 120ms", () => withPresentation(body => {
+  const cursor = createCursor();
+  const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
+  for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, true);
+  cursor.render(input, 4000, false);
+  const overlay = body.children[0];
+  const ink = overlay.children[0];
+  assert.equal(ink.classes.has("zentype-breathing"), true);
+  cursor.release(10000, false);
+  assert.equal(ink.style.opacity, "0.4");
+  assert.equal(ink.classes.has("zentype-breathing"), false);
+  cursor.release(10060, false);
+  cursor.release(10120, false);
+  assert.ok(Number(overlay.style.opacity) < 0.05);
+  cursor.render({ ...input, caret: { x: 300, y: 200, height: 20 } }, 10136, false);
+  assert.equal(overlay.style.transform, `translate3d(300px,${200 - MOTION.caretLiftPx}px,0)`);
+  assert.ok(Number(overlay.style.opacity) > 0.05);
+  cursor.release(10152, true);
+  assert.equal(overlay.hidden, true);
+  cursor.destroy();
+}));
+
+test("editor switch reveals after eight stable samples and resets on geometry changes", () => withPresentation(body => {
+  const cursor = createCursor();
+  const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
+  cursor.switched(input.editor, 1000);
+  const overlay = body.children[0];
+  for (let i = 0; i < 7; i++) cursor.render(input, 1000 + i * 16, false);
+  assert.equal(overlay.hidden, true);
+  const moved = { ...input, caret: { x: 200, y: 300, height: 24 } };
+  for (let i = 0; i < 7; i++) cursor.render(moved, 1112 + i * 16, false);
+  assert.equal(overlay.hidden, true);
+  cursor.render(moved, 1224, false);
+  assert.equal(cursor.isSettling(), false);
+  assert.equal(overlay.hidden, false);
+  assert.equal(overlay.style.transform, `translate3d(200px,${300 - MOTION.caretLiftPx}px,0)`);
+  assert.deepEqual((overlay.children[0] as PaintElement).animations.at(-1)?.frames,
+    [{ opacity: 0 }, { opacity: 1 }]);
+  cursor.destroy();
+}));
+
+test("structural edits hold a transient caret until the host block mutation settles", () => withPresentation(body => {
+  const cursor = createCursor();
+  const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
+  cursor.render(input, 1000, true);
+  const overlay = body.children[0];
+  const original = overlay.style.transform;
+  cursor.stabilize(1016, 1176);
+  cursor.render({ ...input, caret: { x: 500, y: 300, height: 20 } }, 1032, true);
+  assert.equal(overlay.style.transform, original);
+  cursor.markStructureReady();
+  cursor.render({ ...input, caret: { x: 200, y: 300, height: 20 } }, 1048, true);
+  assert.equal(overlay.style.transform, original);
+  cursor.render({ ...input, caret: { x: 200, y: 300, height: 20 } }, 1064, true);
+  assert.notEqual(overlay.style.transform, `translate3d(500px,${300 - MOTION.caretLiftPx}px,0)`);
+  cursor.destroy();
+}));
+
+test("switch settling is bounded through missing geometry and cancelled by lifecycle", () => withPresentation(body => {
+  const cursor = createCursor();
+  const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
+  const overlay = body.children[0];
+  cursor.switched(input.editor, 1000);
+  for (let i = 0; i < 7; i++) cursor.render(input, 1000 + i * 16, false);
+  cursor.render({ ...input, caret: null }, 1112, false);
+  cursor.render(input, 1128, false);
+  assert.equal(overlay.hidden, true);
+  cursor.render({ ...input, caret: { x: 400, y: 300, height: 20 } }, 1700, false);
+  assert.equal(cursor.isSettling(), false);
+  assert.equal(overlay.hidden, false);
+  assert.equal(overlay.style.transform, `translate3d(400px,${300 - MOTION.caretLiftPx}px,0)`);
+  cursor.switched(input.editor, 2000);
+  cursor.render({ ...input, caret: null }, 2700, false);
+  assert.equal(cursor.isSettling(), false);
+  assert.equal(overlay.hidden, true);
+  cursor.switched(input.editor, 3000);
+  cursor.hide();
+  assert.equal(cursor.isSettling(), false);
+  cursor.switched(input.editor, 4000);
+  cursor.release(4016, false);
+  assert.equal(cursor.isSettling(), false);
+  cursor.switched(input.editor, 5000);
+  cursor.yieldSelection(5016, false);
+  assert.equal(cursor.isSettling(), false);
+  cursor.switched(input.editor, 6000);
+  cursor.render({ ...input, reducedMotion: true }, 6000, false);
+  assert.equal(cursor.isSettling(), false);
+  assert.equal(overlay.hidden, false);
+  cursor.destroy();
+}));
+
+test("caretless and selected editables retain native suppression until host release", () => withPresentation(body => {
+  const cursor = createCursor();
+  const first = new PaintElement();
+  const second = new PaintElement();
+  const input = frame({ editable: first as unknown as HTMLElement });
+  const overlay = body.children[0];
+  cursor.render(input, 1000, false);
+  for (let now = 1016; now < 1400; now += 16) {
+    cursor.render({ ...input, editable: second as unknown as HTMLElement,
+      caret: null, caretless: true }, now, false);
+  }
+  assert.equal(overlay.hidden, true);
+  assert.equal(first.classes.has("zentype-custom-caret-active"), false);
+  assert.equal(second.classes.has("zentype-custom-caret-active"), true);
+  assert.equal(cursor.yieldSelection(1400, false, first as unknown as HTMLElement), false);
+  assert.equal(second.classes.has("zentype-custom-caret-active"), false);
+  assert.equal(first.classes.has("zentype-custom-caret-active"), true);
+  cursor.render(input, 1416, false);
+  assert.equal(overlay.hidden, false);
+  cursor.release(1432, false);
+  assert.equal(first.classes.has("zentype-custom-caret-active"), false);
+  cursor.render({ ...input, caret: null }, 2000, false);
+  assert.equal(first.classes.has("zentype-custom-caret-active"), true);
+  cursor.hide();
+  assert.equal(first.classes.has("zentype-custom-caret-active"), false);
   cursor.destroy();
 }));
 
@@ -297,6 +460,80 @@ test("list reparenting transfers parent alpha to disjoint children without resta
   ripple.prepare(input, false, false, false);
   assert.equal(child.animations.at(-1)?.frames[1].opacity, 1);
   ripple.destroy();
+}));
+
+test("ancestor markers share the alpha of their direct list content", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const outer = new PaintElement();
+  const outerMarker = new PaintElement();
+  const outerContent = new PaintElement();
+  const nested = new PaintElement();
+  const active = new PaintElement();
+  const activeMarker = new PaintElement();
+  const activeContent = new PaintElement();
+  outer.dataset.nodeId = "outer"; outer.dataset.type = "NodeListItem";
+  outerMarker.classes.add("protyle-action");
+  outerContent.dataset.nodeId = "outer-content"; outerContent.dataset.type = "NodeParagraph";
+  nested.dataset.nodeId = "nested"; nested.dataset.type = "NodeList";
+  active.dataset.nodeId = "active"; active.dataset.type = "NodeListItem";
+  activeMarker.classes.add("protyle-action");
+  activeContent.dataset.nodeId = "active-content"; activeContent.dataset.type = "NodeParagraph";
+  const link = (parent: PaintElement, children: PaintElement[]) => {
+    parent.children = children;
+    children.forEach((child, index) => {
+      child.parentElement = parent;
+      child.previousElementSibling = children[index - 1] ?? null;
+      child.nextElementSibling = children[index + 1] ?? null;
+    });
+  };
+  link(editor, [outer]);
+  link(outer, [outerMarker, outerContent, nested]);
+  link(nested, [active]);
+  link(active, [activeMarker, activeContent]);
+  const ripple = createRipple();
+  ripple.prepare(frame({ editor: editor as unknown as HTMLElement, block: activeContent as unknown as HTMLElement,
+    editable: activeContent as unknown as HTMLElement, range: {} as Range }), false, true, true);
+  assert.equal(outerMarker.animations[0].frames[1].opacity, outerContent.animations[0].frames[1].opacity);
+  ripple.destroy();
+}));
+
+test("merged block releases copied Ripple opacity to its original host style", () => withPresentation(() => {
+  for (const connected of [false, true]) for (const original of ["", "0.7"]) {
+    for (const replacementStyle of ["0.4", "0.8", ""]) {
+      const editor = new PaintElement();
+      const active = new PaintElement();
+      const old = new PaintElement();
+      active.dataset.nodeId = "active";
+      old.dataset.nodeId = "merged";
+      old.style.opacity = original;
+      active.parentElement = old.parentElement = editor;
+      active.previousElementSibling = old;
+      old.nextElementSibling = active;
+      const ripple = createRipple();
+      const input = frame({ editor: editor as unknown as HTMLElement,
+        block: active as unknown as HTMLElement, editable: active as unknown as HTMLElement, range: {} as Range });
+      ripple.prepare(input, false, true, true);
+      old.animations[0].currentTime = MOTION.blockFadeMs;
+      assert.equal(old.style.opacity, "0.4");
+      const merged = new PaintElement();
+      merged.dataset.nodeId = old.dataset.nodeId;
+      merged.parentElement = editor;
+      merged.style.opacity = replacementStyle;
+      // The observed replacement carries opacity but no Ripple class.
+      old.isConnected = connected;
+      active.isConnected = false;
+      ripple.prepare({ ...input, block: merged as unknown as HTMLElement,
+        editable: merged as unknown as HTMLElement }, true, true, true);
+      assert.equal(merged.style.opacity, "1");
+      merged.animations.at(-1)!.onfinish!();
+      const expected = replacementStyle === "0.4" ? original : replacementStyle;
+      assert.equal(merged.style.opacity ?? "", expected);
+      assert.equal(merged.classes.has("zentype-ripple-block"), false);
+      ripple.clear();
+      assert.equal(merged.style.opacity ?? "", expected);
+      ripple.destroy();
+    }
+  }
 }));
 
 test("structural recovery waits for an event or deadline instead of sampling every frame", () => withPresentation(() => {

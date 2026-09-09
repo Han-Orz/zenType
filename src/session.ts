@@ -4,6 +4,7 @@ import { editableAt, readEditorFrame } from "./utils/editorScope";
 import { createCursor } from "./modules/cursor";
 import { createTypewriter } from "./modules/typewriter";
 import { createRipple } from "./modules/ripple";
+import type { DebugRecorder } from "./debug/types";
 
 export interface WritingSession {
   configure(features: Features): void;
@@ -12,11 +13,11 @@ export interface WritingSession {
   destroy(): void;
 }
 
-export function createWritingSession(initial: Features): WritingSession {
+export function createWritingSession(initial: Features, debug?: DebugRecorder): WritingSession {
   let features = { ...initial };
-  const cursor = createCursor();
+  const cursor = createCursor(debug);
   const typewriter = createTypewriter();
-  const ripple = createRipple();
+  const ripple = createRipple(debug);
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
   const listeners = new AbortController();
   let pending: number | null = null;
@@ -53,6 +54,7 @@ export function createWritingSession(initial: Features): WritingSession {
   }
   function wakeAfter(delay: number) {
     clearWake();
+    debug?.record("session", "wake-scheduled", { delay });
     wake = setTimeout(() => { wake = null; geometryDirty = true; queue(); }, delay);
   }
   /** True when a node is a block itself or contains one, without scanning leaves. */
@@ -65,9 +67,13 @@ export function createWritingSession(initial: Features): WritingSession {
     return false;
   }
   function remember(records: MutationRecord[]) {
+    if (records.length) debug?.recordMutations(records, frame);
     for (const record of records) {
       if (record.type === "childList") {
-        if (holdsBlock(record.addedNodes) || holdsBlock(record.removedNodes)) structureDirty = true;
+        if (holdsBlock(record.addedNodes) || holdsBlock(record.removedNodes)) {
+          structureDirty = true;
+          cursor.markStructureReady();
+        }
         for (const node of record.addedNodes) if (node instanceof HTMLElement) added.add(node);
       }
       if (!frame?.editable || frame.editable.contains(record.target) ||
@@ -117,6 +123,7 @@ export function createWritingSession(initial: Features): WritingSession {
     clearWake();
   }
   function suspend() {
+    debug?.record("session", "suspend", { reason: "lifecycle" });
     blocked = true;
     composingEditor = null;
     stopWriting();
@@ -130,8 +137,20 @@ export function createWritingSession(initial: Features): WritingSession {
     pending = null;
     if (disposed) return;
     try {
+      debug?.record("session", "frame-start", {
+        now,
+        blocked,
+        hidden: document.hidden,
+        geometryDirty,
+        contentDirty,
+        structureDirty,
+      });
       remember(mutation.takeRecords());
-      if (blocked || document.hidden) { cleanClones(); return; }
+      if (blocked || document.hidden) {
+        debug?.record("session", "frame-skipped", { reason: blocked ? "blocked" : "hidden" });
+        cleanClones();
+        return;
+      }
       let sampled = false;
       // A typewriter frame only moves the container: the frame already transports
       // the caret and the cursor by that displacement, so re-reading host geometry
@@ -141,6 +160,11 @@ export function createWritingSession(initial: Features): WritingSession {
         const next = readEditorFrame(reducedMotion.matches, composingEditor, frame?.editor);
         geometryDirty = false;
         if (!next) {
+          debug?.record("session", "frame-missing", {
+            now,
+            withinRecovery: now < retryUntil,
+            hadFrame: frame !== null,
+          });
           if (now < retryUntil && frame?.editor.isConnected && document.hasFocus() &&
               (document.activeElement === document.body || frame.editor.contains(document.activeElement))) {
             // Copied plugin styling must not survive a replacement just because
@@ -161,14 +185,20 @@ export function createWritingSession(initial: Features): WritingSession {
           if (fading) queue();
           return;
         }
-        if (frame && frame.editor !== next.editor) {
-          cursor.switched();
+        const editorChanged = frame !== null && frame.editor !== next.editor;
+        if (editorChanged) {
+          cursor.switched(next.editor, now);
           ripple.clear();
           typewriter.cancel();
           if (writingEditor !== next.editor) writingEditor = null;
           if (composingEditor !== next.editor) composingEditor = null;
         }
         frame = next;
+        debug?.recordFrame(next, {
+          now,
+          sampled,
+          editorChanged,
+        });
         observe(frame);
       }
       if (!frame) {
@@ -186,9 +216,12 @@ export function createWritingSession(initial: Features): WritingSession {
         // Same read-before-write order as the caret path: the selection fade reads
         // the ink opacity before Ripple invalidates the block set, otherwise the
         // first frame of a drag-selection forced the same document-scale recalc.
-        const fading = cursor.yieldSelection(now, reducedMotion.matches);
+        const fading = cursor.yieldSelection(now, reducedMotion.matches, frame.editable);
         ripple.prepare(frame, false, false, false);
         if (ripple.render(now, reducedMotion.matches) || fading) queue();
+        debug?.record("session", "frame-commit", {
+          now, selection: frame.selection, cursorMoving: fading, rippleMoving: false,
+        });
         return;
       }
       const writing = writingEditor === frame.editor;
@@ -216,6 +249,22 @@ export function createWritingSession(initial: Features): WritingSession {
       if (sampled || contentDirty || structureDirty) ripple.prepare(frame, contentDirty, structureDirty, features.ripple && writing);
       contentDirty = structureDirty = false;
       const rippleMoving = ripple.render(now, reducedMotion.matches);
+      debug?.record("typewriter", "frame", {
+        now,
+        requestedScroll: requested,
+        actualScroll: actual,
+        moving: typewriter.isMoving(),
+        locating: typewriter.isLocating(),
+      });
+      debug?.record("session", "frame-commit", {
+        now,
+        selection: frame.selection,
+        sampled,
+        cursorMoving,
+        rippleMoving,
+        typewriterMoving: typewriter.isMoving(),
+        settling,
+      });
       if (cursorMoving || typewriter.isMoving() || rippleMoving || settling) queue();
       else if ((wake === null || !frame.caret) && !composing) {
         // Recovery and typing pauses share the idle wake with CSS breathing.
@@ -226,6 +275,7 @@ export function createWritingSession(initial: Features): WritingSession {
         if (Number.isFinite(delay)) wakeAfter(delay);
       }
     } catch (error) {
+      debug?.record("session", "frame-error", { message: error instanceof Error ? error.message : String(error) });
       suspend();
       console.error("[zenType] presentation released after frame failure", error);
     }
@@ -237,6 +287,7 @@ export function createWritingSession(initial: Features): WritingSession {
     wakeAfter(MOTION.typingPauseMs + 1);
   }
   function handle(event: Event) {
+    debug?.recordEvent(event, frame);
     const editable = editableAt(event.target);
     if (["keydown", "pointerdown", "pointerup", "wheel", "touchmove", "scroll"].includes(event.type)) lastInteraction = performance.now();
     switch (event.type) {
@@ -270,8 +321,10 @@ export function createWritingSession(initial: Features): WritingSession {
         if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", "Escape"].includes(key.key)) stopWriting();
         if (!key.ctrlKey && !key.metaKey && !key.altKey && ["Enter", "Backspace", "Delete", "Tab"].includes(key.key)) {
           activate(editable);
-          retryUntil = performance.now() + MOTION.recoveryMs;
+          const now = performance.now();
+          retryUntil = now + MOTION.recoveryMs;
           structuralUntil = retryUntil;
+          cursor.stabilize(now, structuralUntil);
         }
         break;
       }
@@ -291,6 +344,7 @@ export function createWritingSession(initial: Features): WritingSession {
       case "pointerdown":
         pointerDown = true;
         structuralUntil = 0;
+        cursor.cancelStructuralSettle();
         stopWriting();
         break;
       case "pointerup":
@@ -302,6 +356,7 @@ export function createWritingSession(initial: Features): WritingSession {
       case "wheel":
       case "touchmove":
         structuralUntil = 0;
+        cursor.cancelStructuralSettle();
         stopWriting();
         break;
       case "scroll": {

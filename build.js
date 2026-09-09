@@ -1,5 +1,7 @@
 const esbuild = require('esbuild');
 const { sassPlugin } = require('esbuild-sass-plugin');
+const { execFileSync } = require('child_process');
+const { createHash } = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
@@ -8,6 +10,37 @@ const watch = process.argv.includes('--watch');
 const outdir = path.join(__dirname, dev ? 'dev' : 'dist');
 const assets = ['plugin.json', 'icon.png', 'preview.png', 'README.md', 'README_zh-CN.md'];
 const files = ['index.js', ...assets];
+
+function resolveBuildSha() {
+  try {
+    const value = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: __dirname,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return /^[0-9a-f]{40,64}$/i.test(value) ? value : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function resolveBuildFingerprint() {
+  const sourceFiles = ['build.js', 'package.json', 'tsconfig.json', 'plugin.json'];
+  const visit = relative => {
+    for (const entry of fs.readdirSync(path.join(__dirname, relative), { withFileTypes: true })) {
+      const file = path.join(relative, entry.name);
+      if (entry.isDirectory()) visit(file);
+      else if (entry.isFile()) sourceFiles.push(file);
+    }
+  };
+  visit('src');
+  const hash = createHash('sha256').update(dev ? 'dev\0' : 'production\0');
+  for (const file of sourceFiles.sort()) {
+    const contents = fs.readFileSync(path.join(__dirname, file));
+    hash.update(`${file}\0${contents.length}\0`).update(contents);
+  }
+  return hash.digest('hex');
+}
 
 function copyAssets() {
   for (const name of assets) fs.copyFileSync(path.join(__dirname, name), path.join(outdir, name));
@@ -51,9 +84,32 @@ async function main() {
     format: 'cjs',
     target: 'es2022',
     external: ['siyuan'],
+    define: {
+      __ZENTYPE_DEV__: JSON.stringify(dev),
+    },
     sourcemap: true,
     minify: !dev,
-    plugins: [sassPlugin({ type: 'css-text' })],
+    plugins: [
+      {
+        name: 'debug-build-identity',
+        setup(build) {
+          build.onLoad({ filter: /[\\/]debug[\\/]buildIdentity\.ts$/ }, () => ({
+            contents: `export const buildSha = ${JSON.stringify(resolveBuildSha())};\nexport const buildFingerprint = ${JSON.stringify(resolveBuildFingerprint())};`,
+            loader: 'ts',
+          }));
+        },
+      },
+      {
+        name: 'debug-hook-build-mode',
+        setup(build) {
+          if (dev) return;
+          build.onResolve({ filter: /^\.\/modules\/debugHook$/ }, () => ({
+            path: path.join(__dirname, 'src/modules/debugHook.noop.ts'),
+          }));
+        },
+      },
+      sassPlugin({ type: 'css-text' }),
+    ],
     logLevel: 'info',
   };
   if (watch) {

@@ -1,12 +1,36 @@
 import { MOTION, RIPPLE_LEVELS, SENTENCE_ALPHA } from "../config";
 import { approach } from "../motion";
 import type { EditorFrame } from "../types";
+import type { DebugRecorder } from "../debug/types";
 import { resolveRangeTextPoint } from "../utils/rangeTextPoint";
 import { splitSentences, resolveActiveSentenceRanges, type SentenceRange } from "./ripple/sentenceModel";
 import { projectText, sentenceRange, mapUnchangedBoundaries, type TextEntry } from "./ripple/textProjection";
 
 type BlockPaint = { value: number; target: number; from: number; animation: Animation | null; original: string; written: string; hadClass: boolean };
 type SentencePaint = SentenceRange & { range: Range; value: number; target: number };
+
+function isRippleTarget(element: Element): element is HTMLElement {
+  return element instanceof HTMLElement &&
+    (!!(element as HTMLElement).dataset.nodeId || element.classList.contains("protyle-action"));
+}
+
+/**
+ * A marker is a visual unit of its list item, not a sibling one level closer
+ * than that item's direct content. The DOM puts the marker before the content
+ * and the nested list, so raw sibling distance gives it the wrong alpha.
+ */
+function markerDistance(branch: HTMLElement, depth: number, distance: number): number {
+  if (branch.dataset.type !== "NodeList") return depth;
+  const item = branch.parentElement;
+  if (!item || item.dataset.type !== "NodeListItem") return depth + distance;
+  const siblings = Array.from(item.children).filter(isRippleTarget);
+  const branchIndex = siblings.indexOf(branch);
+  const directContent = siblings.find(element => element !== branch &&
+    !element.classList.contains("protyle-action") && element.dataset.type !== "NodeList");
+  const contentIndex = directContent ? siblings.indexOf(directContent) : -1;
+  if (branchIndex < 0 || contentIndex < 0) return depth + distance;
+  return depth + Math.max(1, Math.abs(branchIndex - contentIndex));
+}
 
 function collectTargets(block: HTMLElement, editor: HTMLElement): Map<HTMLElement, number> {
   const targets = new Map<HTMLElement, number>();
@@ -18,7 +42,9 @@ function collectTargets(block: HTMLElement, editor: HTMLElement): Map<HTMLElemen
       let sibling = branch[direction];
       for (let distance = 1; sibling && distance <= 48; sibling = sibling[direction]) {
         if (!(sibling instanceof HTMLElement) || !sibling.matches("[data-node-id], .protyle-action")) continue;
-        targets.set(sibling, RIPPLE_LEVELS[Math.min(sibling.classList.contains("protyle-action") ? depth : depth + distance, RIPPLE_LEVELS.length - 1)]);
+        const level = sibling.classList.contains("protyle-action")
+          ? markerDistance(branch, depth, distance) : depth + distance;
+        targets.set(sibling, RIPPLE_LEVELS[Math.min(level, RIPPLE_LEVELS.length - 1)]);
         distance++;
       }
     }
@@ -33,7 +59,7 @@ function paintKey(element: HTMLElement): string | undefined {
     ? element.parentElement.dataset.nodeId + ":action" : undefined);
 }
 
-export function createRipple() {
+export function createRipple(debug?: DebugRecorder) {
   const style = document.createElement("style");
   document.head.append(style);
   // `currentColor` here is deliberate, not a leftover: the generated rule uses a
@@ -43,8 +69,10 @@ export function createRipple() {
   const supported = typeof Highlight !== "undefined" && !!CSS.highlights &&
     CSS.supports("color", "rgb(from currentColor r g b / calc(alpha * 0.6))");
   const names = Array.from({ length: 65 }, (_, i) => "zentype-remake-sentence-" + i);
-  if (supported) style.textContent = names.map((name, i) =>
-    "::highlight(" + name + ") { color: rgb(from var(--zentype-text-color) r g b / calc(alpha * " + (i / 64) + ")); }").join("\n");
+  // Ripple owns opacity animation; host transitions must not override its WAAPI
+  // baseline (notably the theme's transition on list markers).
+  style.textContent = ".zentype-ripple-block { transition-property: none !important; }\n" + (supported ? names.map((name, i) =>
+    "::highlight(" + name + ") { color: rgb(from var(--zentype-text-color) r g b / calc(alpha * " + (i / 64) + ")); }").join("\n") : "");
   const blocks = new Map<HTMLElement, BlockPaint>();
   let targets = new Map<HTMLElement, number>();
   const colors = new Map<HTMLElement, { original: string; written: string }>();
@@ -131,6 +159,13 @@ export function createRipple() {
     };
   }
   function prepare(frame: EditorFrame, contentDirty: boolean, structureDirty: boolean, enabled: boolean) {
+    debug?.record("ripple", "prepare", {
+      enabled,
+      contentDirty,
+      structureDirty,
+      hasBlock: frame.block !== null,
+      selection: frame.selection,
+    });
     if (!enabled) {
       targets.clear();
       for (const [element, paint] of blocks) {
@@ -143,6 +178,12 @@ export function createRipple() {
       return;
     }
     if (!frame.block || !frame.editable || !frame.range) {
+      debug?.record("ripple", "prepare-skipped", {
+        reason: "missing-frame-data",
+        hasBlock: frame.block !== null,
+        hasEditable: frame.editable !== null,
+        hasRange: frame.range !== null,
+      });
       // Invalid live ranges are never retained across a structural replacement.
       if (contentDirty || structureDirty) clearSentences();
       return;
@@ -202,13 +243,17 @@ export function createRipple() {
     if (changed || structureDirty) {
       targets = collectTargets(frame.block, frame.editor);
       targets.set(frame.block, 1);
-      const previous = new Map<string, number>();
+      let handoffCount = 0;
+      let releaseCount = 0;
+      let transferCount = 0;
+      const releasedTransitions: Array<{ element: HTMLElement; value: string; priority: string }> = [];
+      const previous = new Map<string, Pick<BlockPaint, "value" | "original" | "written">>();
       for (const [element, paint] of blocks) {
         const key = paintKey(element);
         const value = sample(paint);
         // Carry the local alpha across a same-node-id replacement even while the
         // old element is still connected: the host inserts before it removes.
-        if (key) previous.set(key, value);
+        if (key) previous.set(key, { value, original: paint.original, written: paint.written });
       }
       // Capture the old branch alpha before releasing an ancestor owner. A
       // replaced ancestor is looked up by node id as well, so a host that inserts
@@ -219,9 +264,9 @@ export function createRipple() {
       const baselines = new Map<HTMLElement, number>();
       const targetAncestors = new Set<HTMLElement>();
       for (const element of targets.keys()) {
-        let value = blocks.get(element)?.value ?? previous.get(paintKey(element) ?? "") ?? 1;
+        let value = blocks.get(element)?.value ?? previous.get(paintKey(element) ?? "")?.value ?? 1;
         for (let parent = element.parentElement; parent && parent !== frame.editor; parent = parent.parentElement) {
-          value *= blocks.get(parent)?.value ?? previous.get(paintKey(parent) ?? "") ?? 1;
+          value *= blocks.get(parent)?.value ?? previous.get(paintKey(parent) ?? "")?.value ?? 1;
           targetAncestors.add(parent);
         }
         baselines.set(element, value);
@@ -238,11 +283,66 @@ export function createRipple() {
           nearestTarget.set(element, parent);
           if (blocks.has(parent) || previous.has(paintKey(parent) ?? "")) break;
           const best = handoff.get(parent);
-          if (!best || best.value < paint.value) handoff.set(parent, { element, value: paint.value });
+          if (!best || best.value < paint.value) {
+            handoff.set(parent, { element, value: paint.value });
+            handoffCount++;
+          }
           break;
         }
       }
       for (const [target, { value }] of handoff) baselines.set(target, (baselines.get(target) ?? 1) * value);
+      const handoffBaselines = new Set<HTMLElement>();
+      const ensurePaint = (element: HTMLElement, target: number, value: number): BlockPaint | null => {
+        let paint = blocks.get(element);
+        if (paint && Math.abs(paint.value - value) > 0.002) {
+          paint.value = value;
+          paint.written = "";
+        }
+        if (!paint) {
+          if (value === 1 && target === 1) return null;
+          const predecessor = previous.get(paintKey(element) ?? "");
+          // SiYuan can copy our opacity without our class when merging blocks.
+          // Carry its original style too, or release would restore our own dim.
+          const original = predecessor && element.style.opacity === predecessor.written
+            ? predecessor.original : element.style.opacity;
+          paint = { value, from: value, target, animation: null, original,
+            written: "", hadClass: element.classList.contains("zentype-ripple-block") };
+          blocks.set(element, paint);
+        }
+        return paint;
+      };
+      // A structural handoff must commit the incoming owner's visual baseline
+      // before releasing the old owner. This is the v2.8.1 marker guarantee:
+      // reparenting cannot expose a bright intermediate marker for one paint.
+      for (const [element] of handoff) {
+        const value = baselines.get(element);
+        if (value === undefined) continue;
+        const target = targets.get(element)!;
+        const paint = ensurePaint(element, target, value);
+        if (!paint) continue;
+        paint.animation?.cancel();
+        paint.animation = null;
+        paint.from = paint.value = value;
+        paint.target = target;
+        paint.written = String(value);
+        element.style.opacity = paint.written;
+        element.classList.add("zentype-ripple-block");
+        handoffBaselines.add(element);
+      }
+      // Suppress source transitions before the baseline flush. The same flush
+      // commits both the incoming marker and every source that will be released.
+      for (const [element] of blocks) {
+        if (targets.has(element)) continue;
+        const target = nearestTarget.get(element);
+        const covered = targetAncestors.has(element) || (!!target && handoff.get(target)?.element === element);
+        if (!element.isConnected || !covered) continue;
+        releasedTransitions.push({ element,
+          value: element.style.getPropertyValue("transition-property"),
+          priority: element.style.getPropertyPriority("transition-property") });
+        element.style.setProperty("transition-property", "none", "important");
+      }
+      const baselineElement = handoffBaselines.values().next().value ?? releasedTransitions[0]?.element;
+      if (baselineElement) void getComputedStyle(baselineElement).opacity;
       for (const [element, paint] of blocks) {
         if (targets.has(element)) continue;
         const target = nearestTarget.get(element);
@@ -253,10 +353,12 @@ export function createRipple() {
         // Folded alpha must be released even mid-fade, otherwise it is applied
         // twice. Sibling residuals are normalized before continuing their fade.
         if (!element.isConnected || covered) {
+          releaseCount++;
           release(element, paint);
         } else {
           const transferred = target && handoff.get(target);
           if (transferred) {
+            transferCount++;
             paint.value /= transferred.value;
             paint.written = "";
           }
@@ -264,20 +366,32 @@ export function createRipple() {
         }
       }
       for (const [element, target] of targets) {
-        let paint = blocks.get(element);
         const value = baselines.get(element)!;
-        if (paint && Math.abs(paint.value - value) > 0.002) {
-          paint.value = value;
-          paint.written = "";
-        }
-        if (!paint) {
-          if (value === 1 && target === 1) continue;
-          paint = { value, from: value, target, animation: null, original: element.style.opacity,
-            written: "", hadClass: element.classList.contains("zentype-ripple-block") };
-          blocks.set(element, paint);
-        }
+        const paint = ensurePaint(element, target, value);
+        if (!paint) continue;
+        // The baseline was already committed above; force the normal target
+        // animation to start from it rather than treating the write as settled.
+        if (handoffBaselines.has(element)) paint.written = "";
         retarget(element, paint, target, frame.reducedMotion);
       }
+      if (releasedTransitions.length) {
+        // The baseline flush happened before source release. Restore theme
+        // transitions only after the old owners are no longer visible.
+        for (const { element, value, priority } of releasedTransitions) {
+          if (value) element.style.setProperty("transition-property", value, priority);
+          else element.style.removeProperty("transition-property");
+        }
+      }
+      debug?.record("ripple", "ownership-plan", {
+        changed,
+        targetCount: targets.size,
+        previousCount: previous.size,
+        baselineCount: baselines.size,
+        handoffCount,
+        releaseCount,
+        transferCount,
+        blockCount: blocks.size,
+      });
       block = frame.block;
     }
     if (!sentenceReady) return;
@@ -311,7 +425,11 @@ export function createRipple() {
     const elapsed = lastTime ? Math.min(MOTION.maxFrameDeltaMs, now - lastTime) : 16;
     lastTime = now;
     let moving = false;
-    if (!supported) { if (!moving) lastTime = 0; return moving; }
+    if (!supported) {
+      debug?.record("ripple", "render", { supported: false, moving: false, sentenceCount: sentences.length });
+      if (!moving) lastTime = 0;
+      return moving;
+    }
     for (const ranges of scratch) ranges.length = 0;
     for (const paint of sentences) {
       paint.value = approach(paint.value, paint.target, elapsed,
@@ -336,10 +454,18 @@ export function createRipple() {
     scratch = previous;
     if (!block && !moving) clearSentences();
     if (!moving) lastTime = 0;
+    debug?.record("ripple", "render", {
+      supported: true,
+      moving,
+      sentenceCount: sentences.length,
+      blockCount: blocks.size,
+      now,
+    });
     return moving;
   }
 
   function clear() {
+    debug?.record("ripple", "clear", { blockCount: blocks.size, sentenceCount: sentences.length });
     for (const [element, paint] of blocks) release(element, paint);
     clearSentences();
     block = null;
