@@ -10,11 +10,14 @@ DebugKit 是 zenType 的本地调试记录器，用来回答“事件发生了�
 npm run build:dev
 ```
 
-正式构建通过 `debugHook.noop.ts` 替换 DebugKit，不注册监听器、不读取 DOM、不创建 observer、timer 或 rAF：
+正式构建不是运行时 noop。esbuild 会删除所有 `ZENTYPE_DEBUG:` 标记的诊断语句，并把只在开发分支调用的 installer、controller、recorder、snapshot、serialization 和 export 模块整体 tree-shake 掉：
 
 ```bash
 npm run build
+npm run verify:prod
 ```
+
+`verify:prod` 同时构建 production/development，检查 `dist/index.js` 和 `package.zip` 内的脚本，禁止 DebugKit implementation/event marker，并证明 development 仍保留完整 DebugKit。production 不生成会保留 `sourcesContent` 的 source map；development 保留完整 map。业务源码里的 label 只标记可完全删除的诊断 statement；正确性逻辑不得藏在 label 中。
 
 Full 会话同时保留两类有界记录：
 
@@ -59,7 +62,7 @@ const json = debug.exportRecording();
 
 ## 诊断限制
 
-### remake.2.1 结构事务
+### remake.2.2 结构事务
 
 Session 的 `structure-*` 事件来自共享 gate，不增加 snapshot、observer 或 scheduler：
 
@@ -69,11 +72,11 @@ Session 的 `structure-*` 事件来自共享 gate，不增加 snapshot、observe
 - `structure-sample`：intent 阶段记录 input/non-structural observation 与等待/ordinary 原因；evidence 阶段记录 caret、quiet、stableFrames 与等待/commit 原因。
 - `structure-stable` / `structure-commit`：安静窗口和连续几何采样通过，允许统一提交。
 - `structure-timeout` / `structure-release`：没有证明稳定，释放效果；不能把它当成成功提交。
-- `structure-cancel`：普通输入无结构证据、用户抢占或生命周期取消。
+- `structure-cancel`：ordinary 已经通过 quiet confirmation，或用户抢占、生命周期取消。
 
 Ripple 的 `presentation-hold`、`replacement-carry`、`ownership-commit`、`stale-recovery` 与 `ownership-limit` 解释暂停、旧 owner 接管、最终计划、低频异常生命周期回收和有界退让。`blockCount` 表示内存中持有的 WAAPI effects；正常 block 绘制不再生成 `.zentype-ripple-block` 或 inline opacity。动画 id 为 `zentype-ripple`，仅用于精确识别插件所有权，不是 DOM 属性或持久 registry。
 
-仓库未包含此次用户提到的原始 DebugKit JSON；不能把人工序列或代码推断标成 trace-derived evidence。deterministic ordering 已自动测试；Chromium marker fixture 因当前 runner 缺少浏览器且云浏览器拒绝本地 fixture URL 而未执行，真实宿主的 marker/布局连续性仍待确认。
+仓库未包含此次用户提到的原始 DebugKit JSON；不能把人工序列或代码推断标成 trace-derived evidence。deterministic ordering 已自动测试；当前环境没有 Docker、本地思源进程或 Chromium binary，因此没有把 marker/布局连续性标成真实宿主观测。
 
 Full 快照可能读取 `getBoundingClientRect()`、`getComputedStyle()`、Selection 和有限 DOM 树，因此会改变极端时序。它适合定位事件顺序、结构替换和视觉 ownership 问题，不适合直接作为性能基线。
 

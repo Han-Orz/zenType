@@ -71,7 +71,7 @@ export function createBlockPainter(debug?: DebugRecorder) {
         animation.cancel();
         released++;
       }
-      if (released) debug?.record("ripple", "stale-recovery", { released });
+      ZENTYPE_DEBUG: if (released) debug?.record("ripple", "stale-recovery", { released });
     },
     resume(reducedMotion: boolean) {
       if (!frozen && !reducedMotion) return;
@@ -88,7 +88,7 @@ export function createBlockPainter(debug?: DebugRecorder) {
         sample(paint);
         if (paint.animation.playState === "running") paint.animation.pause();
       }
-      debug?.record("ripple", "presentation-hold", { blockCount: paints.size });
+      ZENTYPE_DEBUG: debug?.record("ripple", "presentation-hold", { blockCount: paints.size });
     },
     /** Rebind only existing semantic owners; never plan against intermediate DOM. */
     rebind(added: readonly HTMLElement[]) {
@@ -101,7 +101,7 @@ export function createBlockPainter(debug?: DebugRecorder) {
       });
       return () => {
         if (paints.size + replacements.length > STRUCTURE_LIMITS.nodes) {
-          debug?.record("ripple", "ownership-limit", { phase: "replacement" });
+          ZENTYPE_DEBUG: debug?.record("ripple", "ownership-limit", { phase: "replacement" });
           clear();
           return;
         }
@@ -109,7 +109,7 @@ export function createBlockPainter(debug?: DebugRecorder) {
           write(element, { value: old.value, target: frozen ? old.value : old.target }, base, false);
           if (frozen) paints.get(element)?.animation.pause();
         }
-        if (replacements.length) debug?.record("ripple", "replacement-carry", { count: replacements.length, blockCount: paints.size });
+        ZENTYPE_DEBUG: if (replacements.length) debug?.record("ripple", "replacement-carry", { count: replacements.length, blockCount: paints.size });
       };
     },
     /** Read stage returns a write-only commit, so sentence/color reads can finish first. */
@@ -129,7 +129,7 @@ export function createBlockPainter(debug?: DebugRecorder) {
       }
       const steps = planHandoff(old, targets, editor);
       if (steps.size > STRUCTURE_LIMITS.nodes) return () => {
-        debug?.record("ripple", "ownership-limit", { phase: "commit" });
+        ZENTYPE_DEBUG: debug?.record("ripple", "ownership-limit", { phase: "commit" });
         clear();
       };
       const bases = new Map([...steps].map(([element]) => [element, paints.get(element)?.base ?? Number(getComputedStyle(element).opacity)]));
@@ -137,7 +137,7 @@ export function createBlockPainter(debug?: DebugRecorder) {
         frozen = false;
         for (const [element, step] of steps) write(element, step, bases.get(element)!, reducedMotion);
         for (const element of paints.keys()) if (!steps.has(element)) release(element);
-        debug?.record("ripple", "ownership-commit", { targetCount: targets.size, previousCount: old.size,
+        ZENTYPE_DEBUG: debug?.record("ripple", "ownership-commit", { targetCount: targets.size, previousCount: old.size,
           stepCount: steps.size, blockCount: paints.size });
       };
     },

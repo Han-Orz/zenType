@@ -109,3 +109,24 @@ There are no Tab/Backspace coordinate cases, extra observers, second scheduler, 
 - `tests/ripple-marker.browser.ts`: execution attempted. The local Playwright runtime had no Chromium, two browser downloads timed out, and the cloud browser rejected the local fixture URL. This is an environment-blocked check, not a pass.
 
 The runtime complexity added since `5c8db10` is limited to state that represents observed host ordering and low-frequency WAAPI provenance recovery. The larger line increase is deterministic Session test infrastructure and characterization coverage, not product-side scheduling machinery.
+
+## remake.2.2 closure review
+
+Baseline: `b3a0c05aaad1e345863093f4a269dfd8c61b26c3`.
+
+Direct review of SiYuan v3.8.3 at `8641553a` found that the ordinary input listener schedules `input()` through `setTimeout(0)`. Native characterData can therefore precede later normalization, same-ID replacement or semantic childList work. This supersedes remake.2.1's next-sample ordinary claim: `inputObserved && nonStructuralObserved` is only a candidate and needs 48ms without further classified activity. An intent with no confirming mutation releases at the existing 160ms deadline without publishing sampled geometry.
+
+The authority verdict is **B: small correction required**. The shared gate, single Session rAF/observer, effect separation and structural evidence recovery remain valid. No Cursor, Typewriter, Ripple, classifier or animation algorithm was rewritten.
+
+### Brooks review
+
+| Addition | Error class removed | Enterprise-only cost? |
+| --- | --- | --- |
+| Post-input quiet confirmation | Prevents a source-proven later SiYuan task from being preceded by an authoritative visual commit | No new state, key branch, timer or scheduler; reuses activity and quiet budget |
+| `ZENTYPE_DEBUG` labeled statements | Makes production payload construction impossible instead of relying on a noop receiver | One local label convention, enforced by artifact test |
+| `debugPlugin.ts` dev wiring boundary | Lets esbuild tree-shake commands/controller/implementation as one development-only graph | Removes production machinery and shrinks `index.ts` responsibility |
+| Production artifact verifier | Prevents checking only `dist` while shipping stale diagnostics in the ZIP | Small build-only parser for the exact non-ZIP64 archive emitted here |
+| `tsconfig.test.json` and CI | Keeps tests strict and makes runtime/build/artifact invariants repeatable | Two small configs; no framework, browser dependency or lint migration |
+| Awaited save chain on unload | Prevents an old plugin instance from writing settings after a re-enable | Uses the official async lifecycle; no queue beyond the existing save serialization |
+
+Anything that merely copied plugin-sample's Webpack/lint stack, added browser installation to required CI, special-cased Tab/Backspace, or changed motion aesthetics was rejected.

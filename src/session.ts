@@ -55,12 +55,12 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
   }
   function wakeAfter(delay: number) {
     clearWake();
-    debug?.record("session", "wake-scheduled", { delay });
+    ZENTYPE_DEBUG: debug?.record("session", "wake-scheduled", { delay });
     wake = setTimeout(() => { wake = null; geometryDirty = true; queue(); }, delay);
   }
   function remember(records: MutationRecord[]) {
     if (!records.length) return;
-    debug?.recordMutations(records, frame);
+    ZENTYPE_DEBUG: debug?.recordMutations(records, frame);
     const changes = classifyMutations(records);
     if (changes.kind !== "text") structureDirty = true;
     if (observedEditor && !blocked && !pointerDown) structure.mutation(observedEditor, performance.now(), changes.kind);
@@ -108,7 +108,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     clearWake();
   }
   function suspend() {
-    debug?.record("session", "suspend", { reason: "lifecycle" });
+    ZENTYPE_DEBUG: debug?.record("session", "suspend", { reason: "lifecycle" });
     blocked = true;
     structure.cancel("lifecycle");
     composingEditor = null;
@@ -123,7 +123,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     pending = null;
     if (disposed) return;
     try {
-      debug?.record("session", "frame-start", {
+      ZENTYPE_DEBUG: debug?.record("session", "frame-start", {
         now,
         blocked,
         hidden: document.hidden,
@@ -133,7 +133,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
       });
       remember(mutation.takeRecords());
       if (blocked || document.hidden) {
-        debug?.record("session", "frame-skipped", { reason: blocked ? "blocked" : "hidden" });
+        ZENTYPE_DEBUG: debug?.record("session", "frame-skipped", { reason: blocked ? "blocked" : "hidden" });
         cleanClones();
         return;
       }
@@ -169,13 +169,13 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
             cursor.hide(); ripple.clear(); stopWriting(); cleanClones();
             frame = next;
             observe(next);
-            debug?.record("session", "structure-release", { now, reason: decision });
+            ZENTYPE_DEBUG: debug?.record("session", "structure-release", { now, reason: decision });
             return;
           }
-          debug?.record("session", "structure-commit", { now, authority: "quiet-and-stable" });
+          ZENTYPE_DEBUG: debug?.record("session", "structure-commit", { now, authority: "quiet-and-stable" });
         }
         if (!next) {
-          debug?.record("session", "frame-missing", {
+          ZENTYPE_DEBUG: debug?.record("session", "frame-missing", {
             now,
             withinRecovery: now < retryUntil,
             hadFrame: frame !== null,
@@ -209,7 +209,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           if (composingEditor !== next.editor) composingEditor = null;
         }
         frame = next;
-        debug?.recordFrame(next, {
+        ZENTYPE_DEBUG: debug?.recordFrame(next, {
           now,
           sampled,
           editorChanged,
@@ -231,7 +231,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         commitRipple();
         cleanClones();
         if (ripple.render(now, reducedMotion.matches) || fading) queue();
-        debug?.record("session", "frame-commit", {
+        ZENTYPE_DEBUG: debug?.record("session", "frame-commit", {
           now, selection: frame.selection, cursorMoving: fading, rippleMoving: false,
         });
         return;
@@ -264,14 +264,14 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
       cleanClones();
       contentDirty = structureDirty = false;
       const rippleMoving = ripple.render(now, reducedMotion.matches);
-      debug?.record("typewriter", "frame", {
+      ZENTYPE_DEBUG: debug?.record("typewriter", "frame", {
         now,
         requestedScroll: requested,
         actualScroll: actual,
         moving: typewriter.isMoving(),
         locating: typewriter.isLocating(),
       });
-      debug?.record("session", "frame-commit", {
+      ZENTYPE_DEBUG: debug?.record("session", "frame-commit", {
         now,
         selection: frame.selection,
         sampled,
@@ -290,7 +290,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         if (Number.isFinite(delay)) wakeAfter(delay);
       }
     } catch (error) {
-      debug?.record("session", "frame-error", { message: error instanceof Error ? error.message : String(error) });
+      ZENTYPE_DEBUG: debug?.record("session", "frame-error", { message: error instanceof Error ? error.message : String(error) });
       suspend();
       console.error("[zenType] presentation released after frame failure", error);
     }
@@ -302,7 +302,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     wakeAfter(MOTION.typingPauseMs + 1);
   }
   function handle(event: Event) {
-    debug?.recordEvent(event, frame);
+    ZENTYPE_DEBUG: debug?.recordEvent(event, frame);
     const editable = editableAt(event.target);
     if (["keydown", "pointerdown", "pointerup", "wheel", "touchmove", "scroll"].includes(event.type)) lastInteraction = performance.now();
     switch (event.type) {

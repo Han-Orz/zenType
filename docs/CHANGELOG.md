@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.9.0-remake.2.2 (2026-09-09) — Host contract and production hardening
+
+- 以 SiYuan v3.8.3 `8641553a` 和官方 plugin-sample `d9ad60b5` 直接审计 Tab、删除、Enter、Selection、caretScroll、IME 与插件生命周期，并记录证据等级。
+- 修正普通路径确认：早期 text/representation mutation 不再在 SiYuan 后续 input task 运行前立即建立 authority；48ms activity quiet 与 160ms deadline 均保持有界。
+- 生产构建编译期删除 DebugKit statements、payload 与 implementation；`verify:prod` 同时检查 `dist/index.js`、`package.zip` 和开发构建保留性。
+- 增加测试源码 strict TypeScript config、34 项 ordering/ownership tests 与轻量 GitHub Actions；更新 `siyuan` types 至 1.2.7。
+- 插件卸载等待已排队的设置保存，避免 disable/re-enable 时旧实例写入与新实例竞争。
+
 ## v2.9.0-remake.1 (2026-09-08) — Real-host baseline
 
 - Shared host observation and one frame scheduler; effects retain independent numerical presentation state.

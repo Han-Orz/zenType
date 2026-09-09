@@ -87,7 +87,12 @@ async function main() {
     define: {
       __ZENTYPE_DEV__: JSON.stringify(dev),
     },
-    sourcemap: true,
+    // Debug payloads are built inside labeled statements. Production drops the
+    // complete statement before bundling/minification, including its arguments.
+    dropLabels: dev ? [] : ['ZENTYPE_DEBUG'],
+    // Production source maps would retain dropped diagnostics as sourcesContent
+    // even when the executable graph is clean. Development keeps full maps.
+    sourcemap: dev,
     minify: !dev,
     plugins: [
       {
@@ -96,15 +101,6 @@ async function main() {
           build.onLoad({ filter: /[\\/]debug[\\/]buildIdentity\.ts$/ }, () => ({
             contents: `export const buildSha = ${JSON.stringify(resolveBuildSha())};\nexport const buildFingerprint = ${JSON.stringify(resolveBuildFingerprint())};`,
             loader: 'ts',
-          }));
-        },
-      },
-      {
-        name: 'debug-hook-build-mode',
-        setup(build) {
-          if (dev) return;
-          build.onResolve({ filter: /^\.\/modules\/debugHook$/ }, () => ({
-            path: path.join(__dirname, 'src/modules/debugHook.noop.ts'),
           }));
         },
       },

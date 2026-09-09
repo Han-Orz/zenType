@@ -1,6 +1,6 @@
-# zenType v2.9.0-remake.2.1
+# zenType v2.9.0-remake.2.2
 
-顺滑光标、打字机滚动、涟漪聚焦。remake.2.1 保留单一 WritingSession / rAF / observer，并以共享结构 authority boundary 统一约束三个效果；尚未完成真实思源宿主验收。
+顺滑光标、打字机滚动、涟漪聚焦。remake.2.2 保留单一 WritingSession / rAF / observer，以思源 v3.8.3 官方源码验证共享结构 authority boundary，并从生产构建中编译期剔除开发诊断代码。
 
 ## 写作体验
 
@@ -9,7 +9,7 @@
 - 几何暂不可读时按 160ms 预算保留并重新观测；空块与块边界按光标所在块恢复位置，而不是按整个 editable。预算用尽后，若仍在同一 editable、仍是带 Range 的折叠选区且冻结位置在屏幕内，则继续保留呈现而不交还原生 caret。160ms 是基线恢复预算，不是宿主事务完成时限。
 - 打字机滚动采用舒适区和当前 scrollTop；快速反向输入可以接管运动，手动浏览会停止自动跟随。
 - Ripple 从当前亮度接续，普通文本变化不会整组重置；当前句使用 CSS Highlight，保留文字自身颜色。
-- 可能的结构编辑会暂缓 Cursor、Typewriter 与 Ripple 的新目标；input 本身不能否定结构意图。确认普通 mutation 后走下一次采样快路径，结构恢复最多受 160ms deadline 约束。
+- 可能的结构编辑会暂缓 Cursor、Typewriter 与 Ripple 的新目标；input 本身不能否定结构意图。思源会在后续 task 做输入归一化，因此普通 mutation 需经过 48ms 无新增分类活动才确认，所有路径受 160ms deadline 约束。
 - 鼠标选择、普通非折叠选区使用宿主选择呈现。系统减少动态效果时关闭位移动画与呼吸。
 
 顶栏按钮或 Ctrl+Alt+Z 联合切换打字机与涟漪；命令面板支持单独切换。顺滑光标独立持续启用。设置沿用原来的 zenType 功能开关。
@@ -20,14 +20,16 @@
 
 ```sh
 npm run typecheck
+npm run typecheck:tests
 npm test
 npm run build:dev
 npm run build
+npm run verify:prod
 ```
 
 开发构建在 `dev/`，生产构建在 `dist/`，安装包为 `package.zip`。包内文件位于压缩包根目录。
 
-停用现有 zenType，将现有插件目录备份到插件目录之外；把包内文件放入思源工作空间的 `data/plugins/zenType/`，再启用插件。不要同时运行两个 zenType 副本。顶栏提示包含 `v2.9.0-remake.2.1`，插件 manifest 保持数字版本 `2.9.0`。
+停用现有 zenType，将现有插件目录备份到插件目录之外；把包内文件放入思源工作空间的 `data/plugins/zenType/`，再启用插件。不要同时运行两个 zenType 副本。顶栏提示包含 `v2.9.0-remake.2.2`，插件 manifest 保持数字版本 `2.9.0`。
 
 已有开发链接可以继续使用 `dev/`。创建新链接可运行 `node scripts/make_dev_link.js --workspace <思源工作空间路径>`，脚本拒绝覆盖已有插件目录。
 
@@ -43,4 +45,4 @@ npm run build
 
 自动化检查覆盖运动接管、滚动边界、局部句界、共享结构 ordering、有界恢复、WAAPI ownership 和光标呈现控制；仍不证明真实 IME、复杂主题、特殊 inline 或宿主替换时序全部正确。旧架构专用测试已删除，可在 v2.8.1 历史中查阅。
 
-架构与宿主依据见 [设计文档](docs/DESIGN.md)，参数集中在 `src/config.ts`。
+架构与宿主依据见 [设计文档](docs/DESIGN.md) 与 [思源宿主契约](docs/SIYUAN_HOST_CONTRACT.md)，参数集中在 `src/config.ts`。

@@ -485,7 +485,7 @@ test("shared authority withholds a transient caret until mutation and geometry s
   cursor.destroy();
 }));
 
-test("Session withholds input-only geometry until delayed structural evidence settles", () => withSessionHarness(harness => {
+test("Session withholds native text evidence until delayed host structure settles", () => withSessionHarness(harness => {
   harness.tick(0);
   const overlay = harness.body.children[0];
   const original = overlay.style.transform;
@@ -494,6 +494,8 @@ test("Session withholds input-only geometry until delayed structural evidence se
 
   harness.dispatch(0, "keydown", { key: "Backspace", defaultPrevented: false });
   harness.dispatch(4, "input", { inputType: "deleteContentBackward", isComposing: false });
+  harness.mutate(6, [{ type: "characterData", target: harness.editable,
+    addedNodes: [], removedNodes: [] } as unknown as MutationRecord]);
   harness.setFrame({ ...harness.getFrame(), caret: { x: 500, y: 580, height: 20 } });
   harness.tick(16);
 
@@ -520,7 +522,7 @@ test("Session withholds input-only geometry until delayed structural evidence se
   assert.ok(harness.events.filter(event => event.name === "prepare").length > prepared);
 }, { typewriter: true, ripple: true }));
 
-test("ordinary Backspace commits on the first sample after non-structural host evidence", () => withSessionHarness(harness => {
+test("ordinary Backspace commits after one bounded post-input quiet window", () => withSessionHarness(harness => {
   harness.tick(0);
   const overlay = harness.body.children[0];
   const original = overlay.style.transform;
@@ -531,10 +533,32 @@ test("ordinary Backspace commits on the first sample after non-structural host e
   harness.setFrame({ ...harness.getFrame(), caret: { x: 120, y: 540, height: 20 } });
   harness.tick(16);
 
+  assert.equal(overlay.style.transform, original);
+  assert.ok(harness.events.some(event => event.name === "structure-sample" &&
+    event.payload.decision === "wait" && event.payload.reason === "awaiting-post-input-quiet"));
+  harness.tick(53);
+  assert.equal(overlay.style.transform, original);
+  harness.tick(54);
+
   assert.notEqual(overlay.style.transform, original);
   assert.ok(harness.events.some(event => event.name === "structure-sample" &&
-    event.payload.decision === "ordinary" && event.payload.reason === "non-structural-observation"));
+    event.payload.decision === "ordinary" && event.payload.reason === "non-structural-quiet"));
   assert.equal(harness.events.some(event => event.name === "structure-evidence"), false);
+}));
+
+test("intent without ordinary or structural evidence releases only at the bounded deadline", () => withSessionHarness(harness => {
+  harness.tick(0);
+  const committed = harness.events.filter(event => event.name === "frame-commit").length;
+  harness.dispatch(0, "keydown", { key: "Tab", defaultPrevented: false });
+  harness.setFrame({ ...harness.getFrame(), caret: { x: 500, y: 580, height: 20 } });
+  harness.tick(MOTION.structureQuietMs);
+
+  assert.equal(harness.events.filter(event => event.name === "frame-commit").length, committed);
+  assert.equal(harness.events.some(event => event.name === "structure-timeout"), false);
+  harness.tick(MOTION.structureDeadlineMs);
+  assert.ok(harness.events.some(event => event.name === "structure-release" && event.payload.reason === "timeout"));
+  assert.equal(harness.rafCount(), 0);
+  assert.equal(harness.timerCount(), 0);
 }));
 
 test("structural evidence keeps bounded frame sampling through a caret gap", () => withSessionHarness(harness => {

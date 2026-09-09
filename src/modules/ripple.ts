@@ -58,7 +58,7 @@ export function createRipple(debug?: DebugRecorder) {
     painter.bind(frame.editor);
     const writes: Array<() => void> = [];
     const commit = () => { for (const write of writes) write(); painter.resume(frame.reducedMotion); };
-    debug?.record("ripple", "prepare", {
+    ZENTYPE_DEBUG: debug?.record("ripple", "prepare", {
       enabled,
       contentDirty,
       structureDirty,
@@ -72,7 +72,7 @@ export function createRipple(debug?: DebugRecorder) {
       return commit;
     }
     if (!frame.block || !frame.editable || !frame.range) {
-      debug?.record("ripple", "prepare-skipped", {
+      ZENTYPE_DEBUG: debug?.record("ripple", "prepare-skipped", {
         reason: "missing-frame-data",
         hasBlock: frame.block !== null,
         hasEditable: frame.editable !== null,
@@ -176,7 +176,7 @@ export function createRipple(debug?: DebugRecorder) {
     lastTime = now;
     let moving = false;
     if (!supported) {
-      debug?.record("ripple", "render", { supported: false, moving: false, sentenceCount: sentences.length, blockCount: painter.size() });
+      ZENTYPE_DEBUG: debug?.record("ripple", "render", { supported: false, moving: false, sentenceCount: sentences.length, blockCount: painter.size() });
       if (!moving) lastTime = 0;
       return moving;
     }
@@ -204,7 +204,7 @@ export function createRipple(debug?: DebugRecorder) {
     scratch = previous;
     if (!block && !moving) clearSentences();
     if (!moving) lastTime = 0;
-    debug?.record("ripple", "render", {
+    ZENTYPE_DEBUG: debug?.record("ripple", "render", {
       supported: true,
       moving,
       sentenceCount: sentences.length,
@@ -215,7 +215,7 @@ export function createRipple(debug?: DebugRecorder) {
   }
 
   function clear() {
-    debug?.record("ripple", "clear", { blockCount: painter.size(), sentenceCount: sentences.length });
+    ZENTYPE_DEBUG: debug?.record("ripple", "clear", { blockCount: painter.size(), sentenceCount: sentences.length });
     painter.clear();
     clearSentences();
     block = null;

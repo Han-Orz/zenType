@@ -1,4 +1,4 @@
-export const BUILD_LABEL = "v2.9.0-remake.2.1";
+export const BUILD_LABEL = "v2.9.0-remake.2.2";
 
 /**
  * The `caret*` and `focus*` values are 95%-settle durations; effect modules

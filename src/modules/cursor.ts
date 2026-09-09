@@ -28,7 +28,7 @@ export function createCursor(debug?: DebugRecorder) {
   let nestedScroll: EditorFrame["nestedScroll"] = [];
 
   function debugState(name: string, frame: EditorFrame | null, data: DebugRecord = {}) {
-    debug?.record("cursor", name, {
+    ZENTYPE_DEBUG: debug?.record("cursor", name, {
       selection: frame?.selection ?? "missing",
       caret: !!frame?.caret,
       caretless: frame?.caretless === true,
@@ -93,7 +93,7 @@ export function createCursor(debug?: DebugRecorder) {
     if (editor !== frame.editor) {
       hide();
       editor = frame.editor;
-      debugState("editor-change", frame, { now });
+      ZENTYPE_DEBUG: debugState("editor-change", frame, { now });
     }
     // Sample ink before native-caret class writes can invalidate styles. Only a
     // breathing interruption or geometry release needs computed brightness.
@@ -125,10 +125,10 @@ export function createCursor(debug?: DebugRecorder) {
       const settled = frame.reducedMotion || now >= settleUntil ||
         stableFrames >= MOTION.switchStableFrames;
       if (!settled) {
-        debugState("switch-settling", frame, { now });
+        ZENTYPE_DEBUG: debugState("switch-settling", frame, { now });
         return true;
       }
-      debugState("switch-settled", frame, { now, deadline: now >= settleUntil });
+      ZENTYPE_DEBUG: debugState("switch-settled", frame, { now, deadline: now >= settleUntil });
       clearSettling();
       if (target && !frame.reducedMotion) {
         brighten = ink.animate([{ opacity: 0 }, { opacity: 1 }], {
@@ -155,7 +155,7 @@ export function createCursor(debug?: DebugRecorder) {
       return fadeOut(now, frame.reducedMotion, "missing-geometry", inkOpacity);
     }
     if (!target) {
-      debugState("render-without-target", frame, { now });
+      ZENTYPE_DEBUG: debugState("render-without-target", frame, { now });
       return false;
     }
     lastTime = now;
@@ -191,7 +191,7 @@ export function createCursor(debug?: DebugRecorder) {
     element.style.clipPath = "inset(" + Math.max(0, view.top - current.y) + "px 0 " + Math.max(0, current.y + current.height - view.bottom) + "px 0)";
     element.style.zIndex = String(frame.zIndex);
     element.hidden = false;
-    debugState("render", frame, {
+    ZENTYPE_DEBUG: debugState("render", frame, {
       now,
       moving,
       typing,
@@ -223,7 +223,7 @@ export function createCursor(debug?: DebugRecorder) {
     alpha = approach(alpha, 0, elapsed, reducedMotion ? 0 : MOTION.caretFadeOutMs / 3);
     element.style.opacity = String(alpha);
     current = target = null;
-    debugState("fade-out", null, { now, reason, fading: alpha >= 0.005 });
+    ZENTYPE_DEBUG: debugState("fade-out", null, { now, reason, fading: alpha >= 0.005 });
     if (alpha < 0.005) { hide(true); return false; }
     return true;
   }
@@ -277,7 +277,7 @@ export function createCursor(debug?: DebugRecorder) {
       hide();
       editor = nextEditor;
       settleUntil = now + MOTION.switchSettleMs;
-      debug?.record("cursor", "switch-start", { settleMs: MOTION.switchSettleMs });
+      ZENTYPE_DEBUG: debug?.record("cursor", "switch-start", { settleMs: MOTION.switchSettleMs });
     },
     destroy() { hide(); element.remove(); } };
 }
