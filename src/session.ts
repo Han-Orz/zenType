@@ -156,7 +156,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           if (next) cursor.retainOwner(next.editable);
           typewriter.cancel();
           cleanClones(next?.editable ?? frame?.editable);
-          if (next?.caret) { geometryDirty = true; queue(); }
+          if (structure.needsFrameSampling()) { geometryDirty = true; queue(); }
           else wakeAfter(structure.remaining(now));
           return;
         }

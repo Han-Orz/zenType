@@ -1,4 +1,4 @@
-# v2.9.0-remake.2
+# v2.9.0-remake.2.1
 
 ## Ownership and authority
 
@@ -25,11 +25,11 @@ The gate has one optional pending record:
 
 1. Enter/Backspace/Delete/Tab or structural beforeinput expresses intent. It does not establish semantic evidence or authorize a target.
 2. Structural mutations establish the shared transaction, including operations with no key event. Input, Selection and mutation activity reset the quiet/stable run while it is pending.
-3. Without structural evidence, observed ordinary input/text/representation work releases intent on the next sample. Intent with no resulting edit expires after 48ms. Ordinary text deletion does not wait for the full recovery budget.
+3. Input is editing activity, not negative structural evidence. A pending intent takes the ordinary fast path only after both its input and a classifier-confirmed text/representation mutation have been observed; the next Session sample releases it. If no classifiable mutation follows, the intent observation window expires after 48ms. Thus ordinary character deletion normally waits only for its next host sample, while input alone cannot publish a transient frame.
 4. With evidence, require two matching caret samples (position/height within 0.15px and the same block binding) and at least 48ms without relevant activity. Missing geometry breaks the stable run. These are provisional readiness heuristics, not a SiYuan completion signal.
 5. The original 160ms deadline never extends indefinitely. Expiry without readiness releases all three effects and writing intent, leaving native presentation. It is logged as release, not authoritative commit. Fresh activity can resume observation. Observation overflow uses the safe release path immediately.
 
-Session uses its existing rAF only during the bounded sample window. When geometry is absent, the existing idle timer wakes at the pending deadline; host events may wake it earlier. No recurring idle sampling is introduced. Reduced motion changes animation, not authority: it must still pass this gate.
+Session uses its existing rAF only during bounded evidence recovery. Intent-only waiting sleeps on the existing idle wake until a host event or its 48ms observation limit. Once structural evidence exists, Session samples on that same rAF even through missing caret geometry, allowing `null → valid A → valid A` to commit before the deadline. Every such run still terminates at the original 160ms deadline; no recurring idle sampling is introduced. Reduced motion changes animation, not authority: it must still pass this gate.
 
 Pointer down, wheel/touch browsing, keyboard navigation, range selection, editor switch, composition entry, configure, blur and destruction cancel the pending gate. Native-caret binding may follow a valid editable while the overlay target is withheld; this is ownership maintenance, not geometry commit. Cancellation resumes or releases paused painting through the ordinary Session path.
 
@@ -69,6 +69,8 @@ Running block fades pause during the gate. Finished fills are left finished, so 
 
 Block painting never writes `element.style.opacity`, `commitStyles()`, a dim class, an opacity custom property or a transition override. Both transitions and settled levels live exclusively in owned WAAPI KeyframeEffects with `fill: "both"`. Each owner has at most one retained effect. Retargeting installs the incoming effect before cancelling its predecessor; neutral completion cancels and removes the owner, while dim completion retains its finished fill. Clear, disable, editor switch, timeout, exception handling and destruction cancel owned effects. Retired detached effects are removed at commit/clear.
 
+On first editor bind, editor identity changes and lifecycle clear/re-entry, the painter performs one editor-scoped `getAnimations({ subtree: true })` recovery pass. It cancels only animations whose exact id is `zentype-ripple` and which are absent from the current painter map. This closes abnormal unload/hot-reload ownership loss without scanning every frame, guessing opacity values or touching host animations and inline styles.
+
 Acquisition samples host baseline opacity once. Animated values multiply it by Ripple alpha; underlying host inline/CSS values are never overwritten. Release reveals current host style, including changes by another integration. Host opacity changes during ownership are revealed on release/reacquisition rather than polled.
 
 Cloning/serializing DOM attributes cannot copy these runtime animation objects. Thus no serialized zenType block opacity can outlive its JS ownership. No persistent CSS dim rule activates a copied class. A host that explicitly serializes computed animated style rather than attributes would be a different contract and is not verified here. See the [Web Animations fill model](https://www.w3.org/TR/web-animations-1/#fill-behavior); retained fills are bounded and explicitly cancelled.
@@ -87,10 +89,10 @@ Highlights use 65 fixed alpha buckets and a private text-parent color property; 
 
 ## Diagnostics and evidence
 
-DebugKit remains full-profile in development and replaced by the noop hook in production. It adds no observer/rAF/timer. Structural records are scalar: intent, evidence, activity, sample/decision, stable, timeout, commit, cancel and release. Ripple reports hold, replacement carry, owner commit and budget release. These explain why frames are withheld/admitted without new per-frame DOM snapshots. Full diagnostics still have overhead and are not a performance baseline.
+DebugKit remains full-profile in development and replaced by the noop hook in production. It adds no observer/rAF/timer. Structural records are scalar: intent, evidence, activity, sample/decision, stable, timeout, commit, cancel and release. Intent samples distinguish `inputObserved`, `nonStructuralObserved`, `awaiting-structural-evidence`, `non-structural-observation` and `observation-window-expired`; structural samples report `awaiting-stable-geometry` or `quiet-and-stable`. Ripple reports hold, replacement carry, owner commit, stale recovery and budget release. These explain why frames are withheld/admitted without new per-frame DOM snapshots. Full diagnostics still have overhead and are not a performance baseline.
 
 Observed in source: remake.1 called Typewriter and Ripple while Cursor's structural settle withheld only the cursor. Inline opacity could survive a DOM copy without its in-memory owner/class. This supports the shared-boundary and ownership redesign; it does not by itself prove the cause of every visual artifact.
 
 Host evidence retained from the [SiYuan 8641553a snapshot](https://github.com/siyuan-note/siyuan/tree/8641553a1f07374001902d3ce773285db1292b2d): active editor resolution also consults Selection; caret scrolling can write in another rAF; content replacement can restore scrollTop; composition completion includes asynchronous handling. Readiness thresholds derive from the old coordinator and remake recovery budget, not new measured guarantees.
 
-Per the user's instruction for this round, unit/browser tests are not executed and browser/computer-use tools are not used. Existing test sources are adjusted to the new contracts. Real-host ordering replay and SiYuan validation of Tab/Shift+Tab, merge geometry, IME, marker continuity, delayed replacements, clipping and theme interactions remain outstanding. Build/type checks do not establish these behaviors.
+Deterministic Session tests now cover input-before-delayed-structure ordering, the ordinary character-deletion fast path, missing-caret structural recovery, deadline release, range/pointer/wheel/lifecycle/editor-switch interruption, and withholding of Cursor, Typewriter and Ripple preparation. Painter tests cover exact-id stale WAAPI recovery without host animation or inline-opacity mutation. The Chromium marker fixture remains available, but this runner could not execute it because no local Chromium was installed, its runtime download timed out, and the cloud browser rejected the local fixture URL. Real SiYuan validation of Tab/Shift+Tab, merge geometry, IME, delayed replacements, clipping and theme interactions remains outstanding; automated fixtures do not turn the heuristic thresholds into an official host completion contract.

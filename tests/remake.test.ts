@@ -193,14 +193,25 @@ function withPresentation(run: (body: PaintElement) => void) {
   }
 }
 
+interface AnimationStub {
+  id: string;
+  frames: Keyframe[];
+  currentTime: number;
+  playState: string;
+  cancel(): void;
+  pause(): void;
+  play(): void;
+  finish(): void;
+  onfinish: (() => void) | null;
+}
+
 class PaintElement extends ElementStub {
   parentElement: PaintElement | null = null;
   previousElementSibling: PaintElement | null = null;
   nextElementSibling: PaintElement | null = null;
   dataset: Record<string, string> = {};
   isConnected = true;
-  animations: Array<{ frames: Keyframe[]; currentTime: number; playState: string;
-    cancel(): void; pause(): void; play(): void; finish(): void; onfinish: (() => void) | null }> = [];
+  animations: AnimationStub[] = [];
   constructor() {
     super();
     Object.assign(this.style, {
@@ -214,8 +225,8 @@ class PaintElement extends ElementStub {
   contains(element: PaintElement | null): boolean {
     return !!element && (element === this || this.contains(element.parentElement));
   }
-  animate(frames: Keyframe[]) {
-    const animation = { frames, currentTime: 0, playState: "running",
+  animate(frames: Keyframe[]): AnimationStub {
+    const animation: AnimationStub = { id: "", frames, currentTime: 0, playState: "running",
       cancel() { this.playState = "idle"; }, pause() { this.playState = "paused"; },
       play() { this.playState = "running"; },
       finish() { this.currentTime = MOTION.blockFadeMs; this.playState = "finished"; this.onfinish?.(); },
@@ -223,6 +234,129 @@ class PaintElement extends ElementStub {
     this.animations.push(animation);
     return animation;
   }
+  getAnimations(options?: { subtree?: boolean }): AnimationStub[] {
+    return options?.subtree
+      ? [...this.animations, ...this.children.flatMap(child => (child as PaintElement).getAnimations(options))]
+      : [...this.animations];
+  }
+}
+
+interface SessionHarness {
+  body: PaintElement;
+  editor: PaintElement;
+  editable: PaintElement;
+  scroll: PaintElement & { scrollTop: number };
+  events: Array<{ name: string; payload: Record<string, unknown> }>;
+  getFrame(): EditorFrame;
+  setFrame(next: EditorFrame): void;
+  dispatch(at: number, type: string, event?: Record<string, unknown>): void;
+  mutate(at: number, records: MutationRecord[]): void;
+  tick(at: number): void;
+  readCount(): number;
+  rafCount(): number;
+  timerCount(): number;
+  session: ReturnType<typeof createWritingSession>;
+}
+
+function withSessionHarness(run: (harness: SessionHarness) => void, features = { typewriter: true, ripple: false }) {
+  withPresentation(body => {
+    const callbacks = new Map<string, (event: Record<string, unknown>) => void>();
+    const raf = new Map<number, FrameRequestCallback>();
+    const timers = new Map<number, { at: number; callback: () => void }>();
+    const observers: Array<{ callback: (records: MutationRecord[]) => void }> = [];
+    const events: SessionHarness["events"] = [];
+    let serial = 0;
+    let now = 0;
+    let reads = 0;
+    const editor = new PaintElement();
+    editor.classes.add("protyle-wysiwyg");
+    const editable = new PaintElement();
+    editable.dataset.nodeId = "active";
+    editable.parentElement = editor;
+    Object.assign(editable, { closest: (selector: string) => selector === ".protyle-wysiwyg" ? editor : null });
+    const scroll = Object.assign(new PaintElement(), { scrollTop: 300 });
+    let current = frame({ editor: editor as unknown as HTMLElement, editable: editable as unknown as HTMLElement,
+      block: editable as unknown as HTMLElement, scroll: scroll as unknown as HTMLElement, reducedMotion: true });
+    class Observer {
+      callback: (records: MutationRecord[]) => void;
+      constructor(callback: (records: MutationRecord[]) => void) {
+        this.callback = callback;
+        observers.push(this);
+      }
+      observe() {}
+      disconnect() {}
+      takeRecords() { return []; }
+    }
+    class Resize { observe() {} disconnect() {} }
+    const doc = document as unknown as Record<string, unknown>;
+    Object.assign(doc, {
+      documentElement: new PaintElement(),
+      activeElement: editable,
+      hidden: false,
+      hasFocus: () => true,
+      fonts: { addEventListener() {} },
+      addEventListener: (name: string, callback: (event: Record<string, unknown>) => void) => callbacks.set(name, callback),
+    });
+    const values: Record<string, unknown> = {
+      window: {
+        addEventListener: (name: string, callback: (event: Record<string, unknown>) => void) => callbacks.set("window:" + name, callback),
+      },
+      MutationObserver: Observer,
+      ResizeObserver: Resize,
+      matchMedia: () => ({ matches: true, addEventListener() {} }),
+      requestAnimationFrame: (callback: FrameRequestCallback) => { raf.set(++serial, callback); return serial; },
+      cancelAnimationFrame: (id: number) => raf.delete(id),
+      setTimeout: (callback: () => void, delay = 0) => { timers.set(++serial, { at: now + delay, callback }); return serial; },
+      clearTimeout: (id: number) => timers.delete(id),
+      performance: { now: () => now },
+      sessionFixture: { read: () => { reads++; return current; }, editableAt: () => editable },
+    };
+    const saved = Object.fromEntries(Object.keys(values).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+    for (const [key, value] of Object.entries(values)) Object.defineProperty(globalThis, key, { configurable: true, value });
+    const debug = {
+      record: (_source: string, name: string, payload: Record<string, unknown>) => events.push({ name, payload }),
+      recordEvent() {}, recordMutations() {}, recordFrame() {},
+    };
+    try {
+      const session = createWritingSession(features, debug as never);
+      const harness: SessionHarness = {
+        body, editor, editable, scroll, events, session,
+        getFrame: () => current,
+        setFrame: next => { current = next; },
+        dispatch(at, type, event = {}) {
+          now = at;
+          const callback = callbacks.get(type) ?? callbacks.get("window:" + type);
+          assert.ok(callback, `missing ${type} listener`);
+          callback({ type, target: editable, ...event });
+        },
+        mutate(at, records) {
+          now = at;
+          assert.ok(observers[0], "missing editor MutationObserver");
+          observers[0].callback(records);
+        },
+        tick(at) {
+          now = at;
+          for (const [id, timer] of [...timers]) if (timer.at <= at) {
+            timers.delete(id);
+            timer.callback();
+          }
+          const pending = [...raf.values()];
+          raf.clear();
+          for (const callback of pending) callback(at);
+        },
+        readCount: () => reads,
+        rafCount: () => raf.size,
+        timerCount: () => timers.size,
+      };
+      run(harness);
+      session.destroy();
+    } finally {
+      for (const [key, descriptor] of Object.entries(saved)) {
+        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+        else Reflect.deleteProperty(globalThis, key);
+      }
+    }
+  });
 }
 
 test("breathing CSS takes its delay, period and minimum alpha from config", () => {
@@ -350,6 +484,132 @@ test("shared authority withholds a transient caret until mutation and geometry s
   assert.notEqual(overlay.style.transform, `translate3d(500px,${300 - MOTION.caretLiftPx}px,0)`);
   cursor.destroy();
 }));
+
+test("Session withholds input-only geometry until delayed structural evidence settles", () => withSessionHarness(harness => {
+  harness.tick(0);
+  const overlay = harness.body.children[0];
+  const original = overlay.style.transform;
+  const committed = harness.events.filter(event => event.name === "frame-commit").length;
+  const prepared = harness.events.filter(event => event.name === "prepare").length;
+
+  harness.dispatch(0, "keydown", { key: "Backspace", defaultPrevented: false });
+  harness.dispatch(4, "input", { inputType: "deleteContentBackward", isComposing: false });
+  harness.setFrame({ ...harness.getFrame(), caret: { x: 500, y: 580, height: 20 } });
+  harness.tick(16);
+
+  assert.equal(overlay.style.transform, original);
+  assert.equal(harness.scroll.scrollTop, 300);
+  assert.equal(harness.events.filter(event => event.name === "frame-commit").length, committed);
+  assert.equal(harness.events.filter(event => event.name === "prepare").length, prepared);
+
+  const removed = new PaintElement();
+  removed.dataset.nodeId = "removed";
+  harness.mutate(18, [{ type: "childList", target: harness.editor, addedNodes: [], removedNodes: [removed] } as unknown as MutationRecord]);
+  harness.dispatch(20, "selectionchange");
+  harness.setFrame({ ...harness.getFrame(), caret: { x: 350, y: 320, height: 20 } });
+  harness.tick(32);
+  const final = { ...harness.getFrame(), caret: { x: 200, y: 300, height: 20 } };
+  harness.setFrame(final);
+  harness.tick(48);
+  harness.tick(64);
+  assert.equal(overlay.style.transform, original);
+  harness.tick(80);
+
+  assert.equal(overlay.style.transform, `translate3d(200px,${300 - MOTION.caretLiftPx}px,0)`);
+  assert.ok(harness.events.some(event => event.name === "structure-commit"));
+  assert.ok(harness.events.filter(event => event.name === "prepare").length > prepared);
+}, { typewriter: true, ripple: true }));
+
+test("ordinary Backspace commits on the first sample after non-structural host evidence", () => withSessionHarness(harness => {
+  harness.tick(0);
+  const overlay = harness.body.children[0];
+  const original = overlay.style.transform;
+  harness.dispatch(0, "keydown", { key: "Backspace", defaultPrevented: false });
+  harness.dispatch(4, "input", { inputType: "deleteContentBackward", isComposing: false });
+  harness.mutate(6, [{ type: "characterData", target: harness.editable,
+    addedNodes: [], removedNodes: [] } as unknown as MutationRecord]);
+  harness.setFrame({ ...harness.getFrame(), caret: { x: 120, y: 540, height: 20 } });
+  harness.tick(16);
+
+  assert.notEqual(overlay.style.transform, original);
+  assert.ok(harness.events.some(event => event.name === "structure-sample" &&
+    event.payload.decision === "ordinary" && event.payload.reason === "non-structural-observation"));
+  assert.equal(harness.events.some(event => event.name === "structure-evidence"), false);
+}));
+
+test("structural evidence keeps bounded frame sampling through a caret gap", () => withSessionHarness(harness => {
+  harness.tick(0);
+  const overlay = harness.body.children[0];
+  const original = overlay.style.transform;
+  harness.dispatch(0, "keydown", { key: "Tab", defaultPrevented: false });
+  const removed = new PaintElement();
+  removed.dataset.nodeId = "removed";
+  harness.mutate(4, [{ type: "childList", target: harness.editor,
+    addedNodes: [], removedNodes: [removed] } as unknown as MutationRecord]);
+  harness.setFrame({ ...harness.getFrame(), caret: null });
+  harness.tick(16);
+  assert.equal(harness.rafCount(), 1);
+  harness.tick(32);
+  assert.equal(harness.rafCount(), 1);
+  const final = { ...harness.getFrame(), caret: { x: 220, y: 310, height: 20 } };
+  harness.setFrame(final);
+  harness.tick(48);
+  harness.tick(64);
+
+  assert.notEqual(overlay.style.transform, original);
+  assert.equal(overlay.style.transform, `translate3d(220px,${310 - MOTION.caretLiftPx}px,0)`);
+  assert.equal(harness.rafCount(), 0);
+  assert.ok(harness.events.some(event => event.name === "structure-commit"));
+  assert.equal(harness.events.some(event => event.name === "structure-timeout"), false);
+}));
+
+test("unstable structural geometry times out without committing or leaving work scheduled", () => withSessionHarness(harness => {
+  harness.tick(0);
+  const committed = harness.events.filter(event => event.name === "frame-commit").length;
+  harness.dispatch(0, "keydown", { key: "Tab", defaultPrevented: false });
+  const removed = new PaintElement();
+  removed.dataset.nodeId = "removed";
+  harness.mutate(4, [{ type: "childList", target: harness.editor,
+    addedNodes: [], removedNodes: [removed] } as unknown as MutationRecord]);
+  harness.setFrame({ ...harness.getFrame(), caret: null });
+  for (let now = 16; now <= MOTION.structureDeadlineMs; now += 16) harness.tick(now);
+
+  assert.equal(harness.events.filter(event => event.name === "frame-commit").length, committed);
+  assert.ok(harness.events.some(event => event.name === "structure-release" && event.payload.reason === "timeout"));
+  assert.equal(harness.rafCount(), 0);
+  assert.equal(harness.timerCount(), 0);
+}));
+
+test("interaction and lifecycle interruptions cancel a pending structure gate", () => {
+  for (const [type, reason] of [["pointerdown", "pointer"], ["wheel", "wheel"], ["blur", "lifecycle"]]) {
+    withSessionHarness(harness => {
+      harness.tick(0);
+      harness.dispatch(0, "keydown", { key: "Tab", defaultPrevented: false });
+      harness.dispatch(4, type);
+      harness.tick(16);
+      assert.ok(harness.events.some(event => event.name === "structure-cancel" && event.payload.reason === reason), type);
+      assert.equal(harness.events.some(event => event.name === "structure-timeout"), false, type);
+      assert.equal(harness.rafCount(), 0, type);
+      assert.equal(harness.timerCount(), 0, type);
+    });
+  }
+  withSessionHarness(harness => {
+    harness.tick(0);
+    harness.dispatch(0, "keydown", { key: "Tab", defaultPrevented: false });
+    const editor = new PaintElement();
+    const editable = new PaintElement();
+    editable.parentElement = editor;
+    harness.setFrame({ ...harness.getFrame(), editor: editor as unknown as HTMLElement,
+      editable: editable as unknown as HTMLElement, block: editable as unknown as HTMLElement });
+    harness.tick(16);
+    assert.ok(harness.events.some(event => event.name === "structure-cancel" && event.payload.reason === "editor-switch"));
+    assert.equal(harness.events.some(event => event.name === "structure-timeout"), false);
+    assert.equal(harness.rafCount(), 0);
+    harness.tick(MOTION.typingPauseMs + 1);
+    assert.equal(harness.rafCount(), 0);
+    assert.equal(harness.timerCount(), 0);
+  });
+});
 
 test("switch settling is bounded through missing geometry and cancelled by lifecycle", () => withPresentation(body => {
   const cursor = createCursor();
@@ -551,55 +811,47 @@ test("replacement handoff never writes host opacity or repairs ambiguous legacy 
   }
 }));
 
-test("range selection cancels structural intent without leaving a recovery loop", () => withPresentation(() => {
-  const callbacks = new Map<string, (event: unknown) => void>();
-  const raf = new Map<number, FrameRequestCallback>();
-  const timers = new Map<number, () => void>();
-  let serial = 0;
-  let reads = 0;
+test("editor bind recovers only stale plugin-owned WAAPI without touching host opacity", () => withPresentation(() => {
   const editor = new PaintElement();
-  const editable = Object.assign(new PaintElement(), { closest: () => editor });
-  let input = frame({ editor: editor as unknown as HTMLElement, editable: editable as unknown as HTMLElement,
-    reducedMotion: true });
-  const observe = class { observe() {} disconnect() {} takeRecords() { return []; } };
-  const doc = document as unknown as Record<string, unknown>;
-  Object.assign(doc, { documentElement: new PaintElement(), hidden: false, hasFocus: () => true,
-    addEventListener: (name: string, callback: (event: unknown) => void) => callbacks.set(name, callback) });
-  const values: Record<string, unknown> = {
-    window: { addEventListener() {} }, MutationObserver: observe, ResizeObserver: observe,
-    matchMedia: () => ({ matches: true, addEventListener() {} }),
-    requestAnimationFrame: (callback: FrameRequestCallback) => { raf.set(++serial, callback); return serial; },
-    cancelAnimationFrame: (id: number) => raf.delete(id),
-    setTimeout: (callback: () => void) => { timers.set(++serial, callback); return serial; },
-    clearTimeout: (id: number) => timers.delete(id),
-    sessionFixture: { read: () => { reads++; return input; }, editableAt: () => editable },
-  };
-  const saved = Object.fromEntries(Object.keys(values).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
-  for (const [key, value] of Object.entries(values)) Object.defineProperty(globalThis, key, { configurable: true, value });
-  const tick = () => {
-    const pending = [...raf.values()]; raf.clear();
-    for (const callback of pending) callback(performance.now());
-  };
-  try {
-    const session = createWritingSession({ typewriter: false, ripple: false });
-    tick();
-    callbacks.get("keydown")!({ type: "keydown", key: "Tab", target: editable });
-    input = { ...input, selection: "range" };
-    tick();
-    const sampled = reads;
-    for (let i = 0; i < 10; i++) tick();
-    assert.equal(reads, sampled);
-    assert.equal(raf.size, 0);
-    assert.equal(timers.size, 0);
-    input = { ...input, selection: "caret" };
-    callbacks.get("selectionchange")!({ type: "selectionchange", target: editable });
-    tick();
-    assert.equal(reads, sampled + 1);
-    session.destroy();
-  } finally {
-    for (const [key, descriptor] of Object.entries(saved)) {
-      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
-      else Reflect.deleteProperty(globalThis, key);
-    }
-  }
+  const target = new PaintElement();
+  editor.append(target);
+  target.style.opacity = "0.73";
+  const stale = target.animate([{ opacity: 0.2 }, { opacity: 0.4 }]);
+  stale.id = "zentype-ripple";
+  const host = target.animate([{ opacity: 0.5 }, { opacity: 1 }]);
+  host.id = "host-opacity";
+  const ripple = createRipple();
+
+  ripple.prepare(frame({ editor: editor as unknown as HTMLElement, block: null,
+    editable: null, range: null }), false, false, false);
+
+  assert.equal(stale.playState, "idle");
+  assert.equal(host.playState, "running");
+  assert.equal(target.style.opacity, "0.73");
+  assert.equal(target.classes.has("zentype-ripple-block"), false);
+  ripple.clear();
+  const lifecycleStale = target.animate([{ opacity: 0.1 }, { opacity: 0.2 }]);
+  lifecycleStale.id = "zentype-ripple";
+  ripple.prepare(frame({ editor: editor as unknown as HTMLElement, block: null,
+    editable: null, range: null }), false, false, false);
+  assert.equal(lifecycleStale.playState, "idle");
+  assert.equal(host.playState, "running");
+  assert.equal(target.style.opacity, "0.73");
+  ripple.destroy();
 }));
+
+test("range selection cancels structural intent without leaving a recovery loop", () => withSessionHarness(harness => {
+  harness.tick(0);
+  harness.dispatch(0, "keydown", { key: "Tab", defaultPrevented: false });
+  harness.setFrame({ ...harness.getFrame(), selection: "range" });
+  harness.tick(16);
+  const sampled = harness.readCount();
+  for (let now = 32; now <= 160; now += 16) harness.tick(now);
+  assert.equal(harness.readCount(), sampled);
+  assert.equal(harness.rafCount(), 0);
+  assert.equal(harness.timerCount(), 0);
+  harness.setFrame({ ...harness.getFrame(), selection: "caret" });
+  harness.dispatch(176, "selectionchange");
+  harness.tick(192);
+  assert.equal(harness.readCount(), sampled + 1);
+}, { typewriter: false, ripple: false }));

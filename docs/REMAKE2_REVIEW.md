@@ -67,3 +67,45 @@ Checks performed in this round: `npm run typecheck`, `npm run build`, and `git d
 In particular, withholding plugin targets does not freeze SiYuan's physical DOM layout. Same-key animation carry helps replacement continuity, but newly reparented ancestry, host text motion and live Range behavior can still change intermediate pixels. No actual trace/browser run proves freeze+commit sufficient to eliminate every reported flash. If that remains reproducible, obtain the sequence before adding local motion machinery.
 
 Scope is limited to shared structural authority, Ripple ownership/read-write ordering, associated contract updates, build label and documentation. No unrelated feature or P2 visual polishing is included.
+
+## remake.2.1 closure review
+
+Baseline: `5c8db10eddf71bde268c1911c718147fcb6b44be`.
+
+The delayed-evidence race was real. `input()` and classifier-confirmed text/representation mutations both set the same `ordinary` boolean, so an input delivered before a later structural MutationObserver callback admitted the first transient frame. The regression test first failed against the baseline by moving Cursor to the intermediate geometry and allowing Typewriter to change `scrollTop` at t=16.
+
+The gate now keeps four meanings separate:
+
+| Meaning | Representation | Authority effect |
+| --- | --- | --- |
+| Structural intent | A bounded pending record for the editor | Withhold new effect targets |
+| Editing activity | Latest input/selection/mutation timestamp | Reset structural quiet/stable progress |
+| Non-structural observation | Classifier saw text/representation work | Candidate evidence for the ordinary path |
+| Structural evidence | Classifier saw structural/overflow work | Enter bounded structural recovery/release |
+
+`inputObserved && nonStructuralObserved` confirms the ordinary fast path at the next Session sample. Input without classifier evidence stays withheld until another host event provides evidence or the existing 48ms intent window expires. No key-specific branch or new delay was added. After structural evidence, `needsFrameSampling()` tells Session to reuse its sole rAF through null geometry; the original 160ms deadline remains absolute.
+
+Ripple adds one lifecycle boundary, not a hot-path ownership registry. First bind, editor identity change and clear/re-entry perform one editor-scoped animation enumeration. Only an exact `zentype-ripple` id absent from the current painter map is cancelled. Host animations, inline opacity and class/style inference remain untouched.
+
+### Brooks review
+
+| Addition | Host requirement expressed | Why it is not a test patch |
+| --- | --- | --- |
+| `inputObserved` | Input precedes delayed host structure and is not negative evidence | Replaces the unsafe overloaded `ordinary` meaning |
+| `nonStructuralObserved` | The mutation classifier, not the input event, establishes ordinary work | Preserves next-sample character deletion without a fixed 48ms sleep |
+| `needsFrameSampling()` | Structural evidence can pass through null then valid caret frames | Selects the existing rAF versus existing wake timer; creates neither |
+| `boundEditor` + exact-id recovery | A retained WAAPI fill can outlive an abnormal painter lifecycle | Runs only at lifecycle boundaries and uses explicit provenance |
+
+There are no Tab/Backspace coordinate cases, extra observers, second scheduler, deadline extensions, opacity guesses or Cursor structural flags. Cursor still receives only admitted geometry. Typewriter is cancelled while pending. Ripple performs only same-key owner rebinding while pending and does not prepare a new topology plan until authoritative commit.
+
+### Validation
+
+- Baseline before the new characterization: 27/27 unit tests passed.
+- Final `npm test`: 33/33 passed, including delayed evidence, ordinary Backspace, caret gap, timeout, interruption, effect withholding and stale WAAPI lifecycle coverage.
+- `npm run typecheck`: passed.
+- Direct strict TypeScript checking of `tests/remake.test.ts` and its imports: passed.
+- `npm run build`: passed and produced the production bundle/archive.
+- `git diff --check`: passed.
+- `tests/ripple-marker.browser.ts`: execution attempted. The local Playwright runtime had no Chromium, two browser downloads timed out, and the cloud browser rejected the local fixture URL. This is an environment-blocked check, not a pass.
+
+The runtime complexity added since `5c8db10` is limited to state that represents observed host ordering and low-frequency WAAPI provenance recovery. The larger line increase is deterministic Session test infrastructure and characterization coverage, not product-side scheduling machinery.

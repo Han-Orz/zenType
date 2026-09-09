@@ -5,6 +5,18 @@ import type { DebugRecorder } from "./debug/types";
 export type MutationKind = "text" | "representation" | "structural" | "overflow";
 export const STRUCTURE_LIMITS = { records: 256, nodes: 2048, depth: 64 } as const;
 
+interface PendingStructure {
+  editor: HTMLElement;
+  start: number;
+  activity: number;
+  evidence: "structural" | "overflow" | null;
+  inputObserved: boolean;
+  nonStructuralObserved: boolean;
+  stable: number;
+  caret: CursorRect | null;
+  block: HTMLElement | null;
+}
+
 /** Includes marker identity, but markers are not semantic blocks. */
 export function visualKey(element: HTMLElement): string | undefined {
   if (!element.classList.contains("protyle-action")) return element.dataset.nodeId;
@@ -61,15 +73,15 @@ export function classifyMutations(records: readonly MutationRecord[]) {
 
 /** Clock-free policy: Session owns observation, sampling, rAF and the deadline wake. */
 export function createStructureGate(debug?: DebugRecorder) {
-  let pending: { editor: HTMLElement; start: number; activity: number; evidence: "structural" | "overflow" | null;
-    ordinary: boolean; stable: number; caret: CursorRect | null; block: HTMLElement | null } | null = null;
+  let pending: PendingStructure | null = null;
   function cancel(reason: string) {
     if (pending) debug?.record("session", "structure-cancel", { reason });
     pending = null;
   }
   function begin(editor: HTMLElement, now: number, evidence: "structural" | "overflow" | null) {
     if (pending?.editor !== editor) {
-      pending = { editor, start: now, activity: now, evidence, ordinary: false, stable: 0, caret: null, block: null };
+      pending = { editor, start: now, activity: now, evidence, inputObserved: false,
+        nonStructuralObserved: false, stable: 0, caret: null, block: null };
       debug?.record("session", evidence ? "structure-begin" : "structure-intent", { now });
     }
   }
@@ -87,12 +99,13 @@ export function createStructureGate(debug?: DebugRecorder) {
         begin(editor, now, kind);
         pending!.evidence = kind;
         debug?.record("session", "structure-evidence", { now, kind });
-      } else if (pending) pending.ordinary = true;
+      } else if (pending) pending.nonStructuralObserved = true;
       activity(now, kind);
     },
     activity,
-    input() { if (pending) pending.ordinary = true; },
+    input() { if (pending) pending.inputObserved = true; },
     cancel,
+    needsFrameSampling() { return pending?.evidence === "structural"; },
     remaining(now: number) {
       return pending ? Math.max(1, pending.start + (pending.evidence ? MOTION.structureDeadlineMs : MOTION.structureQuietMs) - now) : 0;
     },
@@ -104,9 +117,20 @@ export function createStructureGate(debug?: DebugRecorder) {
       }
       if (pending.evidence === "overflow") { cancel("observation-limit"); return "overflow"; }
       const elapsed = now - pending.start;
-      if (!pending.evidence && (pending.ordinary || elapsed >= MOTION.structureQuietMs)) {
-        cancel("no-structural-evidence");
-        return "ordinary";
+      if (!pending.evidence) {
+        const confirmed = pending.inputObserved && pending.nonStructuralObserved;
+        const expired = elapsed >= MOTION.structureQuietMs;
+        const decision = confirmed || expired ? "ordinary" : "wait";
+        const reason = confirmed ? "non-structural-observation"
+          : expired ? "observation-window-expired" : "awaiting-structural-evidence";
+        debug?.record("session", "structure-sample", { now, elapsed, state: "intent",
+          inputObserved: pending.inputObserved, nonStructuralObserved: pending.nonStructuralObserved,
+          decision, reason });
+        if (decision === "ordinary") {
+          cancel(reason);
+          return "ordinary";
+        }
+        return "wait";
       }
       const caret = frame?.caret ?? null;
       const previous = pending.caret;
@@ -116,9 +140,10 @@ export function createStructureGate(debug?: DebugRecorder) {
       pending.caret = caret && { ...caret };
       pending.block = frame?.block ?? null;
       const quiet = now - pending.activity;
-      const stable = pending.evidence === "structural" && pending.stable >= 2 && quiet >= MOTION.structureQuietMs;
+      const stable = pending.stable >= 2 && quiet >= MOTION.structureQuietMs;
       debug?.record("session", "structure-sample", { now, quiet, stableFrames: pending.stable,
-        evidence: pending.evidence, caret: caret ? { ...caret } : null, decision: stable ? "commit" : "wait" });
+        state: "structural", evidence: pending.evidence, caret: caret ? { ...caret } : null,
+        decision: stable ? "commit" : "wait", reason: stable ? "quiet-and-stable" : "awaiting-stable-geometry" });
       if (stable || elapsed >= MOTION.structureDeadlineMs) {
         const result = stable ? "commit" : "timeout";
         debug?.record("session", stable ? "structure-stable" : "structure-timeout", { now, elapsed });

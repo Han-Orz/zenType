@@ -55,6 +55,7 @@ export function createRipple(debug?: DebugRecorder) {
     clearColors();
   }
   function sample(frame: EditorFrame, contentDirty: boolean, structureDirty: boolean, enabled: boolean) {
+    painter.bind(frame.editor);
     const writes: Array<() => void> = [];
     const commit = () => { for (const write of writes) write(); painter.resume(frame.reducedMotion); };
     debug?.record("ripple", "prepare", {

@@ -13,6 +13,7 @@ interface Paint { value: number; from: number; target: number; base: number; ani
 export function createBlockPainter(debug?: DebugRecorder) {
   const paints = new Map<HTMLElement, Paint>();
   let frozen = false;
+  let boundEditor: HTMLElement | null = null;
   function sample(paint: Paint) {
     const time = paint.animation.currentTime;
     if (typeof time === "number") {
@@ -53,9 +54,25 @@ export function createBlockPainter(debug?: DebugRecorder) {
     if (reducedMotion) animation.finish();
   }
   function snapshot() { return new Map([...paints].map(([element, paint]) => [element, sample(paint)])); }
-  function clear() { for (const element of paints.keys()) release(element); frozen = false; }
+  function clear() {
+    for (const element of paints.keys()) release(element);
+    frozen = false;
+    boundEditor = null;
+  }
   return {
     size: () => paints.size,
+    bind(editor: HTMLElement) {
+      if (boundEditor === editor) return;
+      boundEditor = editor;
+      const owned = new Set([...paints.values()].map(paint => paint.animation));
+      let released = 0;
+      for (const animation of editor.getAnimations({ subtree: true })) {
+        if (animation.id !== "zentype-ripple" || owned.has(animation)) continue;
+        animation.cancel();
+        released++;
+      }
+      if (released) debug?.record("ripple", "stale-recovery", { released });
+    },
     resume(reducedMotion: boolean) {
       if (!frozen && !reducedMotion) return;
       frozen = false;
