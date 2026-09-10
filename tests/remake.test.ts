@@ -41,7 +41,7 @@ test("critical motion is independent of frame subdivision", () => {
   assert.ok(Math.abs(one.velocity - two.velocity) < 1e-10);
 });
 
-test("response95 reaches approximately 95 percent from rest", () => {
+test("response time reaches approximately 95 percent from rest", () => {
   const state: CriticalState = { value: 0, velocity: 0 };
   stepCritical(state, 100, 100, 100);
   assert.ok(Math.abs(state.value - 95) < 0.001);
@@ -403,16 +403,18 @@ function withSessionHarness(run: (harness: SessionHarness) => void, features = {
   });
 }
 
-test("motion configuration exposes explicit response95 semantics", () => {
-  assert.equal(MOTION.caretTypingResponse95Ms, 55);
-  assert.equal(MOTION.caretNavigationResponse95Ms, 110);
-  assert.equal(MOTION.scrollResponse95Ms, 300);
-  assert.equal(MOTION.breatheIdleDelayMs, 1100);
+test("motion configuration exposes explicit responseMs semantics", () => {
+  assert.equal(MOTION.caretTypingResponseMs, 55);
+  assert.equal(MOTION.caretNavigationResponseMs, 110);
+  assert.equal(MOTION.scrollResponseMs, 300);
+  assert.equal(MOTION.breatheIdleDelayMs, 3000);
   assert.equal(MOTION.breatheRestMs, 2400);
-  assert.equal(MOTION.breathDownResponse95Ms, 600);
-  assert.equal(MOTION.breathUpResponse95Ms, 220);
-  assert.equal(MOTION.breatheLowAlpha, 0.25);
+  assert.equal(MOTION.breathDownResponseMs, 900);
+  assert.equal(MOTION.breathUpResponseMs, 220);
+  assert.equal(MOTION.breatheLowAlpha, 0);
   assert.equal(MOTION.breatheLowHoldMs, 120);
+  assert.equal(MOTION.cursorSwitchRevealResponseMs, 370);
+  assert.equal(MOTION.scrollPositionEpsilonPx, 0.21);
 });
 
 test("DebugKit defaults to full, records current-session evidence, and exports after stop", async () => {
@@ -503,7 +505,8 @@ test("breathing hold starts after down settle without polluting recovery elapsed
   }
   assert.ok(lowSettledAt > breathStart);
   const lowOpacity = Number(overlay.style.opacity);
-  assert.ok(Math.abs(lowOpacity - MOTION.breatheLowAlpha) < 0.01);
+  assert.equal(lowOpacity, 0);
+  assert.equal(lowOpacity, MOTION.breatheLowAlpha);
   const wakeAt = lowSettledAt + MOTION.breatheLowHoldMs;
   assert.equal(cursor.render(input, wakeAt, false), true);
   const wakeOpacity = Number(overlay.style.opacity);
@@ -511,6 +514,27 @@ test("breathing hold starts after down settle without polluting recovery elapsed
   cursor.render(input, wakeAt + 100, false);
   assert.ok(Number(overlay.style.opacity) > wakeOpacity);
   assert.ok(Number(overlay.style.opacity) < 1);
+  cursor.destroy();
+}));
+
+test("cursor activity restarts the full breathing idle deadline", () => withPresentation(body => {
+  const phases: string[] = [];
+  const debug = {
+    record: (_source: string, name: string, payload: Record<string, unknown>) => {
+      if (name === "render") phases.push(String(payload.breathPhase));
+    },
+  } as never;
+  const cursor = createCursor(debug);
+  const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
+  for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, true);
+
+  const activityAt = 5000;
+  cursor.render(input, activityAt, false, true);
+  assert.equal(phases.at(-1), "normal");
+  cursor.render(input, activityAt + MOTION.breatheIdleDelayMs - 1, false);
+  assert.equal(phases.at(-1), "normal");
+  cursor.render(input, activityAt + MOTION.breatheIdleDelayMs, false);
+  assert.equal(phases.at(-1), "down");
   cursor.destroy();
 }));
 
@@ -616,23 +640,28 @@ test("geometry release freezes breathing and fades the outer cursor promptly", (
   const cursor = createCursor();
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
   for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, true);
-  cursor.render(input, 4000, false);
-  cursor.render(input, 4016, false);
+  const breathStart = 2000 + MOTION.breatheIdleDelayMs;
+  cursor.render(input, breathStart, false);
+  cursor.render(input, breathStart + 16, false);
   const overlay = body.children[0];
   assert.ok(Number(overlay.style.opacity) < 1);
-  cursor.release(4032, false);
-  for (let now = 4048; now <= 5000 && !overlay.hidden; now += 16) cursor.release(now, false);
+  cursor.release(breathStart + 32, false);
+  for (let now = breathStart + 48; now <= breathStart + 1000 && !overlay.hidden; now += 16) cursor.release(now, false);
   assert.equal(overlay.hidden, true);
-  cursor.render({ ...input, caret: { x: 300, y: 200, height: 20 } }, 5016, false);
+  cursor.render({ ...input, caret: { x: 300, y: 200, height: 20 } }, breathStart + 1016, false);
   assert.equal(overlay.style.transform, `translate3d(300px,${200 - MOTION.caretLiftPx}px,0)`);
   assert.ok(Number(overlay.style.opacity) > 0);
-  cursor.release(5032, true);
+  cursor.release(breathStart + 1032, true);
   assert.equal(overlay.hidden, true);
   cursor.destroy();
 }));
 
-test("editor switch reveals after eight stable samples and resets on geometry changes", () => withPresentation(body => {
-  const cursor = createCursor();
+test("editor switch commits hidden geometry before a full reveal motion", () => withPresentation(body => {
+  const records: Array<{ name: string; payload: Record<string, unknown> }> = [];
+  const debug = {
+    record: (_source: string, name: string, payload: Record<string, unknown>) => records.push({ name, payload }),
+  } as never;
+  const cursor = createCursor(debug);
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
   cursor.switched(input.editor, 1000);
   const overlay = body.children[0];
@@ -644,11 +673,30 @@ test("editor switch reveals after eight stable samples and resets on geometry ch
   cursor.render(moved, 1224, false);
   assert.equal(cursor.isSettling(), true);
   assert.equal(overlay.hidden, true);
+  assert.equal(overlay.style.opacity, "0");
   assert.equal(overlay.style.transform, `translate3d(200px,${300 - MOTION.caretLiftPx}px,0)`);
+  const hiddenCommit = records.find(record => record.name === "switch-commit-hidden");
+  assert.ok(hiddenCommit);
+  assert.equal(hiddenCommit.payload.alpha, 0);
+  assert.equal(hiddenCommit.payload.alphaVelocity, 0);
+  assert.equal(hiddenCommit.payload.revealElapsed, 0);
+
   cursor.render(moved, 1240, false);
-  assert.equal(cursor.isSettling(), false);
+  assert.equal(cursor.isSettling(), true);
   assert.equal(overlay.hidden, false);
-  assert.equal((overlay.children[0] as PaintElement).animations.length, 0);
+  assert.equal(overlay.style.opacity, "0");
+  assert.equal(records.at(-1)?.payload.revealElapsed, 0);
+  cursor.render(moved, 1256, false);
+  assert.ok(Number(overlay.style.opacity) > 0 && Number(overlay.style.opacity) < 1);
+  assert.equal(records.at(-1)?.payload.revealElapsed, 16);
+
+  let settledAt = 0;
+  for (let now = 1272; now <= 5000; now += 16) {
+    cursor.render(moved, now, false);
+    if (!cursor.isSettling()) { settledAt = now; break; }
+  }
+  assert.ok(settledAt > 1256);
+  assert.equal(Number(overlay.style.opacity), 1);
   cursor.destroy();
 }));
 
@@ -1006,8 +1054,13 @@ test("switch settling is bounded through missing geometry and cancelled by lifec
   assert.equal(overlay.hidden, true);
   assert.equal(overlay.style.transform, `translate3d(400px,${300 - MOTION.caretLiftPx}px,0)`);
   cursor.render({ ...input, caret: { x: 400, y: 300, height: 20 } }, 1716, false);
-  assert.equal(cursor.isSettling(), false);
+  assert.equal(cursor.isSettling(), true);
   assert.equal(overlay.hidden, false);
+  assert.equal(overlay.style.opacity, "0");
+  for (let now = 1732; now <= 5000 && cursor.isSettling(); now += 16) {
+    cursor.render({ ...input, caret: { x: 400, y: 300, height: 20 } }, now, false);
+  }
+  assert.equal(cursor.isSettling(), false);
   cursor.switched(input.editor, 2000);
   cursor.render({ ...input, caret: null }, 2700, false);
   assert.equal(cursor.isSettling(), false);
@@ -1122,16 +1175,28 @@ test("scroll snaps the final visual tail at the configured settle distance", () 
   const writer = createTypewriter();
   const target = 572;
   let current = writer.next(frame(), 1000, true, 0);
+  const requestedPositions = [current];
+  const responseMs = MOTION.scrollResponseMs + Math.min(70, Math.abs(target - 300) * 0.12);
   writer.written(current);
   for (let now = 1016; now <= 5000; now += 16) {
+    const before = writer.motionTelemetry();
     const next = writer.next(frame({
       scrollTop: current,
       caret: { x: 100, y: 550 - (current - 300), height: 20 },
     }), now, true, 0);
+    requestedPositions.push(next);
     writer.written(next);
     if (Math.abs(target - next) < MOTION.scrollPositionEpsilonPx) {
       assert.equal(next, target);
       assert.equal(writer.isMoving(), false);
+      const virtualBeforeSettle: CriticalState = {
+        value: before.motionValue!, velocity: before.motionVelocity!,
+      };
+      stepCritical(virtualBeforeSettle, target, 16, responseMs, 0);
+      const terminalSnap = Math.abs(target - virtualBeforeSettle.value);
+      assert.ok(requestedPositions.length >= 3);
+      assert.ok(Math.abs(target - requestedPositions.at(-2)!) < 0.5);
+      assert.ok(terminalSnap <= MOTION.scrollPositionEpsilonPx + 1e-9);
       return;
     }
     current = next;

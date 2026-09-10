@@ -5,25 +5,25 @@ export interface CriticalState {
 
 // For a unit step from rest, critical damping leaves (1 + s)e^-s of the
 // displacement after s = omega * t. This is the positive solution of
-// (1 + s)e^-s = 0.05, so response95Ms has one meaning for every feature.
-const RESPONSE95_S = 4.743864518390577;
+// (1 + s)e^-s = 0.05, so responseMs has one meaning for every feature.
+const CRITICAL_RESPONSE_S = 4.743864518390577;
 
 /** Advance a fixed-zeta=1 state through the analytic continuous solution. */
 export function stepCritical(
   state: CriticalState,
   target: number,
   elapsedMs: number,
-  response95Ms: number,
+  responseMs: number,
   positionEpsilon = 0.01,
 ): boolean {
-  if (response95Ms <= 0) {
+  if (responseMs <= 0) {
     state.value = target;
     state.velocity = 0;
     return true;
   }
 
   const elapsed = Math.max(0, elapsedMs);
-  const omega = RESPONSE95_S / response95Ms;
+  const omega = CRITICAL_RESPONSE_S / responseMs;
   if (elapsed > 0) {
     const error = state.value - target;
     const coefficient = state.velocity + omega * error;

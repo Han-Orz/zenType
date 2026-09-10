@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.9.0-remake.2.3-critical.4 (2026-09-10) — Critical Motion hand-feel refinements
+
+- Cursor breathing now waits 3000ms after activity, eases down toward exact zero over 900ms, holds for 120ms, and recovers over 220ms before the existing 2400ms bright rest.
+- Typewriter virtual settle uses a 0.21px position epsilon; browser readback and host takeover remain unchanged.
+- Editor switch commits stable geometry while hidden, then starts the next-frame reveal from alpha zero with a dedicated 370ms response. Feature identifiers now use `ResponseMs`; the shared 95% response calibration is unchanged.
+
 ## v2.9.0-remake.2.3-critical.3 (2026-09-10) — Cursor breathing phase and cadence
 
 - Cursor breathing now has explicit `normal → down → hold → up → normal` semantic phases while retaining one alpha CriticalState.

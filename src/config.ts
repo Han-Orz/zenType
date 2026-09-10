@@ -1,6 +1,6 @@
-export const BUILD_LABEL = "v2.9.0-remake.2.3-critical.3";
+export const BUILD_LABEL = "v2.9.0-remake.2.3-critical.4";
 
-/** Larger response95 values mean slower, softer motion. */
+/** Larger responseMs values mean slower, softer motion. */
 export const MOTION = {
   caretLiftPx: 1,
   recoveryMs: 160,
@@ -8,26 +8,27 @@ export const MOTION = {
   switchStableFrames: 8,
   structureQuietMs: 48,
   structureDeadlineMs: 160,
-  cursorAppearResponse95Ms: 120,
-  cursorDisappearResponse95Ms: 80,
+  cursorAppearResponseMs: 120,
+  cursorDisappearResponseMs: 80,
   cursorSettlePx: 0.15,
   alphaSettleEpsilon: 0.005,
   blockFadeMs: 360,
-  breathDownResponse95Ms: 600,
-  breathUpResponse95Ms: 220,
-  breatheLowAlpha: 0.25,
+  breathDownResponseMs: 900,
+  breathUpResponseMs: 220,
+  breatheLowAlpha: 0,
   breatheLowHoldMs: 120,
   interactionHoldMs: 150,
   edgeFadeMinHeightPx: 12,
-  caretTypingResponse95Ms: 55,
-  caretNavigationResponse95Ms: 110,
-  breatheIdleDelayMs: 1100,
+  caretTypingResponseMs: 55,
+  caretNavigationResponseMs: 110,
+  breatheIdleDelayMs: 3000,
   breatheRestMs: 2400,
-  scrollResponse95Ms: 300,
-  scrollPositionEpsilonPx: 2,
+  scrollResponseMs: 300,
+  scrollPositionEpsilonPx: 0.21,
   typingPauseMs: 400,
-  focusEnterResponse95Ms: 360,
-  focusLeaveResponse95Ms: 520,
+  focusEnterResponseMs: 360,
+  focusLeaveResponseMs: 520,
+  cursorSwitchRevealResponseMs: 370,
   sentenceSettleEpsilon: 0.002,
 } as const;
 

@@ -189,7 +189,7 @@ export function createRipple(debug?: DebugRecorder) {
     for (const ranges of scratch) ranges.length = 0;
     for (const paint of sentences) {
       const settled = stepCritical(paint, paint.target, elapsed,
-        reducedMotion ? 0 : (paint.target === 1 ? MOTION.focusEnterResponse95Ms : MOTION.focusLeaveResponse95Ms),
+        reducedMotion ? 0 : (paint.target === 1 ? MOTION.focusEnterResponseMs : MOTION.focusLeaveResponseMs),
         MOTION.sentenceSettleEpsilon);
       if (paint.value < SENTENCE_ALPHA || paint.value > 1) {
         paint.value = clamp(paint.value, SENTENCE_ALPHA, 1);

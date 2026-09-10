@@ -10,7 +10,7 @@ export function createTypewriter() {
   let expected: number | null = null;
   let yieldedInput = -Infinity;
   let locating = false;
-  let response = MOTION.scrollResponse95Ms;
+  let responseMs = MOTION.scrollResponseMs;
 
   function cancel() {
     target = null;
@@ -54,7 +54,7 @@ export function createTypewriter() {
         if (target === null) {
           motion = { value: scrollTop, velocity: 0 };
           previousTime = null;
-          response = MOTION.scrollResponse95Ms + Math.min(70, Math.abs(nextTarget - scrollTop) * 0.12) +
+          responseMs = MOTION.scrollResponseMs + Math.min(70, Math.abs(nextTarget - scrollTop) * 0.12) +
             (locating ? 30 : 0);
         }
         if (target === null || Math.abs(nextTarget - target) >= 1) target = nextTarget;
@@ -64,7 +64,7 @@ export function createTypewriter() {
 
     const elapsed = previousTime === null ? 16 : Math.max(0, now - previousTime);
     previousTime = now;
-    const settled = stepCritical(motion, target, elapsed, frame.reducedMotion ? 0 : response,
+    const settled = stepCritical(motion, target, elapsed, frame.reducedMotion ? 0 : responseMs,
       MOTION.scrollPositionEpsilonPx);
     let result = clamp(motion.value, 0, maxScroll);
     if (caret.y < viewport.top) result = Math.min(result, scrollTop + caret.y - viewport.top);

@@ -10,6 +10,7 @@ interface CursorMotion {
 }
 
 type BreathPhase = "normal" | "down" | "hold" | "up";
+type SwitchRevealPhase = "none" | "pending" | "active";
 
 export function createCursor(debug?: DebugRecorder) {
   const element = document.createElement("div");
@@ -32,7 +33,7 @@ export function createCursor(debug?: DebugRecorder) {
   let selecting = false;
   let settleUntil = 0;
   let stableFrames = 0;
-  let revealPending = false;
+  let switchRevealPhase: SwitchRevealPhase = "none";
   let breathPhase: BreathPhase = "normal";
   // In normal this is the next down deadline after a completed cycle; in hold
   // it is the low-alpha hold deadline. Zero means first idle delay is derived
@@ -52,8 +53,9 @@ export function createCursor(debug?: DebugRecorder) {
       alphaVelocity: alpha.velocity,
       breathing: breathPhase !== "normal",
       breathPhase,
-      settling: settleUntil !== 0 || revealPending,
-      revealPending,
+      settling: settleUntil !== 0 || switchRevealPhase !== "none",
+      revealPending: switchRevealPhase === "pending",
+      revealPhase: switchRevealPhase,
       stableFrames,
       currentX: motion?.x.value ?? null,
       currentY: motion?.y.value ?? null,
@@ -88,7 +90,7 @@ export function createCursor(debug?: DebugRecorder) {
   function clearSettling() {
     settleUntil = 0;
     stableFrames = 0;
-    revealPending = false;
+    switchRevealPhase = "none";
   }
 
   function hide(preserveOwner = false) {
@@ -114,7 +116,6 @@ export function createCursor(debug?: DebugRecorder) {
       ZENTYPE_DEBUG: debugState("editor-change", frame, { now });
     }
     const ownerChanged = bindOwner(frame.editable);
-    revealPending = false;
     // Transport the last displayed cursor before approaching the authoritative target.
     const offset = { top: frame.origin.y - frame.scrollTop, left: frame.origin.x - frame.scrollLeft };
     if (motion && target) {
@@ -144,11 +145,33 @@ export function createCursor(debug?: DebugRecorder) {
         return true;
       }
       ZENTYPE_DEBUG: debugState("switch-settled", frame, { now, deadline: now >= settleUntil });
-      clearSettling();
-      // Commit the stable geometry while still hidden. The next Session frame
-      // reveals it, so themed tab layout cannot paint one frame at an old origin.
-      if (target && !frame.reducedMotion) revealPending = true;
+      settleUntil = 0;
+      stableFrames = 0;
+      // Commit stable geometry in a hidden, fully-rested state. The next
+      // Session frame is the first frame allowed to start the reveal clock.
+      if (target && !frame.reducedMotion) {
+        motion = createMotion(target);
+        lastMotion = now;
+        lastTime = null;
+        alpha.value = 0;
+        alpha.velocity = 0;
+        resetBreathing();
+        switchRevealPhase = "pending";
+        const view = frame.viewport;
+        element.style.opacity = "0";
+        element.style.transform = "translate3d(" + motion.x.value + "px," + motion.y.value + "px,0)";
+        element.style.height = motion.height.value + "px";
+        element.style.clipPath = "inset(" + Math.max(0, view.top - motion.y.value) + "px 0 " +
+          Math.max(0, motion.y.value + motion.height.value - view.bottom) + "px 0)";
+        element.style.zIndex = String(frame.zIndex);
+        element.hidden = true;
+        ZENTYPE_DEBUG: debugState("switch-commit-hidden", frame, { now, revealElapsed: 0 });
+        return true;
+      }
+      switchRevealPhase = "none";
     }
+    const startingSwitchReveal = switchRevealPhase === "pending";
+    if (startingSwitchReveal) switchRevealPhase = "active";
     const previousMotionTime = lastTime;
     const motionClockInactive = previousMotionTime === null;
     const elapsed = motionClockInactive ? 16 : Math.max(0, now - previousMotionTime);
@@ -182,8 +205,8 @@ export function createCursor(debug?: DebugRecorder) {
       resetBreathing();
     }
     const distance = Math.hypot(motion.x.value - target.x, motion.y.value - target.y);
-    const response = frame.reducedMotion ? 0 : (typing ? MOTION.caretTypingResponse95Ms :
-      MOTION.caretNavigationResponse95Ms + Math.min(120, distance * 0.3));
+    const response = frame.reducedMotion ? 0 : (typing ? MOTION.caretTypingResponseMs :
+      MOTION.caretNavigationResponseMs + Math.min(120, distance * 0.3));
     const xSettled = stepCritical(motion.x, target.x, elapsed, response, MOTION.cursorSettlePx);
     const ySettled = stepCritical(motion.y, target.y, elapsed, response, MOTION.cursorSettlePx);
     const heightSettled = stepCritical(motion.height, target.height, elapsed, response, MOTION.cursorSettlePx);
@@ -215,13 +238,14 @@ export function createCursor(debug?: DebugRecorder) {
       breathDeadline = 0;
       alphaPhaseChanged = true;
     }
-    const alphaResponse = frame.reducedMotion ? 0 : breathPhase === "down"
-      ? MOTION.breathDownResponse95Ms : breathPhase === "up"
-        ? MOTION.breathUpResponse95Ms : alphaTarget < 1
-          ? MOTION.cursorDisappearResponse95Ms : MOTION.cursorAppearResponse95Ms;
+    const alphaResponse = frame.reducedMotion ? 0 : startingSwitchReveal || switchRevealPhase === "active"
+      ? MOTION.cursorSwitchRevealResponseMs : breathPhase === "down"
+        ? MOTION.breathDownResponseMs : breathPhase === "up"
+          ? MOTION.breathUpResponseMs : alphaTarget < 1
+            ? MOTION.cursorDisappearResponseMs : MOTION.cursorAppearResponseMs;
     // A phase entered after an inactive semantic deadline starts at its own
     // baseline; hold/rest time never becomes Critical Motion elapsed.
-    const alphaElapsed = alphaPhaseChanged && motionClockInactive ? 0 : elapsed;
+    const alphaElapsed = startingSwitchReveal ? 0 : alphaPhaseChanged && motionClockInactive ? 0 : elapsed;
     const alphaSettled = breathPhase === "hold" ? true :
       stepCritical(alpha, alphaTarget, alphaElapsed, alphaResponse, MOTION.alphaSettleEpsilon);
     if (breathPhase === "down" && alphaSettled) {
@@ -231,6 +255,7 @@ export function createCursor(debug?: DebugRecorder) {
       breathPhase = "normal";
       breathDeadline = now + MOTION.breatheRestMs;
     }
+    if (switchRevealPhase === "active" && alphaSettled) switchRevealPhase = "none";
     if (alpha.value < 0 || alpha.value > 1) {
       alpha.value = clamp(alpha.value, 0, 1);
       alpha.velocity = 0;
@@ -240,20 +265,21 @@ export function createCursor(debug?: DebugRecorder) {
     element.style.height = motion.height.value + "px";
     element.style.clipPath = "inset(" + Math.max(0, view.top - motion.y.value) + "px 0 " + Math.max(0, motion.y.value + motion.height.value - view.bottom) + "px 0)";
     element.style.zIndex = String(frame.zIndex);
-    if (!revealPending) element.hidden = false;
+    if (switchRevealPhase !== "pending") element.hidden = false;
     ZENTYPE_DEBUG: debugState("render", frame, {
       now,
       moving,
       typing,
       interacting,
       breathReady: idleReady,
+      revealElapsed: switchRevealPhase === "active" ? alphaElapsed : null,
       visible,
       ownerChanged,
       edge,
     });
     if (!moving && alphaSettled) lastTime = null;
     else lastTime = now;
-    return moving || !alphaSettled || revealPending;
+    return moving || !alphaSettled || switchRevealPhase !== "none";
   }
 
   /** Fade only the overlay; valid editor bindings keep native caret suppressed. */
@@ -266,7 +292,8 @@ export function createCursor(debug?: DebugRecorder) {
     // fresh render. A settled breath hold, however, must not spend its hold
     // time on the new fade phase.
     const elapsed = lastTime === null ? (fromSemanticHold ? 0 : 16) : Math.max(0, now - lastTime);
-    const settled = stepCritical(alpha, 0, elapsed, reducedMotion ? 0 : MOTION.cursorDisappearResponse95Ms,
+    clearSettling();
+    const settled = stepCritical(alpha, 0, elapsed, reducedMotion ? 0 : MOTION.cursorDisappearResponseMs,
       MOTION.alphaSettleEpsilon);
     lastTime = settled ? null : now;
     if (alpha.value < 0) { alpha.value = 0; alpha.velocity = 0; }
@@ -317,7 +344,7 @@ export function createCursor(debug?: DebugRecorder) {
       return motion ? Math.max(1, lastValid + MOTION.recoveryMs + 1 - now) : null;
     },
     /** True while the overlay waits out a switched editor's animation. */
-    isSettling() { return settleUntil !== 0 || revealPending; },
+    isSettling() { return settleUntil !== 0 || switchRevealPhase !== "none"; },
     /**
      * The host switched editor (tab, split, popup). Themed switch animations keep
      * moving the caret geometry. Reveal after consecutive stable samples, bounded
