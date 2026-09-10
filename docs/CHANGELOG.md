@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.9.0-remake.2.2.1 (2026-09-10) — Session clock-domain hotfix
+
+- Session frame decisions now sample `performance.now()` once per callback, so StructureGate quiet/deadline, Cursor, Typewriter, interaction hold and recovery share the event/observer clock instead of mixing it with the raw rAF timestamp.
+- Development DebugKit records `clockNow`, `rafTimestamp` and their skew; production compile-time elimination remains required.
+- Added deterministic regressions for the runtime-observed ~134ms skew, including transient caret withholding and all affected timing budgets.
+
 ## v2.9.0-remake.2.2 (2026-09-09) — Host contract and production hardening
 
 - 以 SiYuan v3.8.3 `8641553a` 和官方 plugin-sample `d9ad60b5` 直接审计 Tab、删除、Enter、Selection、caretScroll、IME 与插件生命周期，并记录证据等级。

@@ -1,4 +1,4 @@
-# v2.9.0-remake.2.2
+# v2.9.0-remake.2.2.1
 
 ## Ownership and authority
 
@@ -36,6 +36,8 @@ Pointer down, wheel/touch browsing, keyboard navigation, range selection, editor
 ## Frame ordering and performance
 
 Events invalidate and enqueue one frame. Mutation callbacks do not read geometry or repaint. Plugin presentation styles are not observed. Text dirtiness is scoped to the current editable; semantic/representation changes invalidate block bindings as well.
+
+All Session duration and deadline arithmetic uses `performance.now()` as one authoritative monotonic clock. The raw rAF callback timestamp is diagnostic provenance only: a real SiYuan 3.8.3 / Electron 44.2.0 / Chrome 152 capture observed a stable offset between those sources.
 
 On an admitted frame, Ripple's `sample()` prepares projection, colors, numeric baselines and a write-only commit closure. These reads precede scrolling/cursor/Ripple writes. Cursor samples breathing ink before writing its presentation. The scroll container's actual position after a write is authoritative; Session transports measured caret geometry by that delta. This scroll write/readback is intentional and does not trigger a second host sample. Clone-color cleanup is deferred until after reads, including fresh color acquisition.
 

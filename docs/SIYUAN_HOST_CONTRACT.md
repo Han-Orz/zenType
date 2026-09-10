@@ -14,8 +14,10 @@
 - **Source-proven**：当前 SiYuan 源码直接存在该路径或操作。
 - **Official API contract**：官方 Plugin class、lifecycle coordinator、plugin-sample 或类型包明确承诺。
 - **Inferred**：源码强烈支持，但浏览器 task、microtask、MutationObserver 与 rAF 的相对投递仍未实测。
-- **Runtime-observed**：必须来自真实 SiYuan 运行日志；本轮没有新增此类证据。
+- **Runtime-observed**：来自真实 SiYuan 运行日志，只约束被观测的宿主组合。
 - **Not verified**：当前源码与自动夹具均不能回答。
+
+**Runtime-observed.** 用户实机 SiYuan 3.8.3 / Electron 44.2.0 / Chrome 152 中，`requestAnimationFrame` callback timestamp 与同一 callback 执行时的 `performance.now()` 存在约 134ms 的稳定偏移。zenType 不得跨这两个来源进行 elapsed/deadline arithmetic；原始 rAF timestamp 仅可作为 frame provenance/telemetry。
 
 ## Editing paths
 

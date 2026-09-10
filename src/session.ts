@@ -119,12 +119,18 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     observe(null);
   }
 
-  function update(now: number) {
+  function update(rafTimestamp: number) {
     pending = null;
     if (disposed) return;
+    // Event, observer and frame decisions share one monotonic clock. A host may
+    // expose an rAF timestamp with a stable offset from performance.now().
+    const now = performance.now();
     try {
       ZENTYPE_DEBUG: debug?.record("session", "frame-start", {
         now,
+        clockNow: now,
+        rafTimestamp,
+        rafSkewMs: rafTimestamp - now,
         blocked,
         hidden: document.hidden,
         geometryDirty,

@@ -248,10 +248,10 @@ interface SessionHarness {
   scroll: PaintElement & { scrollTop: number };
   events: Array<{ name: string; payload: Record<string, unknown> }>;
   getFrame(): EditorFrame;
-  setFrame(next: EditorFrame): void;
+  setFrame(next: EditorFrame | null): void;
   dispatch(at: number, type: string, event?: Record<string, unknown>): void;
   mutate(at: number, records: MutationRecord[]): void;
-  tick(at: number): void;
+  tick(at: number, rafTimestamp?: number): void;
   readCount(): number;
   rafCount(): number;
   timerCount(): number;
@@ -275,7 +275,7 @@ function withSessionHarness(run: (harness: SessionHarness) => void, features = {
     editable.parentElement = editor;
     Object.assign(editable, { closest: (selector: string) => selector === ".protyle-wysiwyg" ? editor : null });
     const scroll = Object.assign(new PaintElement(), { scrollTop: 300 });
-    let current = frame({ editor: editor as unknown as HTMLElement, editable: editable as unknown as HTMLElement,
+    let current: EditorFrame | null = frame({ editor: editor as unknown as HTMLElement, editable: editable as unknown as HTMLElement,
       block: editable as unknown as HTMLElement, scroll: scroll as unknown as HTMLElement, reducedMotion: true });
     class Observer {
       callback: (records: MutationRecord[]) => void;
@@ -321,7 +321,7 @@ function withSessionHarness(run: (harness: SessionHarness) => void, features = {
       const session = createWritingSession(features, debug as never);
       const harness: SessionHarness = {
         body, editor, editable, scroll, events, session,
-        getFrame: () => current,
+        getFrame: () => { assert.ok(current); return current; },
         setFrame: next => { current = next; },
         dispatch(at, type, event = {}) {
           now = at;
@@ -334,7 +334,7 @@ function withSessionHarness(run: (harness: SessionHarness) => void, features = {
           assert.ok(observers[0], "missing editor MutationObserver");
           observers[0].callback(records);
         },
-        tick(at) {
+        tick(at, rafTimestamp = at) {
           now = at;
           for (const [id, timer] of [...timers]) if (timer.at <= at) {
             timers.delete(id);
@@ -342,7 +342,7 @@ function withSessionHarness(run: (harness: SessionHarness) => void, features = {
           }
           const pending = [...raf.values()];
           raf.clear();
-          for (const callback of pending) callback(at);
+          for (const callback of pending) callback(rafTimestamp);
         },
         readCount: () => reads,
         rafCount: () => raf.size,
@@ -544,6 +544,122 @@ test("ordinary Backspace commits after one bounded post-input quiet window", () 
   assert.ok(harness.events.some(event => event.name === "structure-sample" &&
     event.payload.decision === "ordinary" && event.payload.reason === "non-structural-quiet"));
   assert.equal(harness.events.some(event => event.name === "structure-evidence"), false);
+}));
+
+test("skewed rAF time never publishes transient ordinary Backspace geometry", () => withSessionHarness(harness => {
+  harness.tick(0);
+  const overlay = harness.body.children[0];
+  const original = overlay.style.transform;
+  const committed = harness.events.filter(event => event.name === "frame-commit").length;
+  const prepared = harness.events.filter(event => event.name === "prepare").length;
+  const typewriterFrames = harness.events.filter(event => event.name === "frame" && "requestedScroll" in event.payload).length;
+
+  harness.dispatch(0, "keydown", { key: "Backspace", defaultPrevented: false });
+  harness.dispatch(2, "beforeinput", { inputType: "deleteContentBackward", isComposing: false });
+  harness.dispatch(4.5, "input", { inputType: "deleteContentBackward", isComposing: false });
+  harness.mutate(4.6, [{ type: "characterData", target: harness.editable,
+    addedNodes: [], removedNodes: [] } as unknown as MutationRecord]);
+  harness.setFrame({ ...harness.getFrame(), caret: { x: 1114.199951171875, y: 302.75, height: 20 } });
+  harness.tick(6, 140);
+
+  const frameStart = harness.events.filter(event => event.name === "frame-start").at(-1)!;
+  assert.equal(frameStart.payload.now, 6);
+  assert.equal(frameStart.payload.clockNow, 6);
+  assert.equal(frameStart.payload.rafTimestamp, 140);
+  assert.equal(frameStart.payload.rafSkewMs, 134);
+  assert.equal(overlay.style.transform, original);
+  assert.equal(harness.scroll.scrollTop, 300);
+  assert.equal(harness.events.filter(event => event.name === "frame-commit").length, committed);
+  assert.equal(harness.events.filter(event => event.name === "prepare").length, prepared);
+  assert.equal(harness.events.filter(event => event.name === "frame" && "requestedScroll" in event.payload).length, typewriterFrames);
+  assert.ok(harness.events.some(event => event.name === "structure-sample" &&
+    event.payload.decision === "wait" && event.payload.reason === "awaiting-post-input-quiet"));
+  assert.equal(harness.events.some(event => event.payload.targetX === 1114.199951171875), false);
+
+  harness.dispatch(9, "selectionchange");
+  const removed = new PaintElement();
+  const replacement = new PaintElement();
+  removed.dataset.nodeId = replacement.dataset.nodeId = "normalized";
+  harness.mutate(16, [{ type: "childList", target: harness.editor,
+    addedNodes: [replacement], removedNodes: [removed] } as unknown as MutationRecord]);
+  harness.dispatch(17, "selectionchange");
+  harness.setFrame({ ...harness.getFrame(), caret: { x: 259, y: 323.75, height: 20 } });
+  harness.tick(17, 151);
+  assert.equal(harness.events.some(event => event.payload.targetX === 1114.199951171875), false);
+  harness.tick(65, 199);
+
+  assert.ok(harness.events.some(event => event.name === "structure-sample" &&
+    event.payload.decision === "ordinary" && event.payload.reason === "non-structural-quiet"));
+  assert.ok(harness.events.some(event => event.payload.targetX === 259));
+  assert.equal(harness.events.some(event => event.payload.targetX === 1114.199951171875), false);
+}, { typewriter: true, ripple: true }));
+
+test("structure deadline uses the execution clock under rAF skew", () => withSessionHarness(harness => {
+  harness.tick(0);
+  harness.dispatch(0, "keydown", { key: "Tab", defaultPrevented: false });
+  harness.tick(30, 164);
+
+  assert.equal(harness.events.some(event => event.name === "structure-timeout"), false);
+  assert.equal(harness.events.some(event => event.name === "structure-release" && event.payload.reason === "timeout"), false);
+  assert.ok(harness.events.some(event => event.name === "structure-sample" && event.payload.elapsed === 30));
+  harness.tick(MOTION.structureDeadlineMs, MOTION.structureDeadlineMs + 134);
+  assert.ok(harness.events.some(event => event.name === "structure-release" && event.payload.reason === "timeout"));
+}));
+
+test("ordinary quiet window uses 48ms of execution time under rAF skew", () => withSessionHarness(harness => {
+  harness.tick(0);
+  harness.dispatch(0, "keydown", { key: "Backspace", defaultPrevented: false });
+  harness.dispatch(4, "input", { inputType: "deleteContentBackward", isComposing: false });
+  harness.mutate(6, [{ type: "characterData", target: harness.editable,
+    addedNodes: [], removedNodes: [] } as unknown as MutationRecord]);
+  harness.tick(53, 500);
+
+  assert.equal(harness.events.some(event => event.name === "structure-sample" && event.payload.decision === "ordinary"), false);
+  assert.ok(harness.events.some(event => event.name === "structure-sample" && event.payload.quiet === 47));
+  harness.tick(54, 1000);
+  assert.ok(harness.events.some(event => event.name === "structure-sample" &&
+    event.payload.decision === "ordinary" && event.payload.quiet === MOTION.structureQuietMs));
+}));
+
+test("typing pause uses the execution clock under rAF skew", () => withSessionHarness(harness => {
+  harness.tick(0);
+  harness.setFrame({ ...harness.getFrame(), caret: { x: 100, y: 350, height: 20 } });
+  harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
+  harness.tick(300, 434);
+
+  assert.equal(harness.scroll.scrollTop, 300);
+  assert.equal(harness.events.filter(event => event.name === "render" && "typing" in event.payload).at(-1)?.payload.typing, true);
+  harness.tick(MOTION.typingPauseMs + 1, MOTION.typingPauseMs + 135);
+  assert.ok(harness.scroll.scrollTop > 300);
+  assert.equal(harness.events.filter(event => event.name === "render" && "typing" in event.payload).at(-1)?.payload.typing, false);
+}));
+
+test("interaction hold uses the execution clock under rAF skew", () => withSessionHarness(harness => {
+  harness.tick(0);
+  harness.dispatch(100, "pointerdown");
+  harness.dispatch(100, "pointerup");
+  harness.tick(200, 334);
+
+  assert.equal(harness.events.filter(event => event.name === "render" && "interacting" in event.payload).at(-1)?.payload.interacting, true);
+  harness.dispatch(250, "selectionchange");
+  harness.tick(250, 384);
+  assert.equal(harness.events.filter(event => event.name === "render" && "interacting" in event.payload).at(-1)?.payload.interacting, false);
+}));
+
+test("recovery budget uses the execution clock under rAF skew", () => withSessionHarness(harness => {
+  harness.tick(0);
+  const overlay = harness.body.children[0];
+  harness.setFrame(null);
+  harness.dispatch(0, "focusin");
+  harness.tick(30, 164);
+
+  assert.equal(harness.events.filter(event => event.name === "frame-missing").at(-1)?.payload.withinRecovery, true);
+  assert.equal(overlay.hidden, false);
+  assert.equal(harness.timerCount(), 1);
+  harness.tick(MOTION.recoveryMs, MOTION.recoveryMs + 134);
+  assert.equal(harness.events.filter(event => event.name === "frame-missing").at(-1)?.payload.withinRecovery, false);
+  assert.equal(overlay.hidden, true);
+  assert.equal(harness.timerCount(), 0);
 }));
 
 test("intent without ordinary or structural evidence releases only at the bounded deadline", () => withSessionHarness(harness => {
