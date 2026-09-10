@@ -6,7 +6,7 @@ export function createTypewriter() {
   let target: number | null = null;
   let motion: CriticalState | null = null;
   let anchor = 0.48;
-  let previousTime = 0;
+  let previousTime: number | null = null;
   let expected: number | null = null;
   let yieldedInput = -Infinity;
   let locating = false;
@@ -16,7 +16,7 @@ export function createTypewriter() {
     target = null;
     motion = null;
     expected = null;
-    previousTime = 0;
+    previousTime = null;
     locating = false;
   }
 
@@ -53,7 +53,7 @@ export function createTypewriter() {
         }
         if (target === null) {
           motion = { value: scrollTop, velocity: 0 };
-          previousTime = 0;
+          previousTime = null;
           response = MOTION.scrollResponse95Ms + Math.min(70, Math.abs(nextTarget - scrollTop) * 0.12) +
             (locating ? 30 : 0);
         }
@@ -62,7 +62,7 @@ export function createTypewriter() {
     }
     if (target === null || !motion) return scrollTop;
 
-    const elapsed = previousTime ? Math.min(MOTION.maxFrameDeltaMs, now - previousTime) : 16;
+    const elapsed = previousTime === null ? 16 : Math.max(0, now - previousTime);
     previousTime = now;
     const settled = stepCritical(motion, target, elapsed, frame.reducedMotion ? 0 : response,
       MOTION.scrollPositionEpsilonPx);
@@ -82,7 +82,7 @@ export function createTypewriter() {
       result = target;
       target = null;
       motion = null;
-      previousTime = 0;
+      previousTime = null;
       locating = false;
     }
     return result;

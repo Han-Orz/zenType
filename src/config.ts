@@ -1,4 +1,4 @@
-export const BUILD_LABEL = "v2.9.0-remake.2.3-critical.1";
+export const BUILD_LABEL = "v2.9.0-remake.2.3-critical.2";
 
 /** Larger response95 values mean slower, softer motion. */
 export const MOTION = {
@@ -8,15 +8,15 @@ export const MOTION = {
   switchStableFrames: 8,
   structureQuietMs: 48,
   structureDeadlineMs: 160,
-  maxFrameDeltaMs: 100,
   cursorAppearResponse95Ms: 120,
   cursorDisappearResponse95Ms: 80,
   cursorSettlePx: 0.15,
   alphaSettleEpsilon: 0.005,
   blockFadeMs: 360,
-  breatheLowAlpha: 0,
-  breatheLowHoldMs: 900,
-  breatheWakeMarginMs: 20,
+  breathDownResponse95Ms: 600,
+  breathUpResponse95Ms: 220,
+  breatheLowAlpha: 0.25,
+  breatheLowHoldMs: 120,
   interactionHoldMs: 150,
   edgeFadeMinHeightPx: 12,
   caretTypingResponse95Ms: 55,

@@ -22,7 +22,7 @@ export function createCursor(debug?: DebugRecorder) {
   let editor: HTMLElement | null = null;
   let motion: CursorMotion | null = null;
   let target: CursorRect | null = null;
-  let lastTime = 0;
+  let lastTime: number | null = null;
   let lastValid = -Infinity;
   let lastMotion = 0;
   const alpha: CriticalState = { value: 0, velocity: 0 };
@@ -32,6 +32,7 @@ export function createCursor(debug?: DebugRecorder) {
   let stableFrames = 0;
   let revealPending = false;
   let breathLow = false;
+  let breathRecovering = false;
   let breathWake = 0;
   let transport = { top: 0, left: 0 };
   let nestedScroll: EditorFrame["nestedScroll"] = [];
@@ -44,7 +45,7 @@ export function createCursor(debug?: DebugRecorder) {
       hidden: element.hidden,
       alpha: alpha.value,
       owner: owner !== null,
-      breathing: breathLow,
+      breathing: breathLow || breathRecovering,
       settling: settleUntil !== 0 || revealPending,
       revealPending,
       stableFrames,
@@ -66,6 +67,7 @@ export function createCursor(debug?: DebugRecorder) {
 
   function resetBreathing() {
     breathLow = false;
+    breathRecovering = false;
     breathWake = 0;
     alphaTarget = 1;
   }
@@ -90,7 +92,7 @@ export function createCursor(debug?: DebugRecorder) {
       editor = null;
     }
     motion = target = null;
-    lastTime = 0;
+    lastTime = null;
     alpha.value = 0;
     alpha.velocity = 0;
     resetBreathing();
@@ -142,7 +144,9 @@ export function createCursor(debug?: DebugRecorder) {
       // reveals it, so themed tab layout cannot paint one frame at an old origin.
       if (target && !frame.reducedMotion) revealPending = true;
     }
-    const elapsed = lastTime ? Math.min(MOTION.maxFrameDeltaMs, now - lastTime) : 16;
+    const previousMotionTime = lastTime;
+    const motionClockInactive = previousMotionTime === null;
+    const elapsed = motionClockInactive ? 16 : Math.max(0, now - previousMotionTime);
     if (frame.caret) {
       lastValid = now;
       target = { ...frame.caret, y: frame.caret.y - (frame.caretLift ?? MOTION.caretLiftPx) };
@@ -164,7 +168,6 @@ export function createCursor(debug?: DebugRecorder) {
       ZENTYPE_DEBUG: debugState("render-without-target", frame, { now });
       return false;
     }
-    lastTime = now;
     if (!motion) {
       motion = createMotion(target);
       lastMotion = now;
@@ -173,36 +176,53 @@ export function createCursor(debug?: DebugRecorder) {
       // visibility owner. A fresh authoritative caret always reveals normally.
       alphaTarget = 1;
       breathLow = false;
+      breathRecovering = false;
       breathWake = 0;
     }
     const distance = Math.hypot(motion.x.value - target.x, motion.y.value - target.y);
     const response = frame.reducedMotion ? 0 : (typing ? MOTION.caretTypingResponse95Ms :
       MOTION.caretNavigationResponse95Ms + Math.min(120, distance * 0.3));
-    const moving = !stepCritical(motion.x, target.x, elapsed, response, MOTION.cursorSettlePx) ||
-      !stepCritical(motion.y, target.y, elapsed, response, MOTION.cursorSettlePx) ||
-      !stepCritical(motion.height, target.height, elapsed, response, MOTION.cursorSettlePx);
+    const xSettled = stepCritical(motion.x, target.x, elapsed, response, MOTION.cursorSettlePx);
+    const ySettled = stepCritical(motion.y, target.y, elapsed, response, MOTION.cursorSettlePx);
+    const heightSettled = stepCritical(motion.height, target.height, elapsed, response, MOTION.cursorSettlePx);
+    const moving = !(xSettled && ySettled && heightSettled);
     if (moving || typing || interacting) lastMotion = now;
     const view = frame.viewport;
     const edge = Math.min(motion.y.value + motion.height.value - view.top, view.bottom - motion.y.value);
     const visible = motion.x.value >= view.left && motion.x.value <= view.right && edge > 0;
     const breathing = !frame.reducedMotion && !typing && !interacting && !moving && now - lastMotion >= MOTION.breatheDelayMs;
+    let alphaPhaseChanged = false;
     if (frame.reducedMotion || typing || interacting || moving) {
+      if (breathLow && alphaTarget !== 1) breathRecovering = true;
       breathLow = false;
       breathWake = 0;
-      alphaTarget = 1;
-    } else if (!breathLow && alphaTarget === 1 && breathing) {
+      if (alphaTarget !== 1) {
+        alphaTarget = 1;
+        alphaPhaseChanged = true;
+      }
+    } else if (!breathLow && !breathRecovering && alphaTarget === 1 && breathing) {
       breathLow = true;
       alphaTarget = MOTION.breatheLowAlpha;
-      breathWake = now + MOTION.breatheLowHoldMs;
-    } else if (breathLow && now >= breathWake) {
+      // The hold starts only after the down motion settles, not at phase entry.
+      breathWake = 0;
+      alphaPhaseChanged = true;
+    } else if (breathLow && breathWake !== 0 && now >= breathWake) {
       breathLow = false;
+      breathRecovering = true;
       alphaTarget = 1;
       breathWake = 0;
       lastMotion = now;
+      alphaPhaseChanged = true;
     }
-    const alphaResponse = frame.reducedMotion ? 0 : alphaTarget < 1
-      ? MOTION.cursorDisappearResponse95Ms : MOTION.cursorAppearResponse95Ms;
-    const alphaSettled = stepCritical(alpha, alphaTarget, elapsed, alphaResponse, MOTION.alphaSettleEpsilon);
+    const alphaResponse = frame.reducedMotion ? 0 : breathLow
+      ? MOTION.breathDownResponse95Ms : breathRecovering
+        ? MOTION.breathUpResponse95Ms : alphaTarget < 1
+          ? MOTION.cursorDisappearResponse95Ms : MOTION.cursorAppearResponse95Ms;
+    // A phase entered from semantic hold has no active-motion time to consume.
+    const alphaElapsed = alphaPhaseChanged && motionClockInactive ? 0 : elapsed;
+    const alphaSettled = stepCritical(alpha, alphaTarget, alphaElapsed, alphaResponse, MOTION.alphaSettleEpsilon);
+    if (breathLow && alphaSettled && breathWake === 0) breathWake = now + MOTION.breatheLowHoldMs;
+    if (breathRecovering && alphaSettled && alphaTarget === 1) breathRecovering = false;
     if (alpha.value < 0 || alpha.value > 1) {
       alpha.value = clamp(alpha.value, 0, 1);
       alpha.velocity = 0;
@@ -223,19 +243,25 @@ export function createCursor(debug?: DebugRecorder) {
       ownerChanged,
       edge,
     });
-    if (!moving && alphaSettled && alphaTarget === 1) lastTime = 0;
+    if (!moving && alphaSettled) lastTime = null;
+    else lastTime = now;
     return moving || !alphaSettled || revealPending;
   }
 
   /** Fade only the overlay; valid editor bindings keep native caret suppressed. */
   function fadeOut(now: number, reducedMotion: boolean, reason = "release"): boolean {
+    const fromSemanticHold = breathLow && lastTime === null;
     alphaTarget = 0;
     breathLow = false;
+    breathRecovering = false;
     breathWake = 0;
-    const elapsed = lastTime ? Math.min(MOTION.maxFrameDeltaMs, now - lastTime) : 16;
-    lastTime = now;
+    // An ordinary first fade frame gets the same small initial interval as a
+    // fresh render. A settled breath hold, however, must not spend its hold
+    // time on the new fade phase.
+    const elapsed = lastTime === null ? (fromSemanticHold ? 0 : 16) : Math.max(0, now - lastTime);
     const settled = stepCritical(alpha, 0, elapsed, reducedMotion ? 0 : MOTION.cursorDisappearResponse95Ms,
       MOTION.alphaSettleEpsilon);
+    lastTime = settled ? null : now;
     if (alpha.value < 0) { alpha.value = 0; alpha.velocity = 0; }
     element.style.opacity = String(alpha.value);
     motion = target = null;
@@ -246,7 +272,7 @@ export function createCursor(debug?: DebugRecorder) {
 
   return { render, hide,
     /** Binding may change while Session withholds a new visual target. */
-    retainOwner(editable: HTMLElement | null) { bindOwner(editable); lastTime = 0; },
+    retainOwner(editable: HTMLElement | null) { bindOwner(editable); lastTime = null; },
     /**
      * Release presentation without a selection involved (no measurable caret, no
      * valid host frame). Fading keeps the transition smooth instead of the cursor
@@ -268,7 +294,7 @@ export function createCursor(debug?: DebugRecorder) {
         // alpha already holds the logical overlay alpha; sampling the clipped
         // element opacity would restart the fade from an edge product.
         selecting = true;
-        lastTime = 0;
+        lastTime = null;
       }
       const fading = fadeOut(now, reducedMotion, "selection");
       bindOwner(editable);
@@ -277,7 +303,7 @@ export function createCursor(debug?: DebugRecorder) {
     wakeDelay(now: number) {
       if (!motion) return null;
       const wake = breathLow ? breathWake : lastMotion + MOTION.breatheDelayMs;
-      return Math.max(1, wake + MOTION.breatheWakeMarginMs - now);
+      return Math.max(1, wake - now);
     },
     recoveryDelay(now: number) {
       return motion ? Math.max(1, lastValid + MOTION.recoveryMs + 1 - now) : null;

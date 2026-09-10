@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.9.0-remake.2.3-critical.2 (2026-09-10) — Critical Motion targeted fixes
+
+- Cursor now advances x, y and height independently on every frame, and all migrated Critical Motion features consume real non-negative elapsed time without the old 100ms clamp.
+- Breathing hold begins after the down motion settles; the next recovery phase starts with a fresh motion clock and uses the conservative 600ms down / 220ms up responses with a 0.25 low alpha and 120ms hold.
+- Added fractional actuator quantization, reduced-motion direct-settle and large-dt feature regressions. StructureGate, Session authority and block Ripple WAAPI remain unchanged.
+
 ## v2.9.0-remake.2.3-critical.1 (2026-09-10) — Critical Motion initial implementation
 
 - Added one analytic fixed-zeta=1 `CriticalState` primitive with a shared `response95Ms` meaning, continuous retargeting, and position-plus-velocity settling.

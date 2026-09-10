@@ -1,4 +1,4 @@
-# v2.9.0-remake.2.3-critical.1
+# v2.9.0-remake.2.3-critical.2
 
 ## Ownership and authority
 
@@ -53,7 +53,7 @@ Cursor owns current/target position and height, their CriticalState motion, logi
 
 Editor switching still uses eight stable samples or a 700ms ceiling; reduced motion skips this visual wait. Missing geometry retains presentation for the existing 160ms budget, then fades it. Caretless structural blocks fade immediately. Valid caretless/selected editables retain native suppression until host/lifecycle release. None of this is the shared structural gate.
 
-Cursor transports current and target by changes in scroll origin, outer scroll and common nested scrollers before applying the same fixed-zeta=1 analytic law to x, y and height. It retains the 1px visual lift, viewport edge fade, 120ms appear response95 and quicker 80ms disappear response95. The outer alpha is the sole visibility owner; breathing changes that same alpha target and has no CSS animation or inner recovery animation.
+Cursor transports current and target by changes in scroll origin, outer scroll and common nested scrollers before applying the same fixed-zeta=1 analytic law to x, y and height. It retains the 1px visual lift, viewport edge fade, 120ms appear response95 and quicker 80ms disappear response95. The outer alpha is the sole visibility owner; breathing changes that same alpha target, descends with a 600ms response95, recovers with a 220ms response95, and has no CSS animation or inner recovery animation.
 
 Typewriter remains an independent numerical comfort-band controller with hysteresis and host-scroll takeover. Its virtual scroll position and velocity advance independently of realized browser scrollTop through the shared critical law; the actuator readback is used only for takeover, ownership and measured displacement. The final visual tail settles only when both position and velocity are within the configured bounds. During a withheld frame Session does not call `next()` and cancels an outstanding scroll target. After commit it computes from final geometry and actual scrollTop. Composition continues to suppress plugin scrolling. The host can still scroll independently; we do not cancel SiYuan's caretScroll rAF. Manual browsing disables following; a distant ordinary click can request one centering alignment without writing intent.
 

@@ -31,7 +31,7 @@ export function createRipple(debug?: DebugRecorder) {
   let text = "";
   let entries: TextEntry[] = [];
   let sentences: SentencePaint[] = [];
-  let lastTime = 0;
+  let lastTime: number | null = null;
   let registered: Range[][] = Array.from({ length: names.length }, () => []);
   let scratch: Range[][] = Array.from({ length: names.length }, () => []);
 
@@ -178,12 +178,12 @@ export function createRipple(debug?: DebugRecorder) {
   }
 
   function render(now: number, reducedMotion: boolean): boolean {
-    const elapsed = lastTime ? Math.min(MOTION.maxFrameDeltaMs, now - lastTime) : 16;
+    const elapsed = lastTime === null ? 16 : Math.max(0, now - lastTime);
     lastTime = now;
     let moving = false;
     if (!supported) {
       ZENTYPE_DEBUG: debug?.record("ripple", "render", { supported: false, moving: false, sentenceCount: sentences.length, blockCount: painter.size() });
-      if (!moving) lastTime = 0;
+      if (!moving) lastTime = null;
       return moving;
     }
     for (const ranges of scratch) ranges.length = 0;
@@ -213,7 +213,7 @@ export function createRipple(debug?: DebugRecorder) {
     registered = scratch;
     scratch = previous;
     if (!block && !moving) clearSentences();
-    if (!moving) lastTime = 0;
+    if (!moving) lastTime = null;
     ZENTYPE_DEBUG: debug?.record("ripple", "render", {
       supported: true,
       moving,
@@ -229,7 +229,7 @@ export function createRipple(debug?: DebugRecorder) {
     painter.clear();
     clearSentences();
     block = null;
-    lastTime = 0;
+    lastTime = null;
   }
   return { sample, prepare(frame: EditorFrame, contentDirty: boolean, structureDirty: boolean, enabled: boolean) {
       sample(frame, contentDirty, structureDirty, enabled)();

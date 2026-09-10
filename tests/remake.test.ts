@@ -56,6 +56,14 @@ test("critical motion settles position and velocity together", () => {
   assert.equal(state.velocity, 0);
 });
 
+test("reduced critical motion settles an arbitrary state directly", () => {
+  const state: CriticalState = { value: 17.25, velocity: -3.5 };
+  const settled = stepCritical(state, -42.75, 200, 0);
+  assert.equal(settled, true);
+  assert.equal(state.value, -42.75);
+  assert.equal(state.velocity, 0);
+});
+
 test("scroll retarget accepts reverse editing while it is moving", () => {
   const writer = createTypewriter();
   const first = writer.next(frame(), 1000, true, 0);
@@ -148,12 +156,6 @@ test("cursor transports scroll, transfers editable ownership, and survives a sho
     cursor.render({ ...input, editable: secondOwner as unknown as HTMLElement, scrollTop: 30, caret: null }, 1048, true);
     assert.equal(overlay.hidden, false);
     cursor.render({ ...input, editable: secondOwner as unknown as HTMLElement, scrollTop: 30, caret: null }, 1300, true);
-    assert.equal(overlay.hidden, false);
-    const fading = Number(overlay.style.opacity);
-    for (let now = 1316; now <= 1556; now += 16) {
-      cursor.render({ ...input, editable: secondOwner as unknown as HTMLElement, scrollTop: 30, caret: null }, now, true);
-    }
-    assert.ok(fading > 0 && fading < 1);
     assert.equal(overlay.hidden, true);
     assert.equal(secondOwner.classes.has("zentype-custom-caret-active"), true);
     cursor.destroy();
@@ -163,6 +165,21 @@ test("cursor transports scroll, transfers editable ownership, and survives a sho
     else Reflect.deleteProperty(globalThis, "document");
   }
 });
+
+test("cursor advances x, y and height on the same retarget frame", () => withPresentation(body => {
+  const cursor = createCursor();
+  const input = frame({ editable: new PaintElement() as unknown as HTMLElement,
+    caret: { x: 100, y: 200, height: 20 } });
+  cursor.render(input, 1000, true);
+  const overlay = body.children[0];
+  cursor.render({ ...input, caret: { x: 400, y: 360, height: 36 } }, 1016, true);
+  const coordinates = overlay.style.transform.match(/translate3d\(([-\d.]+)px,([-\d.]+)px,0\)/);
+  assert.ok(coordinates);
+  assert.notEqual(Number(coordinates[1]), 100);
+  assert.notEqual(Number(coordinates[2]), 200 - MOTION.caretLiftPx);
+  assert.notEqual(overlay.style.height, "20px");
+  cursor.destroy();
+}));
 
 test("text projection reports cloned colors without writing during the read phase", () => {
   const savedDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
@@ -390,6 +407,10 @@ test("motion configuration exposes explicit response95 semantics", () => {
   assert.equal(MOTION.caretTypingResponse95Ms, 55);
   assert.equal(MOTION.caretNavigationResponse95Ms, 110);
   assert.equal(MOTION.scrollResponse95Ms, 300);
+  assert.equal(MOTION.breathDownResponse95Ms, 600);
+  assert.equal(MOTION.breathUpResponse95Ms, 220);
+  assert.equal(MOTION.breatheLowAlpha, 0.25);
+  assert.equal(MOTION.breatheLowHoldMs, 120);
 });
 
 test("DebugKit defaults to full, records current-session evidence, and exports after stop", async () => {
@@ -431,19 +452,51 @@ test("cursor interrupts breathing from displayed opacity and fades through selec
   const cursor = createCursor();
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
   for (let now = 1000; now <= 2000; now += 100) cursor.render(input, now, true);
-  cursor.render(input, 2000 + MOTION.breatheDelayMs, false);
+  const breathStart = 2000 + MOTION.breatheDelayMs;
+  cursor.render(input, breathStart, false);
+  cursor.render(input, breathStart + 16, false);
   const overlay = body.children[0];
   const breathingOpacity = Number(overlay.style.opacity);
   assert.ok(breathingOpacity < 1);
   cursor.render(input, 3200, false, true);
+  const interruptedOpacity = Number(overlay.style.opacity);
+  assert.ok(interruptedOpacity > 0 && interruptedOpacity < 1);
+  cursor.render(input, 3400, false, true);
   assert.ok(Number(overlay.style.opacity) > breathingOpacity);
-  assert.ok(cursor.yieldSelection(3216, false));
+  assert.ok(cursor.yieldSelection(3416, false));
   assert.equal(overlay.hidden, false);
   assert.ok(Number(overlay.style.opacity) > 0 && Number(overlay.style.opacity) < 1);
-  cursor.yieldSelection(3316, false);
-  cursor.render(input, 3332, false);
+  cursor.yieldSelection(3516, false);
+  cursor.render(input, 3532, false);
   assert.equal(overlay.hidden, false);
   assert.ok(Number(overlay.style.opacity) > 0);
+  cursor.destroy();
+}));
+
+test("breathing hold starts after down settle without polluting recovery elapsed", () => withPresentation(body => {
+  const cursor = createCursor();
+  const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
+  for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, true);
+  const breathStart = 2000 + MOTION.breatheDelayMs;
+  assert.equal(cursor.render(input, breathStart, false), true);
+  const overlay = body.children[0];
+  let lowSettledAt = 0;
+  for (let now = breathStart + 16; now <= breathStart + 3000; now += 16) {
+    if (!cursor.render(input, now, false)) {
+      lowSettledAt = now;
+      break;
+    }
+  }
+  assert.ok(lowSettledAt > breathStart);
+  const lowOpacity = Number(overlay.style.opacity);
+  assert.ok(Math.abs(lowOpacity - MOTION.breatheLowAlpha) < 0.01);
+  const wakeAt = lowSettledAt + MOTION.breatheLowHoldMs;
+  assert.equal(cursor.render(input, wakeAt, false), true);
+  const wakeOpacity = Number(overlay.style.opacity);
+  assert.ok(Math.abs(wakeOpacity - lowOpacity) < 0.01);
+  cursor.render(input, wakeAt + 100, false);
+  assert.ok(Number(overlay.style.opacity) > wakeOpacity);
+  assert.ok(Number(overlay.style.opacity) < 1);
   cursor.destroy();
 }));
 
@@ -452,10 +505,11 @@ test("geometry release freezes breathing and fades the outer cursor promptly", (
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
   for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, true);
   cursor.render(input, 4000, false);
+  cursor.render(input, 4016, false);
   const overlay = body.children[0];
   assert.ok(Number(overlay.style.opacity) < 1);
-  cursor.release(4016, false);
-  for (let now = 4032; now <= 5000 && !overlay.hidden; now += 16) cursor.release(now, false);
+  cursor.release(4032, false);
+  for (let now = 4048; now <= 5000 && !overlay.hidden; now += 16) cursor.release(now, false);
   assert.equal(overlay.hidden, true);
   cursor.render({ ...input, caret: { x: 300, y: 200, height: 20 } }, 5016, false);
   assert.equal(overlay.style.transform, `translate3d(300px,${200 - MOTION.caretLiftPx}px,0)`);
@@ -909,22 +963,47 @@ test("host takeover remains yielded until newer input", () => {
 
 test("quantized scroll readback cannot freeze virtual critical motion", () => {
   const writer = createTypewriter();
-  const target = 572;
-  let requested = writer.next(frame(), 1000, true, 0);
+  const target = 572.37;
+  let requested = writer.next(frame({ scrollTop: 300.37 }), 1000, true, 0);
   let progressed = 0;
+  let lastActual = Math.round(requested);
   for (let now = 1016; now <= 5000 && writer.isMoving(); now += 16) {
     const actual = Math.round(requested);
+    lastActual = actual;
     writer.written(actual);
     const next = writer.next(frame({
       scrollTop: actual,
-      caret: { x: 100, y: 550 - (actual - 300), height: 20 },
+      caret: { x: 100, y: 550.37 - (actual - 300), height: 20 },
     }), now, true, 0);
     if (next > requested) progressed++;
     requested = next;
   }
   assert.ok(progressed > 3);
   assert.equal(requested, target);
+  assert.equal(Number.isInteger(lastActual), true);
+  assert.notEqual(lastActual, target);
+  assert.ok(Math.abs(lastActual - target) <= MOTION.scrollPositionEpsilonPx + 1);
   assert.equal(writer.isMoving(), false);
+});
+
+test("typewriter large elapsed advances as two smaller real intervals", () => {
+  const targetFrame = (scrollTop: number) => frame({
+    scrollTop,
+    caret: { x: 100, y: 850 - scrollTop, height: 20 },
+  });
+  const large = createTypewriter();
+  let largeValue = large.next(frame(), 1000, true, 0);
+  large.written(largeValue);
+  largeValue = large.next(targetFrame(largeValue), 1200, true, 0);
+
+  const split = createTypewriter();
+  let splitValue = split.next(frame(), 1000, true, 0);
+  split.written(splitValue);
+  splitValue = split.next(targetFrame(splitValue), 1100, true, 0);
+  split.written(splitValue);
+  splitValue = split.next(targetFrame(splitValue), 1200, true, 0);
+
+  assert.ok(Math.abs(largeValue - splitValue) < 1e-10);
 });
 
 test("scroll snaps the final visual tail at the configured settle distance", () => {
