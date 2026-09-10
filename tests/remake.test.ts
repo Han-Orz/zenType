@@ -424,7 +424,7 @@ test("cursor interrupts breathing from displayed opacity and fades through selec
   cursor.destroy();
 }));
 
-test("geometry release freezes breathing and reaches 95 percent fade in 120ms", () => withPresentation(body => {
+test("geometry release freezes breathing and fades the outer cursor promptly", () => withPresentation(body => {
   const cursor = createCursor();
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
   for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, true);
@@ -463,8 +463,7 @@ test("editor switch reveals after eight stable samples and resets on geometry ch
   cursor.render(moved, 1240, false);
   assert.equal(cursor.isSettling(), false);
   assert.equal(overlay.hidden, false);
-  assert.deepEqual((overlay.children[0] as PaintElement).animations.at(-1)?.frames,
-    [{ opacity: 0 }, { opacity: 1 }]);
+  assert.equal((overlay.children[0] as PaintElement).animations.length, 0);
   cursor.destroy();
 }));
 
@@ -896,6 +895,27 @@ test("scroll integrates a dropped 100ms frame without a 32ms lag", () => {
   const response = MOTION.scrollResponseMs + Math.min(70, (572 - 300) * 0.12);
   const next = writer.next(frame({ scrollTop: first, caret: { x: 100, y: 550 - (first - 300), height: 20 } }), 1100, true, 0);
   assert.ok(Math.abs(next - approach(first, 572, 100, response)) < 1e-8);
+});
+
+test("scroll snaps the final visual tail at the configured settle distance", () => {
+  const writer = createTypewriter();
+  const target = 572;
+  let current = writer.next(frame(), 1000, true, 0);
+  writer.written(current);
+  for (let now = 1016; now <= 5000; now += 16) {
+    const next = writer.next(frame({
+      scrollTop: current,
+      caret: { x: 100, y: 550 - (current - 300), height: 20 },
+    }), now, true, 0);
+    writer.written(next);
+    if (Math.abs(target - next) < MOTION.scrollSettlePx) {
+      assert.equal(next, target);
+      assert.equal(writer.isMoving(), false);
+      return;
+    }
+    current = next;
+  }
+  assert.fail("typewriter did not reach its configured visual settle tail");
 });
 
 test("English sentences retain the native Segmenter uppercase and lowercase rules", () => {

@@ -1,4 +1,4 @@
-# v2.9.0-remake.2.2.2
+# v2.9.0-remake.2.3-motion.1
 
 ## Ownership and authority
 
@@ -53,9 +53,9 @@ Cursor owns current/target position and height, motion time, native-caret bindin
 
 Editor switching still uses eight stable samples or a 700ms ceiling; reduced motion skips this visual wait. Missing geometry retains presentation for the existing 160ms budget, then fades it. Caretless structural blocks fade immediately. Valid caretless/selected editables retain native suppression until host/lifecycle release. None of this is the shared structural gate.
 
-Cursor transports current and target by changes in scroll origin, outer scroll and common nested scrollers before interpolating the remaining local displacement. It retains the 1px visual lift, viewport edge fade, 120ms fade envelopes, 4s CSS breathing and 200ms breathing interruption. No P2 motion retuning is included.
+Cursor transports current and target by changes in scroll origin, outer scroll and common nested scrollers before interpolating the remaining local displacement. It retains the 1px visual lift, viewport edge fade, a 120ms outer fade-in and a quicker 80ms fade-out, plus 4s CSS breathing. The outer alpha is the visibility owner; inner brighten is reserved for breathing/selection recovery, not editor-switch reveal.
 
-Typewriter remains an independent numerical comfort-band controller with hysteresis and host-scroll takeover. During a withheld frame Session does not call `next()` and cancels an outstanding scroll target. After commit it computes from final geometry and actual scrollTop. Composition continues to suppress plugin scrolling. The host can still scroll independently; we do not cancel SiYuan's caretScroll rAF. Manual browsing disables following; a distant ordinary click can request one centering alignment without writing intent.
+Typewriter remains an independent numerical comfort-band controller with hysteresis and host-scroll takeover. Its exponential response is unchanged; the final visual tail settles within the small `scrollSettlePx` threshold. During a withheld frame Session does not call `next()` and cancels an outstanding scroll target. After commit it computes from final geometry and actual scrollTop. Composition continues to suppress plugin scrolling. The host can still scroll independently; we do not cancel SiYuan's caretScroll rAF. Manual browsing disables following; a distant ordinary click can request one centering alignment without writing intent.
 
 ## Ripple planning and presentation
 

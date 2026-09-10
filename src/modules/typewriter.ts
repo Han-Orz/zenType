@@ -57,7 +57,9 @@ export function createTypewriter() {
     if (caret.y < viewport.top) result = Math.min(result, scrollTop + caret.y - viewport.top);
     if (caret.y + caret.height > viewport.bottom) result = Math.max(result, scrollTop + caret.y + caret.height - viewport.bottom);
     result = clamp(result, 0, maxScroll);
-    if (Math.abs(target - result) < 1) { result = target; target = null; previousTime = 0; locating = false; }
+    if (Math.abs(target - result) < MOTION.scrollSettlePx) {
+      result = target; target = null; previousTime = 0; locating = false;
+    }
     return result;
   }
 

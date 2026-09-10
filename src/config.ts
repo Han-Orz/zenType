@@ -1,4 +1,4 @@
-export const BUILD_LABEL = "v2.9.0-remake.2.2.2";
+export const BUILD_LABEL = "v2.9.0-remake.2.3-motion.1";
 
 /**
  * The `caret*` and `focus*` values are 95%-settle durations; effect modules
@@ -15,7 +15,7 @@ export const MOTION = {
   structureDeadlineMs: 160,
   maxFrameDeltaMs: 100,
   caretFadeInMs: 120,
-  caretFadeOutMs: 120,
+  caretFadeOutMs: 80,
   caretBrightenMs: 200,
   blockFadeMs: 360,
   breatheCycleMs: 4000,
@@ -31,6 +31,7 @@ export const MOTION = {
   caretNavigationMs: 110,
   breatheDelayMs: 1100,
   scrollResponseMs: 100,
+  scrollSettlePx: 2,
   typingPauseMs: 400,
   focusEnterMs: 360,
   focusLeaveMs: 520,

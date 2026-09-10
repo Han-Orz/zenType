@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.9.0-remake.2.3-motion.1 (2026-09-10) — Motion polish
+
+- Typewriter keeps the existing exponential response and snaps only the final visual tail within a dedicated 2px settle threshold.
+- Cursor visibility remains owned by the outer alpha: editor-switch reveal no longer adds a second inner opacity envelope, while breathing/selection brightness recovery remains independent.
+- Cursor fade-out is shortened to 80ms while the 120ms fade-in remains soft; StructureGate, Session scheduling, Ripple ownership and host takeover semantics are unchanged.
+
 ## v2.9.0-remake.2.2.2 (2026-09-10) — Presentation continuity hotfix
 
 - Same-ID structural replacements inherit the detached sentence layer's current visible floor in the existing BlockPainter owner, during bounded mutation delivery and before the next rAF.
