@@ -19,6 +19,10 @@
 
 **Runtime-observed.** 用户实机 SiYuan 3.8.3 / Electron 44.2.0 / Chrome 152 中，`requestAnimationFrame` callback timestamp 与同一 callback 执行时的 `performance.now()` 存在约 134ms 的稳定偏移。zenType 不得跨这两个来源进行 elapsed/deadline arithmetic；原始 rAF timestamp 仅可作为 frame provenance/telemetry。
 
+**Runtime-observed (2026-09-10, full CDP).** 在同一宿主的真实渲染页中，段末 Enter 会新增空块并以相同 `data-node-id` 替换原 paragraph；旧 CSS Highlight Range 随旧 DOM 脱离。补丁前 replacement 在下一帧前计算为 `opacity: 1`，补丁后同一 MutationObserver delivery 内已由现有 BlockPainter 持有 `[0.6, 0.6]` WAAPI effect，计算 opacity 为 `0.6`。这只证明本次 paragraph-split 路径与运行环境，不推广为所有 Enter 路径。
+
+**Runtime-observed (CDP-triggered lifecycle event).** 在真实渲染页触发 window blur 前，活动段落包含约 `0.6` 的 dim sentence Highlight、相邻块由 Ripple 持有 `0.4`；旧实现同步删除 Highlight 并取消 block effects。补丁路径改为把 sentence target 设为 neutral，并将 block effects 从当前值 retarget 到 `1`。这验证 renderer 内的交接，不替代操作系统窗口切换的人工观感验收。
+
 ## Editing paths
 
 ### Tab / Shift+Tab
@@ -153,4 +157,4 @@ The official sample currently uses Node >=24, pnpm 11.4, TypeScript 6, Webpack a
 - Compositionend ordering for at least one CJK IME and cross-block composition.
 - Range selection, editor switch, disable/re-enable and popup/split editor ownership.
 
-The current environment had no Docker executable, local SiYuan process or Chromium binary, so a browser-accessible official host could not be started without expanding the project/toolchain. These items remain deliberately unlabelled as runtime-observed.
+The source-only audit initially lacked a local host. On 2026-09-10 the user launched the packaged SiYuan renderer with loopback remote debugging and full CDP became available; only the paragraph-split and lifecycle observations explicitly recorded above are promoted to Runtime-observed. The remaining checklist items keep their prior evidence level.

@@ -4,6 +4,7 @@ import { planHandoff, type BlockStep } from "./blockPlan";
 import type { DebugRecorder } from "../../debug/types";
 
 interface Paint { value: number; from: number; target: number; base: number; animation: Animation; key: string | undefined }
+interface CarrySeed { key: string; value: number }
 
 /**
  * Opacity exists exclusively in owned WAAPI effects, including settled fills.
@@ -91,9 +92,10 @@ export function createBlockPainter(debug?: DebugRecorder) {
       ZENTYPE_DEBUG: debug?.record("ripple", "presentation-hold", { blockCount: paints.size });
     },
     /** Rebind only existing semantic owners; never plan against intermediate DOM. */
-    rebind(added: readonly HTMLElement[]) {
-      const previous = new Map<string, Paint>();
+    rebind(added: readonly HTMLElement[], seed?: CarrySeed) {
+      const previous = new Map<string, Pick<Paint, "value" | "target">>();
       for (const paint of paints.values()) if (paint.key) { sample(paint); previous.set(paint.key, paint); }
+      if (seed && !previous.has(seed.key)) previous.set(seed.key, { value: seed.value, target: seed.value });
       const replacements = added.flatMap(element => {
         const key = visualKey(element);
         const old = key && previous.get(key);

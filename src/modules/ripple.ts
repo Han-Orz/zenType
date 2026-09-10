@@ -1,5 +1,6 @@
 import { MOTION, SENTENCE_ALPHA } from "../config";
 import { approach } from "../motion";
+import { visualKey } from "../structure";
 import type { EditorFrame } from "../types";
 import type { DebugRecorder } from "../debug/types";
 import { resolveRangeTextPoint } from "../utils/rangeTextPoint";
@@ -33,6 +34,10 @@ export function createRipple(debug?: DebugRecorder) {
   let lastTime = 0;
   let registered: Range[][] = Array.from({ length: names.length }, () => []);
   let scratch: Range[][] = Array.from({ length: names.length }, () => []);
+
+  function sentenceFloor() {
+    return sentences.reduce((value, paint) => Math.min(value, paint.value), 1);
+  }
 
   function clearColors() {
     for (const [element, color] of colors) {
@@ -223,6 +228,11 @@ export function createRipple(debug?: DebugRecorder) {
   }
   return { sample, prepare(frame: EditorFrame, contentDirty: boolean, structureDirty: boolean, enabled: boolean) {
       sample(frame, contentDirty, structureDirty, enabled)();
-    }, render, clear, invalidateColors: clearColors, freeze: painter.freeze, rebind: painter.rebind,
+    }, render, clear, invalidateColors: clearColors, freeze: painter.freeze,
+    rebind(added: readonly HTMLElement[]) {
+      const floor = sentenceFloor();
+      const key = block && !block.isConnected && floor < 1 ? visualKey(block) : undefined;
+      return painter.rebind(added, key ? { key, value: floor } : undefined);
+    },
     destroy() { clear(); style.remove(); } };
 }

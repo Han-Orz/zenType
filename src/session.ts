@@ -63,7 +63,17 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     ZENTYPE_DEBUG: debug?.recordMutations(records, frame);
     const changes = classifyMutations(records);
     if (changes.kind !== "text") structureDirty = true;
-    if (observedEditor && !blocked && !pointerDown) structure.mutation(observedEditor, performance.now(), changes.kind);
+    if (observedEditor && !blocked && !pointerDown) {
+      structure.mutation(observedEditor, performance.now(), changes.kind);
+      if (changes.kind === "representation" || changes.kind === "structural") {
+        // Replacement DOM is already live when the observer runs. Rebind only
+        // committed semantic owners now, before a throttled rAF can expose an
+        // unpainted frame; new topology remains gated until update().
+        const carry = ripple.rebind(changes.added);
+        ripple.freeze();
+        carry();
+      }
+    }
     for (const node of changes.added) {
       if (added.size >= STRUCTURE_LIMITS.nodes) break;
       added.add(node);
@@ -107,14 +117,19 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     typewriter.cancel();
     clearWake();
   }
-  function suspend() {
+  function suspend(immediate = false) {
     ZENTYPE_DEBUG: debug?.record("session", "suspend", { reason: "lifecycle" });
+    const wasBlocked = blocked;
     blocked = true;
     structure.cancel("lifecycle");
     composingEditor = null;
     stopWriting();
     cursor.hide();
-    ripple.clear();
+    if (!immediate && frame) {
+      const releaseRipple = ripple.sample(frame, false, false, false);
+      releaseRipple();
+      if (ripple.render(performance.now(), reducedMotion.matches) && !document.hidden) queue();
+    } else if (immediate || !wasBlocked) ripple.clear();
     frame = null;
     observe(null);
   }
@@ -141,6 +156,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
       if (blocked || document.hidden) {
         ZENTYPE_DEBUG: debug?.record("session", "frame-skipped", { reason: blocked ? "blocked" : "hidden" });
         cleanClones();
+        if (blocked && ripple.render(now, reducedMotion.matches) && !document.hidden) queue();
         return;
       }
       let sampled = false;
@@ -154,11 +170,10 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         if (next && frame && next.editor !== frame.editor) structure.cancel("editor-switch");
         const decision = structure.sample(next, now);
         if (decision === "wait") {
-          // Only rebind old visual owners. No effect may consume a new target or
-          // write scrollTop until the shared gate publishes an authoritative frame.
-          const carry = ripple.rebind([...added]);
+          // Existing visual owners were rebound in the mutation microtask. No
+          // effect may consume a new target or write scrollTop until the shared
+          // gate publishes an authoritative frame.
           ripple.freeze();
-          carry();
           if (next) cursor.retainOwner(next.editable);
           typewriter.cancel();
           cleanClones(next?.editable ?? frame?.editable);
@@ -297,7 +312,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
       }
     } catch (error) {
       ZENTYPE_DEBUG: debug?.record("session", "frame-error", { message: error instanceof Error ? error.message : String(error) });
-      suspend();
+      suspend(true);
       console.error("[zenType] presentation released after frame failure", error);
     }
   }

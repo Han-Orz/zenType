@@ -1,6 +1,6 @@
-# zenType v2.9.0-remake.2.2.1
+# zenType v2.9.0-remake.2.2.2
 
-Smooth cursor, typewriter scrolling and ripple focus for SiYuan. remake.2.2.1 keeps one WritingSession/rAF/observer system and one monotonic business clock, validates its structural authority boundary against SiYuan v3.8.3 source and runtime evidence, and removes development diagnostics from production artifacts at compile time.
+Smooth cursor, typewriter scrolling and ripple focus for SiYuan. remake.2.2.2 preserves Ripple brightness across same-ID host replacement, releases focus presentation smoothly on blur, and stages switched-editor cursor geometry one frame before reveal while retaining remake.2.2.1's single monotonic business clock.
 
 ## Behavior
 
@@ -27,7 +27,7 @@ npm run verify:prod
 
 Development output: `dev/`. Production output: `dist/`. Installable archive: `package.zip`.
 
-Disable zenType, back up the existing installation outside the plugins directory, extract the archive into your SiYuan workspace's `data/plugins/zenType/`, then enable it. Do not run two copies. The topbar tooltip identifies `v2.9.0-remake.2.2.1`; the numeric plugin manifest version is `2.9.0`.
+Disable zenType, back up the existing installation outside the plugins directory, extract the archive into your SiYuan workspace's `data/plugins/zenType/`, then enable it. Do not run two copies. The topbar tooltip identifies `v2.9.0-remake.2.2.2`; the numeric plugin manifest version is `2.9.0`.
 
 Existing development links can use `dev/`. To create one, use `node scripts/make_dev_link.js --workspace <workspace-path>`; it refuses to overwrite an existing installation.
 

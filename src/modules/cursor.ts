@@ -23,6 +23,7 @@ export function createCursor(debug?: DebugRecorder) {
   let selecting = false;
   let settleUntil = 0;
   let stableFrames = 0;
+  let revealPending = false;
   let brighten: Animation | null = null;
   let transport = { top: 0, left: 0 };
   let nestedScroll: EditorFrame["nestedScroll"] = [];
@@ -36,7 +37,8 @@ export function createCursor(debug?: DebugRecorder) {
       alpha,
       owner: owner !== null,
       breathing: ink.classList.contains("zentype-breathing"),
-      settling: settleUntil !== 0,
+      settling: settleUntil !== 0 || revealPending,
+      revealPending,
       stableFrames,
       currentX: current?.x ?? null,
       currentY: current?.y ?? null,
@@ -69,6 +71,7 @@ export function createCursor(debug?: DebugRecorder) {
   function clearSettling() {
     settleUntil = 0;
     stableFrames = 0;
+    revealPending = false;
   }
 
   function hide(preserveOwner = false) {
@@ -100,6 +103,8 @@ export function createCursor(debug?: DebugRecorder) {
     const inkOpacity = ink.classList.contains("zentype-breathing") || !frame.caret && current && brighten
       ? getComputedStyle(ink).opacity : ink.style.opacity;
     const ownerChanged = bindOwner(frame.editable);
+    const revealing = revealPending;
+    revealPending = false;
     // Transport the last displayed cursor before approaching the authoritative target.
     const offset = { top: frame.origin.y - frame.scrollTop, left: frame.origin.x - frame.scrollLeft };
     if (current && target) {
@@ -130,11 +135,9 @@ export function createCursor(debug?: DebugRecorder) {
       }
       ZENTYPE_DEBUG: debugState("switch-settled", frame, { now, deadline: now >= settleUntil });
       clearSettling();
-      if (target && !frame.reducedMotion) {
-        brighten = ink.animate([{ opacity: 0 }, { opacity: 1 }], {
-          duration: MOTION.caretBrightenMs, easing: "ease-in-out",
-        });
-      }
+      // Commit the stable geometry while still hidden. The next Session frame
+      // reveals it, so themed tab layout cannot paint one frame at an old origin.
+      if (target && !frame.reducedMotion) revealPending = true;
     }
     const elapsed = lastTime ? Math.min(MOTION.maxFrameDeltaMs, now - lastTime) : 16;
     if (frame.caret) {
@@ -190,7 +193,12 @@ export function createCursor(debug?: DebugRecorder) {
     element.style.height = current.height + "px";
     element.style.clipPath = "inset(" + Math.max(0, view.top - current.y) + "px 0 " + Math.max(0, current.y + current.height - view.bottom) + "px 0)";
     element.style.zIndex = String(frame.zIndex);
-    element.hidden = false;
+    if (revealing && !frame.reducedMotion) {
+      brighten = ink.animate([{ opacity: 0 }, { opacity: 1 }], {
+        duration: MOTION.caretBrightenMs, easing: "ease-in-out",
+      });
+    }
+    if (!revealPending) element.hidden = false;
     ZENTYPE_DEBUG: debugState("render", frame, {
       now,
       moving,
@@ -202,7 +210,7 @@ export function createCursor(debug?: DebugRecorder) {
       edge,
     });
     if (!moving && alpha === 1) lastTime = 0;
-    return moving || alpha < 1;
+    return moving || alpha < 1 || revealPending;
   }
 
   /** Fade only the overlay; valid editor bindings keep native caret suppressed. */
@@ -267,7 +275,7 @@ export function createCursor(debug?: DebugRecorder) {
       return current ? Math.max(1, lastValid + MOTION.recoveryMs + 1 - now) : null;
     },
     /** True while the overlay waits out a switched editor's animation. */
-    isSettling() { return settleUntil !== 0; },
+    isSettling() { return settleUntil !== 0 || revealPending; },
     /**
      * The host switched editor (tab, split, popup). Themed switch animations keep
      * moving the caret geometry. Reveal after consecutive stable samples, bounded

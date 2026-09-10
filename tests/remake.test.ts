@@ -3,6 +3,7 @@ import test from "node:test";
 import { approach } from "../src/motion";
 import { MOTION, CURSOR_MOTION_CSS, RIPPLE_LEVELS } from "../src/config";
 import { createRipple } from "../src/modules/ripple";
+import { createBlockPainter } from "../src/modules/ripple/blockPainter";
 import { createWritingSession } from "../src/session";
 import { createTypewriter } from "../src/modules/typewriter";
 import { createCursor } from "../src/modules/cursor";
@@ -456,9 +457,12 @@ test("editor switch reveals after eight stable samples and resets on geometry ch
   for (let i = 0; i < 7; i++) cursor.render(moved, 1112 + i * 16, false);
   assert.equal(overlay.hidden, true);
   cursor.render(moved, 1224, false);
+  assert.equal(cursor.isSettling(), true);
+  assert.equal(overlay.hidden, true);
+  assert.equal(overlay.style.transform, `translate3d(200px,${300 - MOTION.caretLiftPx}px,0)`);
+  cursor.render(moved, 1240, false);
   assert.equal(cursor.isSettling(), false);
   assert.equal(overlay.hidden, false);
-  assert.equal(overlay.style.transform, `translate3d(200px,${300 - MOTION.caretLiftPx}px,0)`);
   assert.deepEqual((overlay.children[0] as PaintElement).animations.at(-1)?.frames,
     [{ opacity: 0 }, { opacity: 1 }]);
   cursor.destroy();
@@ -751,6 +755,59 @@ test("interaction and lifecycle interruptions cancel a pending structure gate", 
   });
 });
 
+test("lifecycle suspension releases owned Ripple opacity instead of clearing it", () => withSessionHarness(harness => {
+  const previous = new PaintElement();
+  previous.dataset.nodeId = "previous";
+  previous.parentElement = harness.editor;
+  previous.nextElementSibling = harness.editable;
+  harness.editable.previousElementSibling = previous;
+  harness.editor.children = [previous, harness.editable];
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
+  harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
+  harness.tick(0);
+  const dim = previous.animations.at(-1);
+  assert.ok(dim);
+  dim.currentTime = MOTION.blockFadeMs;
+
+  harness.dispatch(16, "blur");
+
+  const release = previous.animations.at(-1)!;
+  assert.notEqual(release, dim);
+  assert.equal(dim.playState, "idle");
+  assert.equal(release.frames[0].opacity, RIPPLE_LEVELS[1]);
+  assert.equal(release.frames[1].opacity, 1);
+  assert.equal(release.playState, "running");
+  harness.dispatch(17, "blur");
+  assert.equal(release.playState, "running");
+}, { typewriter: false, ripple: true }));
+
+test("mutation delivery rebinds a semantic replacement before the next rAF", () => withSessionHarness(harness => {
+  const old = new PaintElement();
+  old.dataset.nodeId = "previous";
+  old.parentElement = harness.editor;
+  old.nextElementSibling = harness.editable;
+  harness.editable.previousElementSibling = old;
+  harness.editor.children = [old, harness.editable];
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
+  harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
+  harness.tick(0);
+  const dim = old.animations.at(-1)!;
+  dim.currentTime = MOTION.blockFadeMs / 2;
+
+  const replacement = new PaintElement();
+  replacement.dataset.nodeId = old.dataset.nodeId;
+  replacement.parentElement = harness.editor;
+  old.isConnected = false;
+  harness.mutate(4, [{ type: "childList", target: harness.editor,
+    addedNodes: [replacement], removedNodes: [old] } as unknown as MutationRecord]);
+
+  const carry = replacement.animations.at(-1)!;
+  assert.ok(carry);
+  assert.equal(carry.frames[0].opacity, 1 + (RIPPLE_LEVELS[1] - 1) * 0.875);
+  assert.equal(carry.frames[1].opacity, 1 + (RIPPLE_LEVELS[1] - 1) * 0.875);
+  assert.equal(carry.playState, "paused");
+}, { typewriter: false, ripple: true }));
+
 test("switch settling is bounded through missing geometry and cancelled by lifecycle", () => withPresentation(body => {
   const cursor = createCursor();
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
@@ -761,9 +818,12 @@ test("switch settling is bounded through missing geometry and cancelled by lifec
   cursor.render(input, 1128, false);
   assert.equal(overlay.hidden, true);
   cursor.render({ ...input, caret: { x: 400, y: 300, height: 20 } }, 1700, false);
+  assert.equal(cursor.isSettling(), true);
+  assert.equal(overlay.hidden, true);
+  assert.equal(overlay.style.transform, `translate3d(400px,${300 - MOTION.caretLiftPx}px,0)`);
+  cursor.render({ ...input, caret: { x: 400, y: 300, height: 20 } }, 1716, false);
   assert.equal(cursor.isSettling(), false);
   assert.equal(overlay.hidden, false);
-  assert.equal(overlay.style.transform, `translate3d(400px,${300 - MOTION.caretLiftPx}px,0)`);
   cursor.switched(input.editor, 2000);
   cursor.render({ ...input, caret: null }, 2700, false);
   assert.equal(cursor.isSettling(), false);
@@ -949,6 +1009,34 @@ test("replacement handoff never writes host opacity or repairs ambiguous legacy 
       ripple.destroy();
     }
   }
+}));
+
+test("same-id replacement carries the visible sentence floor into block ownership", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const old = new PaintElement();
+  const replacement = new PaintElement();
+  old.dataset.nodeId = replacement.dataset.nodeId = "sentence-block";
+  old.isConnected = false;
+  replacement.parentElement = editor;
+  const painter = createBlockPainter();
+
+  const carry = painter.rebind([replacement] as unknown as HTMLElement[], {
+    key: "sentence-block", value: 0.6,
+  });
+  painter.freeze();
+  carry();
+  const held = replacement.animations.at(-1)!;
+  assert.equal(held.frames[0].opacity, 0.6);
+  assert.equal(held.frames[1].opacity, 0.6);
+  assert.equal(held.playState, "paused");
+
+  painter.prepare(new Map([[replacement as unknown as HTMLElement, RIPPLE_LEVELS[1]]]),
+    editor as unknown as HTMLElement, false)();
+  const dim = replacement.animations.at(-1)!;
+  assert.equal(dim.frames[0].opacity, 0.6);
+  assert.equal(dim.frames[1].opacity, RIPPLE_LEVELS[1]);
+  assert.equal(dim.playState, "running");
+  painter.clear();
 }));
 
 test("editor bind recovers only stale plugin-owned WAAPI without touching host opacity", () => withPresentation(() => {

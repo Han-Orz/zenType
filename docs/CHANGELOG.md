@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.9.0-remake.2.2.2 (2026-09-10) — Presentation continuity hotfix
+
+- Same-ID structural replacements inherit the detached sentence layer's current visible floor in the existing BlockPainter owner, during bounded mutation delivery and before the next rAF.
+- Normal blur/lifecycle suspension retargets Ripple to neutral instead of clearing it; fatal errors, disable and destruction remain immediate teardown paths.
+- Switched-editor Cursor geometry is committed while hidden and revealed on the next existing Session frame, matching the proven two-phase intent of v2.8.1 without restoring its extra scheduler.
+- Added regressions for mutation-time owner carry, sentence-to-block carry, lifecycle release and staged cursor reveal; no StructureGate thresholds or animation parameters changed.
+
 ## v2.9.0-remake.2.2.1 (2026-09-10) — Session clock-domain hotfix
 
 - Session frame decisions now sample `performance.now()` once per callback, so StructureGate quiet/deadline, Cursor, Typewriter, interaction hold and recovery share the event/observer clock instead of mixing it with the raw rAF timestamp.
