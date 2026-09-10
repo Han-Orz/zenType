@@ -1,11 +1,6 @@
-export const BUILD_LABEL = "v2.9.0-remake.2.3-motion.1";
+export const BUILD_LABEL = "v2.9.0-remake.2.3-critical.1";
 
-/**
- * The `caret*` and `focus*` values are 95%-settle durations; effect modules
- * divide them by 3 to get the exponential time constant `approach()` expects.
- * `scrollResponseMs` is already a time constant and is used directly. In every
- * case a larger number means slower, softer motion.
- */
+/** Larger response95 values mean slower, softer motion. */
 export const MOTION = {
   caretLiftPx: 1,
   recoveryMs: 160,
@@ -14,41 +9,26 @@ export const MOTION = {
   structureQuietMs: 48,
   structureDeadlineMs: 160,
   maxFrameDeltaMs: 100,
-  caretFadeInMs: 120,
-  caretFadeOutMs: 80,
-  caretBrightenMs: 200,
+  cursorAppearResponse95Ms: 120,
+  cursorDisappearResponse95Ms: 80,
+  cursorSettlePx: 0.15,
+  alphaSettleEpsilon: 0.005,
   blockFadeMs: 360,
-  breatheCycleMs: 4000,
-  breatheAnimationDelayMs: 1500,
-  breatheHoldPct: 58,
-  breatheDipPct: 80,
-  breatheDipEndPct: 82,
-  breatheMinAlpha: 0,
+  breatheLowAlpha: 0,
+  breatheLowHoldMs: 900,
   breatheWakeMarginMs: 20,
   interactionHoldMs: 150,
   edgeFadeMinHeightPx: 12,
-  caretTypingMs: 55,
-  caretNavigationMs: 110,
+  caretTypingResponse95Ms: 55,
+  caretNavigationResponse95Ms: 110,
   breatheDelayMs: 1100,
-  scrollResponseMs: 100,
-  scrollSettlePx: 2,
+  scrollResponse95Ms: 300,
+  scrollPositionEpsilonPx: 2,
   typingPauseMs: 400,
-  focusEnterMs: 360,
-  focusLeaveMs: 520,
+  focusEnterResponse95Ms: 360,
+  focusLeaveResponse95Ms: 520,
+  sentenceSettleEpsilon: 0.002,
 } as const;
-
-/** Generated so the whole breathing envelope lives here, not in the stylesheet. */
-export const CURSOR_MOTION_CSS = `#zentype-cursor {
-  --zt-breathe-cycle: ${MOTION.breatheCycleMs}ms;
-  --zt-breathe-delay: ${MOTION.breatheAnimationDelayMs}ms;
-  --zt-breathe-min-alpha: ${MOTION.breatheMinAlpha};
-}
-
-@keyframes zentype-breathe {
-  0%, ${MOTION.breatheHoldPct}% { opacity: 1; }
-  ${MOTION.breatheDipPct}%, ${MOTION.breatheDipEndPct}% { opacity: var(--zt-breathe-min-alpha); }
-  100% { opacity: 1; }
-}`;
 
 export const RIPPLE_LEVELS = [1, 0.4, 0.2, 0.15, 0.1, 0.05] as const;
 export const SENTENCE_ALPHA = 0.6;

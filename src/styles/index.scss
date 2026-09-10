@@ -14,15 +14,12 @@
 }
 
 #zentype-cursor[hidden] { display: none; }
-.zentype-cursor-ink.zentype-breathing { animation: zentype-breathe var(--zt-breathe-cycle) var(--zt-breathe-delay) ease-in-out infinite; }
+.zentype-cursor-ink { opacity: 1; }
 .zentype-custom-caret-active { caret-color: transparent !important; }
 [data-theme-mode="dark"] { --zt-cursor-color: #8ab4f8; }
 
-/* The breathing envelope (cycle, delay, shape, minimum alpha) is generated from
-   `src/config.ts` and injected after this sheet, so it has no copy here. */
-
-/* Block dim is a plain inline opacity on the owner (see ripple.ts): element-local
-   invalidation, no inherited custom property, no subtree style recalc. */
+/* Cursor breathing is a Session-driven CriticalState target change; it has no
+   permanent CSS animation. Block dim remains exclusively WAAPI-owned. */
 
 @media (prefers-reduced-motion: reduce) {
   #zentype-cursor, .zentype-cursor-ink, .zentype-ripple-block {

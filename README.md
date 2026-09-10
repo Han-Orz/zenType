@@ -1,14 +1,14 @@
-# zenType v2.9.0-remake.2.2.2
+# zenType v2.9.0-remake.2.3-critical.1
 
-Smooth cursor, typewriter scrolling and ripple focus for SiYuan. remake.2.2.2 preserves Ripple brightness across same-ID host replacement, releases focus presentation smoothly on blur, and stages switched-editor cursor geometry one frame before reveal while retaining remake.2.2.1's single monotonic business clock.
+Smooth cursor, typewriter scrolling and ripple focus for SiYuan. The critical-motion development build keeps one Session/rAF coordinator while giving Cursor, Typewriter and sentence Ripple state their own analytic critical-damping motion.
 
 ## Behavior
 
-The blue cursor continues from its displayed position, including during IME composition and ordinary editable changes. Scroll displacement transports the cursor without restarting its local motion. Clipping fades and idle breathing have separate opacity layers.
+The blue cursor continues from its displayed position, including during IME composition and ordinary editable changes. Scroll displacement transports the cursor without restarting its local motion. Visibility and idle breathing share one outer alpha state.
 
 A missing caret rectangle keeps the current presentation for a bounded 160ms recovery window and is then recovered from the caret's own block rather than from the whole editable. Once the budget is spent, a collapsed caret with a live Range in the same editable keeps the presentation instead of returning native behavior; any other state releases it. IME uses the selection focus endpoint and pauses plugin comfort scrolling.
 
-Typewriter motion starts from actual scroll positions, supports reverse retargeting, and yields to browsing and unexpected host scrolling. Ripple retains current brightness across navigation and unambiguous local text edits. New DOM bindings do not inherit historical animation identities.
+Typewriter motion starts from an actual scroll position, then advances a separate virtual position so quantized browser readback cannot stall it; it supports reverse retargeting and yields to browsing and unexpected host scrolling. Ripple retains current brightness across navigation and unambiguous local text edits. New DOM bindings do not inherit historical animation identities.
 
 Potential structural edits withhold new Cursor, Typewriter and Ripple targets until host evidence is either confirmed ordinary or quiet, stable structural geometry is observed. Input alone never disproves structural intent. Because SiYuan performs post-input normalization in a later task, ordinary text deletion is admitted after 48ms without further classified activity; every path is bounded by 160ms.
 
@@ -27,7 +27,7 @@ npm run verify:prod
 
 Development output: `dev/`. Production output: `dist/`. Installable archive: `package.zip`.
 
-Disable zenType, back up the existing installation outside the plugins directory, extract the archive into your SiYuan workspace's `data/plugins/zenType/`, then enable it. Do not run two copies. The topbar tooltip identifies `v2.9.0-remake.2.2.2`; the numeric plugin manifest version is `2.9.0`.
+Disable zenType, back up the existing installation outside the plugins directory, extract the archive into your SiYuan workspace's `data/plugins/zenType/`, then enable it. Do not run two copies. The topbar tooltip identifies `v2.9.0-remake.2.3-critical.1`; the numeric plugin manifest version is `2.9.0`.
 
 Existing development links can use `dev/`. To create one, use `node scripts/make_dev_link.js --workspace <workspace-path>`; it refuses to overwrite an existing installation.
 

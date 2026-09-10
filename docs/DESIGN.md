@@ -1,4 +1,4 @@
-# v2.9.0-remake.2.3-motion.1
+# v2.9.0-remake.2.3-critical.1
 
 ## Ownership and authority
 
@@ -39,9 +39,9 @@ Events invalidate and enqueue one frame. Mutation callbacks do not read geometry
 
 All Session duration and deadline arithmetic uses `performance.now()` as one authoritative monotonic clock. The raw rAF callback timestamp is diagnostic provenance only: a real SiYuan 3.8.3 / Electron 44.2.0 / Chrome 152 capture observed a stable offset between those sources.
 
-On an admitted frame, Ripple's `sample()` prepares projection, colors, numeric baselines and a write-only commit closure. These reads precede scrolling/cursor/Ripple writes. Cursor samples breathing ink before writing its presentation. The scroll container's actual position after a write is authoritative; Session transports measured caret geometry by that delta. This scroll write/readback is intentional and does not trigger a second host sample. Clone-color cleanup is deferred until after reads, including fresh color acquisition.
+On an admitted frame, Ripple's `sample()` prepares projection, colors, numeric baselines and a write-only commit closure. These reads precede scrolling/cursor/Ripple writes. Cursor commits its logical alpha and geometry only after host sampling. The scroll container's actual position after a write is authoritative; Session transports measured caret geometry by that delta. This scroll write/readback is intentional and does not trigger a second host sample. Clone-color cleanup is deferred until after reads, including fresh color acquisition.
 
-Cursor-only interpolation and Ripple-only sentence fades reuse geometry. A normal lifecycle suspension retargets Ripple to neutral and lets its existing WAAPI/Session render paths finish; disable, destruction and frame failure still clear synchronously. Self-authored scroll events matching the last actual write do not invalidate host facts. Host-driven scroll events do. After settling there is no continuous JavaScript loop; the existing delayed wake starts CSS breathing. Resize, fonts, viewport and theme events invalidate observations.
+Cursor-only interpolation and Ripple-only sentence fades reuse geometry. A normal lifecycle suspension retargets Ripple to neutral and lets its existing WAAPI/Session render paths finish; disable, destruction and frame failure still clear synchronously. Self-authored scroll events matching the last actual write do not invalidate host facts. Host-driven scroll events do. After settling there is no continuous JavaScript loop; the existing delayed wake changes the cursor's bounded breathing target. Resize, fonts, viewport and theme events invalidate observations.
 
 Explicit bounds: 256 mutation records and 2,048 visited nodes per classification, 64 ancestry levels, 48 semantic siblings per direction and at most 2,048 visited elements per block plan. Painting retains at most 2,048 owners between commits (incoming effects precede release of old ones within the synchronous commit). Replacement matching and handoff walk bounded owner/ancestor sets, not every owner/target pair. Ownership-budget overflow releases block effects instead of silently dropping part of the handoff.
 
@@ -49,17 +49,17 @@ Text projection is capped at 32,768 UTF-16 units, 2,048 text nodes and 256 sente
 
 ## Cursor and Typewriter
 
-Cursor owns current/target position and height, motion time, native-caret binding, clipping, selection fade, breathing, missing-geometry recovery and editor-switch settling. It has no structural edit mode, structural readiness flag or structural timer. Session supplies authoritative targets; `retainOwner()` only transfers caret suppression while withholding a target. On resume, existing continuous motion approaches the final target.
+Cursor owns current/target position and height, their CriticalState motion, logical alpha, native-caret binding, clipping, selection fade, breathing, missing-geometry recovery and editor-switch settling. It has no structural edit mode, structural readiness flag or structural timer. Session supplies authoritative targets; `retainOwner()` only transfers caret suppression while withholding a target. On resume, existing continuous motion approaches the final target.
 
 Editor switching still uses eight stable samples or a 700ms ceiling; reduced motion skips this visual wait. Missing geometry retains presentation for the existing 160ms budget, then fades it. Caretless structural blocks fade immediately. Valid caretless/selected editables retain native suppression until host/lifecycle release. None of this is the shared structural gate.
 
-Cursor transports current and target by changes in scroll origin, outer scroll and common nested scrollers before interpolating the remaining local displacement. It retains the 1px visual lift, viewport edge fade, a 120ms outer fade-in and a quicker 80ms fade-out, plus 4s CSS breathing. The outer alpha is the visibility owner; inner brighten is reserved for breathing/selection recovery, not editor-switch reveal.
+Cursor transports current and target by changes in scroll origin, outer scroll and common nested scrollers before applying the same fixed-zeta=1 analytic law to x, y and height. It retains the 1px visual lift, viewport edge fade, 120ms appear response95 and quicker 80ms disappear response95. The outer alpha is the sole visibility owner; breathing changes that same alpha target and has no CSS animation or inner recovery animation.
 
-Typewriter remains an independent numerical comfort-band controller with hysteresis and host-scroll takeover. Its exponential response is unchanged; the final visual tail settles within the small `scrollSettlePx` threshold. During a withheld frame Session does not call `next()` and cancels an outstanding scroll target. After commit it computes from final geometry and actual scrollTop. Composition continues to suppress plugin scrolling. The host can still scroll independently; we do not cancel SiYuan's caretScroll rAF. Manual browsing disables following; a distant ordinary click can request one centering alignment without writing intent.
+Typewriter remains an independent numerical comfort-band controller with hysteresis and host-scroll takeover. Its virtual scroll position and velocity advance independently of realized browser scrollTop through the shared critical law; the actuator readback is used only for takeover, ownership and measured displacement. The final visual tail settles only when both position and velocity are within the configured bounds. During a withheld frame Session does not call `next()` and cancels an outstanding scroll target. After commit it computes from final geometry and actual scrollTop. Composition continues to suppress plugin scrolling. The host can still scroll independently; we do not cancel SiYuan's caretScroll rAF. Manual browsing disables following; a distant ordinary click can request one centering alignment without writing intent.
 
 ## Ripple planning and presentation
 
-`ripple.ts` owns sentence projection, boundary reuse, color ownership and highlight buckets. Ordinary text updates do not rebuild the block ownership plan.
+`ripple.ts` owns sentence projection, boundary reuse, color ownership and highlight buckets. Sentence values and velocities use the shared critical law; ordinary text updates do not rebuild the block ownership plan.
 
 `ripple/blockPlan.ts` contains two read-only boundaries: `collectTargets()` describes the disjoint neighborhood and semantic marker distance; `planHandoff()` maps prior numeric painting onto a changed owner plan. Ancestor-to-child transfer folds alpha down; child-to-ancestor transfer takes the brightest donor and normalizes remaining child residuals. Opacity composites multiplicatively across ancestors: the partition, not CSS inheritance, prevents unintended double dimming. This numerical complexity remains necessary when a marker's owner changes.
 

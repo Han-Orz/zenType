@@ -1,7 +1,13 @@
 import { MOTION } from "../config";
-import { approach, clamp } from "../motion";
+import { clamp, stepCritical, type CriticalState } from "../motion";
 import type { CursorRect, EditorFrame } from "../types";
 import type { DebugRecord, DebugRecorder } from "../debug/types";
+
+interface CursorMotion {
+  x: CriticalState;
+  y: CriticalState;
+  height: CriticalState;
+}
 
 export function createCursor(debug?: DebugRecorder) {
   const element = document.createElement("div");
@@ -14,17 +20,19 @@ export function createCursor(debug?: DebugRecorder) {
   document.body.append(element);
   let owner: HTMLElement | null = null;
   let editor: HTMLElement | null = null;
-  let current: CursorRect | null = null;
+  let motion: CursorMotion | null = null;
   let target: CursorRect | null = null;
   let lastTime = 0;
   let lastValid = -Infinity;
   let lastMotion = 0;
-  let alpha = 0;
+  const alpha: CriticalState = { value: 0, velocity: 0 };
+  let alphaTarget = 1;
   let selecting = false;
   let settleUntil = 0;
   let stableFrames = 0;
   let revealPending = false;
-  let brighten: Animation | null = null;
+  let breathLow = false;
+  let breathWake = 0;
   let transport = { top: 0, left: 0 };
   let nestedScroll: EditorFrame["nestedScroll"] = [];
 
@@ -34,30 +42,32 @@ export function createCursor(debug?: DebugRecorder) {
       caret: !!frame?.caret,
       caretless: frame?.caretless === true,
       hidden: element.hidden,
-      alpha,
+      alpha: alpha.value,
       owner: owner !== null,
-      breathing: ink.classList.contains("zentype-breathing"),
+      breathing: breathLow,
       settling: settleUntil !== 0 || revealPending,
       revealPending,
       stableFrames,
-      currentX: current?.x ?? null,
-      currentY: current?.y ?? null,
+      currentX: motion?.x.value ?? null,
+      currentY: motion?.y.value ?? null,
       targetX: target?.x ?? null,
       targetY: target?.y ?? null,
       ...data,
     });
   }
 
-  function breathe(enabled: boolean, reducedMotion: boolean, opacity: string) {
-    const active = ink.classList.contains("zentype-breathing");
-    if (enabled === active) return;
-    brighten?.cancel();
-    brighten = null;
-    ink.classList.toggle("zentype-breathing", enabled);
-    ink.style.opacity = "1";
-    if (active && !reducedMotion) {
-      brighten = ink.animate([{ opacity }, { opacity: 1 }], { duration: MOTION.caretBrightenMs, easing: "ease-out" });
-    }
+  function createMotion(rect: CursorRect): CursorMotion {
+    return {
+      x: { value: rect.x, velocity: 0 },
+      y: { value: rect.y, velocity: 0 },
+      height: { value: rect.height, velocity: 0 },
+    };
+  }
+
+  function resetBreathing() {
+    breathLow = false;
+    breathWake = 0;
+    alphaTarget = 1;
   }
 
   function bindOwner(next: HTMLElement | null) {
@@ -79,17 +89,15 @@ export function createCursor(debug?: DebugRecorder) {
       bindOwner(null);
       editor = null;
     }
-    current = target = null;
+    motion = target = null;
     lastTime = 0;
-    alpha = 0;
+    alpha.value = 0;
+    alpha.velocity = 0;
+    resetBreathing();
     selecting = false;
     clearSettling();
-    brighten?.cancel();
-    brighten = null;
-    ink.style.opacity = "1";
     nestedScroll = [];
     element.hidden = true;
-    ink.classList.remove("zentype-breathing");
   }
 
   function render(frame: EditorFrame, now: number, typing: boolean, interacting = false): boolean {
@@ -98,22 +106,18 @@ export function createCursor(debug?: DebugRecorder) {
       editor = frame.editor;
       ZENTYPE_DEBUG: debugState("editor-change", frame, { now });
     }
-    // Sample ink before native-caret class writes can invalidate styles. Only a
-    // breathing interruption or geometry release needs computed brightness.
-    const inkOpacity = ink.classList.contains("zentype-breathing") || !frame.caret && current && brighten
-      ? getComputedStyle(ink).opacity : ink.style.opacity;
     const ownerChanged = bindOwner(frame.editable);
     revealPending = false;
     // Transport the last displayed cursor before approaching the authoritative target.
     const offset = { top: frame.origin.y - frame.scrollTop, left: frame.origin.x - frame.scrollLeft };
-    if (current && target) {
+    if (motion && target) {
       let dx = offset.left - transport.left;
       let dy = offset.top - transport.top;
       for (const next of frame.nestedScroll) {
         const previous = nestedScroll.find(item => item.element === next.element);
         if (previous) { dx -= next.left - previous.left; dy -= next.top - previous.top; }
       }
-      current.x += dx; current.y += dy;
+      motion.x.value += dx; motion.y.value += dy;
       target.x += dx; target.y += dy;
     }
     transport = offset;
@@ -123,8 +127,8 @@ export function createCursor(debug?: DebugRecorder) {
       // remains bounded by the active settle deadline.
       const next = frame.caret && { ...frame.caret, y: frame.caret.y - (frame.caretLift ?? MOTION.caretLiftPx) };
       if (next) lastValid = now;
-      stableFrames = next ? target && Math.hypot(next.x - target.x, next.y - target.y) <= 0.15 &&
-        Math.abs(next.height - target.height) <= 0.15 ? stableFrames + 1 : 1 : 0;
+      stableFrames = next ? target && Math.hypot(next.x - target.x, next.y - target.y) <= MOTION.cursorSettlePx &&
+        Math.abs(next.height - target.height) <= MOTION.cursorSettlePx ? stableFrames + 1 : 1 : 0;
       target = next;
       const settled = frame.reducedMotion || now >= settleUntil ||
         stableFrames >= MOTION.switchStableFrames;
@@ -145,8 +149,8 @@ export function createCursor(debug?: DebugRecorder) {
     } else if (frame.caretless) {
       // The caret is on a block with no text position (separator, image). Fade at
       // once rather than freezing the overlay on the previous line for a budget.
-      return fadeOut(now, frame.reducedMotion, "caretless", inkOpacity);
-    } else if (!current && alpha === 0) {
+      return fadeOut(now, frame.reducedMotion, "caretless");
+    } else if (!motion && alpha.value === 0) {
       hide(true);
       return false;
     } else if (now - lastValid > MOTION.recoveryMs) {
@@ -154,43 +158,59 @@ export function createCursor(debug?: DebugRecorder) {
       // boundary with no rectangle). Fading out beats freezing the overlay at a
       // position that is no longer the caret: the user asked for a smooth
       // disappearance rather than a misplaced cursor.
-      return fadeOut(now, frame.reducedMotion, "missing-geometry", inkOpacity);
+      return fadeOut(now, frame.reducedMotion, "missing-geometry");
     }
     if (!target) {
       ZENTYPE_DEBUG: debugState("render-without-target", frame, { now });
       return false;
     }
     lastTime = now;
-    if (!current) {
-      current = { ...target }; lastMotion = now;
-      if (selecting && !frame.reducedMotion) {
-        brighten = ink.animate([{ opacity: ink.style.opacity }, { opacity: 1 }], {
-          duration: MOTION.caretBrightenMs, easing: "ease-out",
-        });
-      }
+    if (!motion) {
+      motion = createMotion(target);
+      lastMotion = now;
       selecting = false;
-      ink.style.opacity = "1";
+      // A release/selection fade is a presentation transition, not a new
+      // visibility owner. A fresh authoritative caret always reveals normally.
+      alphaTarget = 1;
+      breathLow = false;
+      breathWake = 0;
     }
-    const distance = Math.hypot(current.x - target.x, current.y - target.y);
-    const response = frame.reducedMotion ? 0 : (typing ? MOTION.caretTypingMs :
-      MOTION.caretNavigationMs + Math.min(120, distance * 0.3)) / 3;
-    current.x = approach(current.x, target.x, elapsed, response);
-    current.y = approach(current.y, target.y, elapsed, response);
-    current.height = approach(current.height, target.height, elapsed, response);
-    const moving = Math.hypot(current.x - target.x, current.y - target.y) > 0.15 || Math.abs(current.height - target.height) > 0.15;
+    const distance = Math.hypot(motion.x.value - target.x, motion.y.value - target.y);
+    const response = frame.reducedMotion ? 0 : (typing ? MOTION.caretTypingResponse95Ms :
+      MOTION.caretNavigationResponse95Ms + Math.min(120, distance * 0.3));
+    const moving = !stepCritical(motion.x, target.x, elapsed, response, MOTION.cursorSettlePx) ||
+      !stepCritical(motion.y, target.y, elapsed, response, MOTION.cursorSettlePx) ||
+      !stepCritical(motion.height, target.height, elapsed, response, MOTION.cursorSettlePx);
     if (moving || typing || interacting) lastMotion = now;
-    if (!moving) current = { ...target };
     const view = frame.viewport;
-    const edge = Math.min(current.y + current.height - view.top, view.bottom - current.y);
-    const visible = current.x >= view.left && current.x <= view.right && edge > 0;
+    const edge = Math.min(motion.y.value + motion.height.value - view.top, view.bottom - motion.y.value);
+    const visible = motion.x.value >= view.left && motion.x.value <= view.right && edge > 0;
     const breathing = !frame.reducedMotion && !typing && !interacting && !moving && now - lastMotion >= MOTION.breatheDelayMs;
-    breathe(breathing, frame.reducedMotion, inkOpacity);
-    alpha = approach(alpha, 1, elapsed, frame.reducedMotion ? 0 : MOTION.caretFadeInMs / 3);
-    if (alpha > 0.995) alpha = 1;
-    element.style.opacity = String(visible ? alpha * clamp(edge / Math.max(MOTION.edgeFadeMinHeightPx, current.height), 0, 1) : 0);
-    element.style.transform = "translate3d(" + current.x + "px," + current.y + "px,0)";
-    element.style.height = current.height + "px";
-    element.style.clipPath = "inset(" + Math.max(0, view.top - current.y) + "px 0 " + Math.max(0, current.y + current.height - view.bottom) + "px 0)";
+    if (frame.reducedMotion || typing || interacting || moving) {
+      breathLow = false;
+      breathWake = 0;
+      alphaTarget = 1;
+    } else if (!breathLow && alphaTarget === 1 && breathing) {
+      breathLow = true;
+      alphaTarget = MOTION.breatheLowAlpha;
+      breathWake = now + MOTION.breatheLowHoldMs;
+    } else if (breathLow && now >= breathWake) {
+      breathLow = false;
+      alphaTarget = 1;
+      breathWake = 0;
+      lastMotion = now;
+    }
+    const alphaResponse = frame.reducedMotion ? 0 : alphaTarget < 1
+      ? MOTION.cursorDisappearResponse95Ms : MOTION.cursorAppearResponse95Ms;
+    const alphaSettled = stepCritical(alpha, alphaTarget, elapsed, alphaResponse, MOTION.alphaSettleEpsilon);
+    if (alpha.value < 0 || alpha.value > 1) {
+      alpha.value = clamp(alpha.value, 0, 1);
+      alpha.velocity = 0;
+    }
+    element.style.opacity = String(visible ? alpha.value * clamp(edge / Math.max(MOTION.edgeFadeMinHeightPx, motion.height.value), 0, 1) : 0);
+    element.style.transform = "translate3d(" + motion.x.value + "px," + motion.y.value + "px,0)";
+    element.style.height = motion.height.value + "px";
+    element.style.clipPath = "inset(" + Math.max(0, view.top - motion.y.value) + "px 0 " + Math.max(0, motion.y.value + motion.height.value - view.bottom) + "px 0)";
     element.style.zIndex = String(frame.zIndex);
     if (!revealPending) element.hidden = false;
     ZENTYPE_DEBUG: debugState("render", frame, {
@@ -203,30 +223,24 @@ export function createCursor(debug?: DebugRecorder) {
       ownerChanged,
       edge,
     });
-    if (!moving && alpha === 1) lastTime = 0;
-    return moving || alpha < 1 || revealPending;
+    if (!moving && alphaSettled && alphaTarget === 1) lastTime = 0;
+    return moving || !alphaSettled || revealPending;
   }
 
   /** Fade only the overlay; valid editor bindings keep native caret suppressed. */
-  function fadeOut(now: number, reducedMotion: boolean, reason = "release", sampledOpacity?: string): boolean {
-    if (current) {
-      // Freeze displayed ink once so geometry loss cannot brighten a breathing
-      // cursor before fading it. Subsequent fade frames do not read styles.
-      const opacity = sampledOpacity ?? (brighten || ink.classList.contains("zentype-breathing")
-        ? getComputedStyle(ink).opacity : ink.style.opacity);
-      brighten?.cancel();
-      brighten = null;
-      ink.classList.remove("zentype-breathing");
-      ink.style.opacity = opacity;
-      lastTime = 0;
-    }
+  function fadeOut(now: number, reducedMotion: boolean, reason = "release"): boolean {
+    alphaTarget = 0;
+    breathLow = false;
+    breathWake = 0;
     const elapsed = lastTime ? Math.min(MOTION.maxFrameDeltaMs, now - lastTime) : 16;
     lastTime = now;
-    alpha = approach(alpha, 0, elapsed, reducedMotion ? 0 : MOTION.caretFadeOutMs / 3);
-    element.style.opacity = String(alpha);
-    current = target = null;
-    ZENTYPE_DEBUG: debugState("fade-out", null, { now, reason, fading: alpha >= 0.005 });
-    if (alpha < 0.005) { hide(true); return false; }
+    const settled = stepCritical(alpha, 0, elapsed, reducedMotion ? 0 : MOTION.cursorDisappearResponse95Ms,
+      MOTION.alphaSettleEpsilon);
+    if (alpha.value < 0) { alpha.value = 0; alpha.velocity = 0; }
+    element.style.opacity = String(alpha.value);
+    motion = target = null;
+    ZENTYPE_DEBUG: debugState("fade-out", null, { now, reason, fading: !settled });
+    if (settled) { hide(true); return false; }
     return true;
   }
 
@@ -251,9 +265,8 @@ export function createCursor(debug?: DebugRecorder) {
         // Already released: nothing to fade, and sampling the ink here would
         // force a style read on every frame a selection stays open.
         if (element.hidden) { hide(true); bindOwner(editable); return false; }
-        // alpha already holds the logical overlay alpha; sampling
-        // element.style.opacity here would restart the fade from the clipped
-        // edge-fade product instead of from the displayed cursor.
+        // alpha already holds the logical overlay alpha; sampling the clipped
+        // element opacity would restart the fade from an edge product.
         selecting = true;
         lastTime = 0;
       }
@@ -262,11 +275,12 @@ export function createCursor(debug?: DebugRecorder) {
       return fading;
     },
     wakeDelay(now: number) {
-      return current && !ink.classList.contains("zentype-breathing")
-        ? Math.max(1, lastMotion + MOTION.breatheDelayMs + MOTION.breatheWakeMarginMs - now) : null;
+      if (!motion) return null;
+      const wake = breathLow ? breathWake : lastMotion + MOTION.breatheDelayMs;
+      return Math.max(1, wake + MOTION.breatheWakeMarginMs - now);
     },
     recoveryDelay(now: number) {
-      return current ? Math.max(1, lastValid + MOTION.recoveryMs + 1 - now) : null;
+      return motion ? Math.max(1, lastValid + MOTION.recoveryMs + 1 - now) : null;
     },
     /** True while the overlay waits out a switched editor's animation. */
     isSettling() { return settleUntil !== 0 || revealPending; },

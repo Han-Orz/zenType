@@ -1,10 +1,12 @@
 # Changelog
 
-## v2.9.0-remake.2.3-motion.1 (2026-09-10) — Motion polish
+## v2.9.0-remake.2.3-critical.1 (2026-09-10) — Critical Motion initial implementation
 
-- Typewriter keeps the existing exponential response and snaps only the final visual tail within a dedicated 2px settle threshold.
-- Cursor visibility remains owned by the outer alpha: editor-switch reveal no longer adds a second inner opacity envelope, while breathing/selection brightness recovery remains independent.
-- Cursor fade-out is shortened to 80ms while the 120ms fade-in remains soft; StructureGate, Session scheduling, Ripple ownership and host takeover semantics are unchanged.
+- Added one analytic fixed-zeta=1 `CriticalState` primitive with a shared `response95Ms` meaning, continuous retargeting, and position-plus-velocity settling.
+- Typewriter now advances a virtual scroll state independently of quantized browser readback while preserving host takeover and comfort-band behavior.
+- Cursor geometry, visibility and Session-woken breathing use the same Critical Motion law; CSS breathing, inner ink opacity and brighten recovery were removed.
+- Sentence Ripple now carries velocity through boundary reuse; block Ripple keeps its existing WAAPI owner because replacement carry, freeze and host-base-opacity equivalence are not yet proven for a JS backend.
+- StructureGate, Session scheduling, host authority, Ripple block ownership and takeover semantics remain unchanged.
 
 ## v2.9.0-remake.2.2.2 (2026-09-10) — Presentation continuity hotfix
 

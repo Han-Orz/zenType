@@ -291,6 +291,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         actualScroll: actual,
         moving: typewriter.isMoving(),
         locating: typewriter.isLocating(),
+        ...typewriter.motionTelemetry(),
       });
       ZENTYPE_DEBUG: debug?.record("session", "frame-commit", {
         now,
@@ -303,7 +304,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
       });
       if (cursorMoving || typewriter.isMoving() || rippleMoving || settling) queue();
       else if ((wake === null || !frame.caret) && !composing) {
-        // Recovery and typing pauses share the idle wake with CSS breathing.
+        // Recovery, typing pauses and cursor breathing share the idle wake.
         const cursorDelay = reducedMotion.matches ? Infinity : cursor.wakeDelay(now) ?? Infinity;
         const pauseDelay = writing && now - lastInput < MOTION.typingPauseMs
           ? MOTION.typingPauseMs + 1 - (now - lastInput) : Infinity;

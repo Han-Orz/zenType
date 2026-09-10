@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { approach } from "../src/motion";
-import { MOTION, CURSOR_MOTION_CSS, RIPPLE_LEVELS } from "../src/config";
+import { stepCritical, type CriticalState } from "../src/motion";
+import { MOTION, RIPPLE_LEVELS } from "../src/config";
 import { createRipple } from "../src/modules/ripple";
 import { createBlockPainter } from "../src/modules/ripple/blockPainter";
 import { createWritingSession } from "../src/session";
@@ -23,15 +23,37 @@ function frame(overrides: Partial<EditorFrame> = {}): EditorFrame {
     maxScroll: 2000, reducedMotion: false, zIndex: 1, ...overrides };
 }
 
-test("interrupted motion reverses from the displayed value without overshoot", () => {
-  const current = approach(0, 100, 16, 50);
-  const reversed = approach(current, -100, 16, 50);
-  assert.ok(reversed < current && reversed > -100);
-  assert.equal(approach(current, -100, 0, 50), current);
+test("critical motion keeps value and velocity continuous across retarget", () => {
+  const state: CriticalState = { value: 0, velocity: 0 };
+  stepCritical(state, 100, 16, 100);
+  const before = { ...state };
+  stepCritical(state, -100, 0, 100);
+  assert.deepEqual(state, before);
 });
 
-test("motion is independent of frame subdivision", () => {
-  assert.ok(Math.abs(approach(0, 100, 32, 50) - approach(approach(0, 100, 16, 50), 100, 16, 50)) < 1e-10);
+test("critical motion is independent of frame subdivision", () => {
+  const one: CriticalState = { value: 0, velocity: 0 };
+  const two: CriticalState = { value: 0, velocity: 0 };
+  stepCritical(one, 100, 32, 100);
+  stepCritical(two, 100, 16, 100);
+  stepCritical(two, 100, 16, 100);
+  assert.ok(Math.abs(one.value - two.value) < 1e-10);
+  assert.ok(Math.abs(one.velocity - two.velocity) < 1e-10);
+});
+
+test("response95 reaches approximately 95 percent from rest", () => {
+  const state: CriticalState = { value: 0, velocity: 0 };
+  stepCritical(state, 100, 100, 100);
+  assert.ok(Math.abs(state.value - 95) < 0.001);
+});
+
+test("critical motion settles position and velocity together", () => {
+  const state: CriticalState = { value: 0, velocity: 0 };
+  let settled = false;
+  for (let i = 0; i < 200 && !settled; i++) settled = stepCritical(state, 100, 16, 100, 0.01);
+  assert.equal(settled, true);
+  assert.equal(state.value, 100);
+  assert.equal(state.velocity, 0);
 });
 
 test("scroll retarget accepts reverse editing while it is moving", () => {
@@ -39,7 +61,11 @@ test("scroll retarget accepts reverse editing while it is moving", () => {
   const first = writer.next(frame(), 1000, true, 0);
   assert.ok(first > 300 && first < 600);
   writer.written(first);
-  const next = writer.next(frame({ scrollTop: first, caret: { x: 100, y: 60, height: 20 } }), 1016, true, 1000);
+  let next = writer.next(frame({ scrollTop: first, caret: { x: 100, y: 60, height: 20 } }), 1016, true, 1000);
+  for (let now = 1032; now <= 2000 && next >= first; now += 16) {
+    writer.written(next);
+    next = writer.next(frame({ scrollTop: next, caret: { x: 100, y: 60, height: 20 } }), now, true, 1000);
+  }
   assert.ok(next < first);
   assert.ok(next >= 0);
 });
@@ -180,7 +206,7 @@ function withPresentation(run: (body: PaintElement) => void) {
     HTMLElement: PaintElement, Element: PaintElement,
     CSS: { supports: () => false },
     getComputedStyle: (element: PaintElement) => ({
-      opacity: element.classes.has("zentype-breathing") ? "0.4" : element.style.opacity || "1",
+      opacity: element.style.opacity || "1",
       color: "rgb(200, 210, 220)",
     }),
   };
@@ -360,10 +386,10 @@ function withSessionHarness(run: (harness: SessionHarness) => void, features = {
   });
 }
 
-test("breathing CSS takes its delay, period and minimum alpha from config", () => {
-  assert.ok(CURSOR_MOTION_CSS.includes(`${MOTION.breatheCycleMs}ms`));
-  assert.ok(CURSOR_MOTION_CSS.includes(`${MOTION.breatheAnimationDelayMs}ms`));
-  assert.ok(CURSOR_MOTION_CSS.includes(`--zt-breathe-min-alpha: ${MOTION.breatheMinAlpha}`));
+test("motion configuration exposes explicit response95 semantics", () => {
+  assert.equal(MOTION.caretTypingResponse95Ms, 55);
+  assert.equal(MOTION.caretNavigationResponse95Ms, 110);
+  assert.equal(MOTION.scrollResponse95Ms, 300);
 });
 
 test("DebugKit defaults to full, records current-session evidence, and exports after stop", async () => {
@@ -407,20 +433,17 @@ test("cursor interrupts breathing from displayed opacity and fades through selec
   for (let now = 1000; now <= 2000; now += 100) cursor.render(input, now, true);
   cursor.render(input, 2000 + MOTION.breatheDelayMs, false);
   const overlay = body.children[0];
-  const ink = overlay.children[0] as PaintElement;
-  assert.ok(ink.classes.has("zentype-breathing"));
+  const breathingOpacity = Number(overlay.style.opacity);
+  assert.ok(breathingOpacity < 1);
   cursor.render(input, 3200, false, true);
-  assert.equal(ink.classes.has("zentype-breathing"), false);
-  assert.deepEqual(ink.animations.at(-1)?.frames, [{ opacity: "0.4" }, { opacity: 1 }]);
+  assert.ok(Number(overlay.style.opacity) > breathingOpacity);
   assert.ok(cursor.yieldSelection(3216, false));
   assert.equal(overlay.hidden, false);
   assert.ok(Number(overlay.style.opacity) > 0 && Number(overlay.style.opacity) < 1);
   cursor.yieldSelection(3316, false);
-  const faded = Number(overlay.style.opacity);
-  assert.ok(faded > 0);
   cursor.render(input, 3332, false);
   assert.equal(overlay.hidden, false);
-  assert.ok(Number(overlay.style.opacity) < 1);
+  assert.ok(Number(overlay.style.opacity) > 0);
   cursor.destroy();
 }));
 
@@ -430,18 +453,14 @@ test("geometry release freezes breathing and fades the outer cursor promptly", (
   for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, true);
   cursor.render(input, 4000, false);
   const overlay = body.children[0];
-  const ink = overlay.children[0];
-  assert.equal(ink.classes.has("zentype-breathing"), true);
-  cursor.release(10000, false);
-  assert.equal(ink.style.opacity, "0.4");
-  assert.equal(ink.classes.has("zentype-breathing"), false);
-  cursor.release(10060, false);
-  cursor.release(10120, false);
-  assert.ok(Number(overlay.style.opacity) < 0.05);
-  cursor.render({ ...input, caret: { x: 300, y: 200, height: 20 } }, 10136, false);
+  assert.ok(Number(overlay.style.opacity) < 1);
+  cursor.release(4016, false);
+  for (let now = 4032; now <= 5000 && !overlay.hidden; now += 16) cursor.release(now, false);
+  assert.equal(overlay.hidden, true);
+  cursor.render({ ...input, caret: { x: 300, y: 200, height: 20 } }, 5016, false);
   assert.equal(overlay.style.transform, `translate3d(300px,${200 - MOTION.caretLiftPx}px,0)`);
-  assert.ok(Number(overlay.style.opacity) > 0.05);
-  cursor.release(10152, true);
+  assert.ok(Number(overlay.style.opacity) > 0);
+  cursor.release(5032, true);
   assert.equal(overlay.hidden, true);
   cursor.destroy();
 }));
@@ -888,13 +907,24 @@ test("host takeover remains yielded until newer input", () => {
   assert.ok(writer.next(frame({ scrollTop: 800 }), 1600, true, 1100) > 800);
 });
 
-test("scroll integrates a dropped 100ms frame without a 32ms lag", () => {
+test("quantized scroll readback cannot freeze virtual critical motion", () => {
   const writer = createTypewriter();
-  const first = writer.next(frame(), 1000, true, 0);
-  writer.written(first);
-  const response = MOTION.scrollResponseMs + Math.min(70, (572 - 300) * 0.12);
-  const next = writer.next(frame({ scrollTop: first, caret: { x: 100, y: 550 - (first - 300), height: 20 } }), 1100, true, 0);
-  assert.ok(Math.abs(next - approach(first, 572, 100, response)) < 1e-8);
+  const target = 572;
+  let requested = writer.next(frame(), 1000, true, 0);
+  let progressed = 0;
+  for (let now = 1016; now <= 5000 && writer.isMoving(); now += 16) {
+    const actual = Math.round(requested);
+    writer.written(actual);
+    const next = writer.next(frame({
+      scrollTop: actual,
+      caret: { x: 100, y: 550 - (actual - 300), height: 20 },
+    }), now, true, 0);
+    if (next > requested) progressed++;
+    requested = next;
+  }
+  assert.ok(progressed > 3);
+  assert.equal(requested, target);
+  assert.equal(writer.isMoving(), false);
 });
 
 test("scroll snaps the final visual tail at the configured settle distance", () => {
@@ -908,7 +938,7 @@ test("scroll snaps the final visual tail at the configured settle distance", () 
       caret: { x: 100, y: 550 - (current - 300), height: 20 },
     }), now, true, 0);
     writer.written(next);
-    if (Math.abs(target - next) < MOTION.scrollSettlePx) {
+    if (Math.abs(target - next) < MOTION.scrollPositionEpsilonPx) {
       assert.equal(next, target);
       assert.equal(writer.isMoving(), false);
       return;

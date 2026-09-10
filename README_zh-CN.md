@@ -1,13 +1,13 @@
-# zenType v2.9.0-remake.2.2
+# zenType v2.9.0-remake.2.3-critical.1
 
-顺滑光标、打字机滚动、涟漪聚焦。remake.2.2 保留单一 WritingSession / rAF / observer，以思源 v3.8.3 官方源码验证共享结构 authority boundary，并从生产构建中编译期剔除开发诊断代码。
+顺滑光标、打字机滚动、涟漪聚焦。critical-motion 开发构建保留单一 WritingSession / rAF / observer，并让 Cursor、Typewriter 和句级 Ripple 使用统一的解析临界阻尼数学；生产构建继续编译期剔除开发诊断代码。
 
 ## 写作体验
 
 - 蓝色光标从当前显示位置继续运动，跨正文 editable 转移时保留运动；停笔后呼吸，靠近裁剪边缘淡出。
 - 中文 IME 使用当前组合选区的 focus 端点维持蓝色光标，组合期间暂停插件舒适区滚动，宿主仍可滚动。
 - 几何暂不可读时按 160ms 预算保留并重新观测；空块与块边界按光标所在块恢复位置，而不是按整个 editable。预算用尽后，若仍在同一 editable、仍是带 Range 的折叠选区且冻结位置在屏幕内，则继续保留呈现而不交还原生 caret。160ms 是基线恢复预算，不是宿主事务完成时限。
-- 打字机滚动采用舒适区和当前 scrollTop；快速反向输入可以接管运动，手动浏览会停止自动跟随。
+- 打字机滚动以当前 scrollTop 建立独立的连续虚拟位置；浏览器像素量化不会冻结运动，快速反向输入可以接管，手动浏览会停止自动跟随。
 - Ripple 从当前亮度接续，普通文本变化不会整组重置；当前句使用 CSS Highlight，保留文字自身颜色。
 - 可能的结构编辑会暂缓 Cursor、Typewriter 与 Ripple 的新目标；input 本身不能否定结构意图。思源会在后续 task 做输入归一化，因此普通 mutation 需经过 48ms 无新增分类活动才确认，所有路径受 160ms deadline 约束。
 - 鼠标选择、普通非折叠选区使用宿主选择呈现。系统减少动态效果时关闭位移动画与呼吸。
@@ -29,7 +29,7 @@ npm run verify:prod
 
 开发构建在 `dev/`，生产构建在 `dist/`，安装包为 `package.zip`。包内文件位于压缩包根目录。
 
-停用现有 zenType，将现有插件目录备份到插件目录之外；把包内文件放入思源工作空间的 `data/plugins/zenType/`，再启用插件。不要同时运行两个 zenType 副本。顶栏提示包含 `v2.9.0-remake.2.2`，插件 manifest 保持数字版本 `2.9.0`。
+停用现有 zenType，将现有插件目录备份到插件目录之外；把包内文件放入思源工作空间的 `data/plugins/zenType/`，再启用插件。不要同时运行两个 zenType 副本。顶栏提示包含 `v2.9.0-remake.2.3-critical.1`，插件 manifest 保持数字版本 `2.9.0`。
 
 已有开发链接可以继续使用 `dev/`。创建新链接可运行 `node scripts/make_dev_link.js --workspace <思源工作空间路径>`，脚本拒绝覆盖已有插件目录。
 

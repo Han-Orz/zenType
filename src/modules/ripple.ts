@@ -1,5 +1,5 @@
 import { MOTION, SENTENCE_ALPHA } from "../config";
-import { approach } from "../motion";
+import { clamp, stepCritical } from "../motion";
 import { visualKey } from "../structure";
 import type { EditorFrame } from "../types";
 import type { DebugRecorder } from "../debug/types";
@@ -10,7 +10,7 @@ import { projectText, sentenceRange, mapUnchangedBoundaries, type TextEntry } fr
 import { collectTargets } from "./ripple/blockPlan";
 import { createBlockPainter } from "./ripple/blockPainter";
 
-type SentencePaint = SentenceRange & { range: Range; value: number; target: number };
+type SentencePaint = SentenceRange & { range: Range; value: number; velocity: number; target: number };
 
 export function createRipple(debug?: DebugRecorder) {
   const style = document.createElement("style");
@@ -115,7 +115,8 @@ export function createRipple(debug?: DebugRecorder) {
             const range = sentenceRange(projection.entries, boundary);
             if (!range) return [];
             const index = reusable.findIndex(old => old?.start === boundary.start && (old.end === boundary.end || deleting));
-            return [{ ...boundary, range, value: index < 0 ? 1 : previous[index].value, target: 1 }];
+            const old = index < 0 ? undefined : previous[index];
+            return [{ ...boundary, range, value: old?.value ?? 1, velocity: old?.velocity ?? 0, target: 1 }];
           });
           entries = projection.entries;
           text = projection.text;
@@ -187,10 +188,14 @@ export function createRipple(debug?: DebugRecorder) {
     }
     for (const ranges of scratch) ranges.length = 0;
     for (const paint of sentences) {
-      paint.value = approach(paint.value, paint.target, elapsed,
-        reducedMotion ? 0 : (paint.target === 1 ? MOTION.focusEnterMs : MOTION.focusLeaveMs) / 3);
-      if (Math.abs(paint.value - paint.target) < 0.002) paint.value = paint.target;
-      else moving = true;
+      const settled = stepCritical(paint, paint.target, elapsed,
+        reducedMotion ? 0 : (paint.target === 1 ? MOTION.focusEnterResponse95Ms : MOTION.focusLeaveResponse95Ms),
+        MOTION.sentenceSettleEpsilon);
+      if (paint.value < SENTENCE_ALPHA || paint.value > 1) {
+        paint.value = clamp(paint.value, SENTENCE_ALPHA, 1);
+        paint.velocity = 0;
+      }
+      if (!settled) moving = true;
       const bucket = Math.round(paint.value * 64);
       if (bucket === 64) continue;
       scratch[bucket].push(paint.range);

@@ -1,7 +1,7 @@
 import { Plugin, showMessage } from "siyuan";
 import { createWritingSession, type WritingSession } from "./session";
 import type { Features } from "./types";
-import { BUILD_LABEL, CURSOR_MOTION_CSS } from "./config";
+import { BUILD_LABEL } from "./config";
 import mainCss from "./styles/index.scss";
 import { installDebugKit } from "./modules/debugPlugin";
 import type { DebugHookController } from "./modules/debugHook";
@@ -26,7 +26,7 @@ export default class ZenType extends Plugin {
     }
     try {
       this.style = document.createElement("style");
-      this.style.textContent = mainCss + "\n" + CURSOR_MOTION_CSS;
+      this.style.textContent = mainCss;
       document.head.appendChild(this.style);
       if (__ZENTYPE_DEV__) {
         this.debug = await installDebugKit(this);
