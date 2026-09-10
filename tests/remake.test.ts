@@ -41,10 +41,18 @@ test("critical motion is independent of frame subdivision", () => {
   assert.ok(Math.abs(one.velocity - two.velocity) < 1e-10);
 });
 
-test("response time reaches approximately 95 percent from rest", () => {
+test("response time reaches approximately 90 percent from rest", () => {
   const state: CriticalState = { value: 0, velocity: 0 };
   stepCritical(state, 100, 100, 100);
-  assert.ok(Math.abs(state.value - 95) < 0.001);
+  assert.ok(Math.abs(state.value - 90) < 0.001);
+});
+
+test("critical motion accepts a large elapsed interval without a frame-time clamp", () => {
+  const state: CriticalState = { value: 0, velocity: 0 };
+  const settled = stepCritical(state, 100, 5000, 100);
+  assert.equal(settled, true);
+  assert.equal(state.value, 100);
+  assert.equal(state.velocity, 0);
 });
 
 test("critical motion settles position and velocity together", () => {
@@ -408,12 +416,12 @@ test("motion configuration exposes explicit responseMs semantics", () => {
   assert.equal(MOTION.caretNavigationResponseMs, 110);
   assert.equal(MOTION.scrollResponseMs, 300);
   assert.equal(MOTION.breatheIdleDelayMs, 3000);
-  assert.equal(MOTION.breatheRestMs, 2400);
-  assert.equal(MOTION.breathDownResponseMs, 900);
-  assert.equal(MOTION.breathUpResponseMs, 220);
+  assert.equal(MOTION.breatheRestMs, 2000);
+  assert.equal(MOTION.breathDownResponseMs, 1000);
+  assert.equal(MOTION.breathUpResponseMs, 600);
   assert.equal(MOTION.breatheLowAlpha, 0);
-  assert.equal(MOTION.breatheLowHoldMs, 120);
-  assert.equal(MOTION.cursorSwitchRevealResponseMs, 370);
+  assert.equal(MOTION.breatheLowHoldMs, 0);
+  assert.equal(MOTION.cursorAppearResponseMs, 370);
   assert.equal(MOTION.scrollPositionEpsilonPx, 0.21);
 });
 
@@ -466,6 +474,10 @@ test("cursor interrupts breathing from displayed opacity and fades through selec
   cursor.render(input, breathStart, false);
   cursor.render(input, breathStart + 16, false);
   const downSample = renders.at(-1)!;
+  const expectedRecovery: CriticalState = {
+    value: Number(downSample.alpha), velocity: Number(downSample.alphaVelocity),
+  };
+  stepCritical(expectedRecovery, 1, 16, MOTION.cursorAppearResponseMs, MOTION.alphaSettleEpsilon);
   const overlay = body.children[0];
   const breathingOpacity = Number(overlay.style.opacity);
   assert.ok(breathingOpacity < 1);
@@ -475,22 +487,32 @@ test("cursor interrupts breathing from displayed opacity and fades through selec
   const interruptedOpacity = Number(overlay.style.opacity);
   assert.ok(interruptedOpacity > 0 && interruptedOpacity < 1);
   assert.equal(interruptSample.breathPhase, "normal");
+  assert.ok(Math.abs(Number(interruptSample.alpha) - expectedRecovery.value) < 1e-10);
+  assert.ok(Math.abs(Number(interruptSample.alphaVelocity) - expectedRecovery.velocity) < 1e-10);
   assert.ok(Number(downSample.alphaVelocity) < 0);
   assert.ok(Number(interruptSample.alphaVelocity) < 0);
-  cursor.render(input, interruptAt + 200, false, true);
+  const recoveredAt = interruptAt + MOTION.cursorAppearResponseMs * 3;
+  cursor.render(input, recoveredAt, false, true);
   assert.ok(Number(overlay.style.opacity) > breathingOpacity);
-  assert.ok(cursor.yieldSelection(interruptAt + 216, false));
+  assert.ok(Number(overlay.style.opacity) > interruptedOpacity);
+  assert.ok(cursor.yieldSelection(recoveredAt + 16, false));
   assert.equal(overlay.hidden, false);
   assert.ok(Number(overlay.style.opacity) > 0 && Number(overlay.style.opacity) < 1);
-  cursor.yieldSelection(interruptAt + 316, false);
-  cursor.render(input, interruptAt + 332, false);
+  cursor.yieldSelection(recoveredAt + 116, false);
+  cursor.render(input, recoveredAt + 132, false);
   assert.equal(overlay.hidden, false);
   assert.ok(Number(overlay.style.opacity) > 0);
   cursor.destroy();
 }));
 
-test("breathing hold starts after down settle without polluting recovery elapsed", () => withPresentation(body => {
-  const cursor = createCursor();
+test("breathing reaches exact low alpha and hands off without a low-hold timer", () => withPresentation(body => {
+  const renders: Array<Record<string, unknown>> = [];
+  const debug = {
+    record: (_source: string, name: string, payload: Record<string, unknown>) => {
+      if (name === "render") renders.push(payload);
+    },
+  } as never;
+  const cursor = createCursor(debug);
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
   for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, true);
   const breathStart = 2000 + MOTION.breatheIdleDelayMs;
@@ -498,7 +520,8 @@ test("breathing hold starts after down settle without polluting recovery elapsed
   const overlay = body.children[0];
   let lowSettledAt = 0;
   for (let now = breathStart + 16; now <= breathStart + 3000; now += 16) {
-    if (!cursor.render(input, now, false)) {
+    cursor.render(input, now, false);
+    if (renders.at(-1)?.breathPhase === "hold") {
       lowSettledAt = now;
       break;
     }
@@ -507,12 +530,13 @@ test("breathing hold starts after down settle without polluting recovery elapsed
   const lowOpacity = Number(overlay.style.opacity);
   assert.equal(lowOpacity, 0);
   assert.equal(lowOpacity, MOTION.breatheLowAlpha);
-  const wakeAt = lowSettledAt + MOTION.breatheLowHoldMs;
-  assert.equal(cursor.render(input, wakeAt, false), true);
-  const wakeOpacity = Number(overlay.style.opacity);
-  assert.ok(Math.abs(wakeOpacity - lowOpacity) < 0.01);
-  cursor.render(input, wakeAt + 100, false);
-  assert.ok(Number(overlay.style.opacity) > wakeOpacity);
+  assert.equal(cursor.wakeDelay(lowSettledAt), null);
+  const upAt = lowSettledAt + 16;
+  assert.equal(cursor.render(input, upAt, false), true);
+  assert.equal(renders.at(-1)?.breathPhase, "up");
+  assert.equal(Number(overlay.style.opacity), lowOpacity);
+  cursor.render(input, upAt + 16, false);
+  assert.ok(Number(overlay.style.opacity) > lowOpacity);
   assert.ok(Number(overlay.style.opacity) < 1);
   cursor.destroy();
 }));
@@ -552,14 +576,16 @@ test("cursor breathing follows normal, down, hold, up, normal phases", () => wit
   cursor.render(input, downAt, false);
   let lowSettledAt = 0;
   for (let now = downAt + 16; now <= downAt + 3000; now += 16) {
-    if (!cursor.render(input, now, false)) {
+    cursor.render(input, now, false);
+    if (phases.at(-1) === "hold") {
       lowSettledAt = now;
       break;
     }
   }
   assert.ok(lowSettledAt > downAt);
-  const upAt = lowSettledAt + MOTION.breatheLowHoldMs;
-  cursor.render(input, upAt, false);
+  const upAt = lowSettledAt + 16;
+  assert.equal(cursor.render(input, upAt, false), true);
+  assert.equal(phases.at(-1), "up");
   let upSettledAt = 0;
   for (let now = upAt + 16; now <= upAt + 3000; now += 16) {
     if (!cursor.render(input, now, false)) {
@@ -587,14 +613,16 @@ test("next breathing starts only after the post-recovery bright rest", () => wit
   cursor.render(input, downAt, false);
   let lowSettledAt = 0;
   for (let now = downAt + 16; now <= downAt + 3000; now += 16) {
-    if (!cursor.render(input, now, false)) {
+    cursor.render(input, now, false);
+    if (phases.at(-1) === "hold") {
       lowSettledAt = now;
       break;
     }
   }
   assert.ok(lowSettledAt > downAt);
-  const upAt = lowSettledAt + MOTION.breatheLowHoldMs;
-  cursor.render(input, upAt, false);
+  const upAt = lowSettledAt + 16;
+  assert.equal(cursor.render(input, upAt, false), true);
+  assert.equal(phases.at(-1), "up");
   let upSettledAt = 0;
   for (let now = upAt + 16; now <= upAt + 3000; now += 16) {
     if (!cursor.render(input, now, false)) {
@@ -612,8 +640,14 @@ test("next breathing starts only after the post-recovery bright rest", () => wit
   cursor.destroy();
 }));
 
-test("cursor sleeps between breathing phases and exposes one bounded wake", () => withPresentation(body => {
-  const cursor = createCursor();
+test("cursor avoids a zero-duration low wake and exposes one bounded bright-rest wake", () => withPresentation(body => {
+  const phases: string[] = [];
+  const debug = {
+    record: (_source: string, name: string, payload: Record<string, unknown>) => {
+      if (name === "render") phases.push(String(payload.breathPhase));
+    },
+  } as never;
+  const cursor = createCursor(debug);
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
   for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, true);
   const downAt = 2000 + MOTION.breatheIdleDelayMs;
@@ -621,17 +655,17 @@ test("cursor sleeps between breathing phases and exposes one bounded wake", () =
   assert.equal(cursor.wakeDelay(downAt), null);
   let lowSettledAt = 0;
   for (let now = downAt + 16; now <= downAt + 3000; now += 16) {
-    if (!cursor.render(input, now, false)) {
+    cursor.render(input, now, false);
+    if (phases.at(-1) === "hold") {
       lowSettledAt = now;
       break;
     }
   }
   assert.ok(lowSettledAt > downAt);
-  assert.equal(cursor.wakeDelay(lowSettledAt), MOTION.breatheLowHoldMs);
-  assert.equal(cursor.render(input, lowSettledAt + 16, false), false);
-  assert.equal(cursor.wakeDelay(lowSettledAt + 16), MOTION.breatheLowHoldMs - 16);
-  const upAt = lowSettledAt + MOTION.breatheLowHoldMs;
+  assert.equal(cursor.wakeDelay(lowSettledAt), null);
+  const upAt = lowSettledAt + 16;
   assert.equal(cursor.render(input, upAt, false), true);
+  assert.equal(phases.at(-1), "up");
   assert.equal(cursor.wakeDelay(upAt), null);
   cursor.destroy();
 }));
@@ -688,6 +722,9 @@ test("editor switch commits hidden geometry before a full reveal motion", () => 
   assert.equal(records.at(-1)?.payload.revealElapsed, 0);
   cursor.render(moved, 1256, false);
   assert.ok(Number(overlay.style.opacity) > 0 && Number(overlay.style.opacity) < 1);
+  const expectedReveal: CriticalState = { value: 0, velocity: 0 };
+  stepCritical(expectedReveal, 1, 16, MOTION.cursorAppearResponseMs, MOTION.alphaSettleEpsilon);
+  assert.ok(Math.abs(Number(overlay.style.opacity) - expectedReveal.value) < 1e-10);
   assert.equal(records.at(-1)?.payload.revealElapsed, 16);
 
   let settledAt = 0;

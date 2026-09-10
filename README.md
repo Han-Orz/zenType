@@ -1,6 +1,8 @@
-# zenType v2.9.0-remake.2.3-critical.3
+# zenType v2.9.0-remake.2.3-critical.5
 
 Smooth cursor, typewriter scrolling and ripple focus for SiYuan. The critical-motion development build keeps one Session/rAF coordinator while giving Cursor, Typewriter and sentence Ripple state their own analytic critical-damping motion.
+
+All Critical Motion consumers share a fixed-zeta=1 law: `ResponseMs` means approximately 90% of a fixed displacement from rest at the configured time. Cursor breathing waits 3000ms, moves to exact zero over 1000ms, has no low hold, returns over 600ms and rests bright for 2000ms. Normal appearance and editor-switch reveal share a 370ms response; switch reveal still retains its hidden-geometry handoff.
 
 ## Behavior
 
@@ -27,7 +29,7 @@ npm run verify:prod
 
 Development output: `dev/`. Production output: `dist/`. Installable archive: `package.zip`.
 
-Disable zenType, back up the existing installation outside the plugins directory, extract the archive into your SiYuan workspace's `data/plugins/zenType/`, then enable it. Do not run two copies. The topbar tooltip identifies `v2.9.0-remake.2.3-critical.3`; the numeric plugin manifest version is `2.9.0`.
+Disable zenType, back up the existing installation outside the plugins directory, extract the archive into your SiYuan workspace's `data/plugins/zenType/`, then enable it. Do not run two copies. The topbar tooltip identifies `v2.9.0-remake.2.3-critical.5`; the numeric plugin manifest version is `2.9.0`.
 
 Existing development links can use `dev/`. To create one, use `node scripts/make_dev_link.js --workspace <workspace-path>`; it refuses to overwrite an existing installation.
 

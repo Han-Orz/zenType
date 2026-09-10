@@ -238,11 +238,10 @@ export function createCursor(debug?: DebugRecorder) {
       breathDeadline = 0;
       alphaPhaseChanged = true;
     }
-    const alphaResponse = frame.reducedMotion ? 0 : startingSwitchReveal || switchRevealPhase === "active"
-      ? MOTION.cursorSwitchRevealResponseMs : breathPhase === "down"
-        ? MOTION.breathDownResponseMs : breathPhase === "up"
-          ? MOTION.breathUpResponseMs : alphaTarget < 1
-            ? MOTION.cursorDisappearResponseMs : MOTION.cursorAppearResponseMs;
+    const alphaResponse = frame.reducedMotion ? 0 : breathPhase === "down"
+      ? MOTION.breathDownResponseMs : breathPhase === "up"
+        ? MOTION.breathUpResponseMs : alphaTarget < 1
+          ? MOTION.cursorDisappearResponseMs : MOTION.cursorAppearResponseMs;
     // A phase entered after an inactive semantic deadline starts at its own
     // baseline; hold/rest time never becomes Critical Motion elapsed.
     const alphaElapsed = startingSwitchReveal ? 0 : alphaPhaseChanged && motionClockInactive ? 0 : elapsed;
@@ -279,7 +278,10 @@ export function createCursor(debug?: DebugRecorder) {
     });
     if (!moving && alphaSettled) lastTime = null;
     else lastTime = now;
-    return moving || !alphaSettled || switchRevealPhase !== "none";
+    // A zero-duration low phase is handed to the next existing Session frame,
+    // not to a new wake timer. That frame advances hold -> up immediately.
+    const zeroHoldHandoff = breathPhase === "hold" && MOTION.breatheLowHoldMs === 0;
+    return moving || !alphaSettled || switchRevealPhase !== "none" || zeroHoldHandoff;
   }
 
   /** Fade only the overlay; valid editor bindings keep native caret suppressed. */
@@ -337,6 +339,7 @@ export function createCursor(debug?: DebugRecorder) {
     wakeDelay(now: number) {
       if (!motion) return null;
       if (breathPhase === "down" || breathPhase === "up") return null;
+      if (breathPhase === "hold" && MOTION.breatheLowHoldMs === 0) return null;
       const wake = breathDeadline || lastMotion + MOTION.breatheIdleDelayMs;
       return Math.max(1, wake - now);
     },

@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.9.0-remake.2.3-critical.5 (2026-09-10) — Critical Motion response convergence
+
+- Shared fixed-zeta=1 `ResponseMs` calibration now reaches approximately 90% displacement from rest at the configured response time; the analytic law and retarget semantics are unchanged.
+- Cursor breathing uses a 3000ms idle delay, 1000ms down response to exact zero, zero low hold, 600ms up response and 2000ms bright rest.
+- Normal Cursor appearance and editor-switch reveal share `cursorAppearResponseMs = 370`; switch stability, hidden geometry commit and next-frame reveal timing remain unchanged.
+- Typewriter, StructureGate, Ripple and block WAAPI architecture are unchanged.
+
 ## v2.9.0-remake.2.3-critical.4 (2026-09-10) — Critical Motion hand-feel refinements
 
 - Cursor breathing now waits 3000ms after activity, eases down toward exact zero over 900ms, holds for 120ms, and recovers over 220ms before the existing 2400ms bright rest.

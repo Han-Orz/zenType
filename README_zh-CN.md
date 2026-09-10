@@ -1,6 +1,8 @@
-# zenType v2.9.0-remake.2.3-critical.3
+# zenType v2.9.0-remake.2.3-critical.5
 
 顺滑光标、打字机滚动、涟漪聚焦。critical-motion 开发构建保留单一 WritingSession / rAF / observer，并让 Cursor、Typewriter 和句级 Ripple 使用统一的解析临界阻尼数学；生产构建继续编译期剔除开发诊断代码。
+
+所有 Critical Motion 使用固定 ζ=1 的统一规律：`ResponseMs` 表示从静止追踪固定目标时，在该时刻约完成 90% 位移。光标呼吸等待 3000ms，经过 1000ms 降至精确 0，没有 low hold，经过 600ms 恢复，并保持明亮 2000ms。普通出现与编辑器切换 reveal 共用 370ms response；切换仍保留隐藏几何交接。
 
 ## 写作体验
 
@@ -29,7 +31,7 @@ npm run verify:prod
 
 开发构建在 `dev/`，生产构建在 `dist/`，安装包为 `package.zip`。包内文件位于压缩包根目录。
 
-停用现有 zenType，将现有插件目录备份到插件目录之外；把包内文件放入思源工作空间的 `data/plugins/zenType/`，再启用插件。不要同时运行两个 zenType 副本。顶栏提示包含 `v2.9.0-remake.2.3-critical.3`，插件 manifest 保持数字版本 `2.9.0`。
+停用现有 zenType，将现有插件目录备份到插件目录之外；把包内文件放入思源工作空间的 `data/plugins/zenType/`，再启用插件。不要同时运行两个 zenType 副本。顶栏提示包含 `v2.9.0-remake.2.3-critical.5`，插件 manifest 保持数字版本 `2.9.0`。
 
 已有开发链接可以继续使用 `dev/`。创建新链接可运行 `node scripts/make_dev_link.js --workspace <思源工作空间路径>`，脚本拒绝覆盖已有插件目录。
 

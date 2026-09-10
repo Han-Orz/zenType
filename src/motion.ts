@@ -5,8 +5,8 @@ export interface CriticalState {
 
 // For a unit step from rest, critical damping leaves (1 + s)e^-s of the
 // displacement after s = omega * t. This is the positive solution of
-// (1 + s)e^-s = 0.05, so responseMs has one meaning for every feature.
-const CRITICAL_RESPONSE_S = 4.743864518390577;
+// (1 + s)e^-s = 0.10, so responseMs has one meaning for every feature.
+const CRITICAL_RESPONSE_S = 3.889720169867429;
 
 /** Advance a fixed-zeta=1 state through the analytic continuous solution. */
 export function stepCritical(
