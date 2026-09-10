@@ -9,6 +9,8 @@ interface CursorMotion {
   height: CriticalState;
 }
 
+type BreathPhase = "normal" | "down" | "hold" | "up";
+
 export function createCursor(debug?: DebugRecorder) {
   const element = document.createElement("div");
   element.id = "zentype-cursor";
@@ -31,9 +33,11 @@ export function createCursor(debug?: DebugRecorder) {
   let settleUntil = 0;
   let stableFrames = 0;
   let revealPending = false;
-  let breathLow = false;
-  let breathRecovering = false;
-  let breathWake = 0;
+  let breathPhase: BreathPhase = "normal";
+  // In normal this is the next down deadline after a completed cycle; in hold
+  // it is the low-alpha hold deadline. Zero means first idle delay is derived
+  // from lastMotion instead of being an active semantic deadline.
+  let breathDeadline = 0;
   let transport = { top: 0, left: 0 };
   let nestedScroll: EditorFrame["nestedScroll"] = [];
 
@@ -45,7 +49,9 @@ export function createCursor(debug?: DebugRecorder) {
       hidden: element.hidden,
       alpha: alpha.value,
       owner: owner !== null,
-      breathing: breathLow || breathRecovering,
+      alphaVelocity: alpha.velocity,
+      breathing: breathPhase !== "normal",
+      breathPhase,
       settling: settleUntil !== 0 || revealPending,
       revealPending,
       stableFrames,
@@ -66,9 +72,8 @@ export function createCursor(debug?: DebugRecorder) {
   }
 
   function resetBreathing() {
-    breathLow = false;
-    breathRecovering = false;
-    breathWake = 0;
+    breathPhase = "normal";
+    breathDeadline = 0;
     alphaTarget = 1;
   }
 
@@ -174,10 +179,7 @@ export function createCursor(debug?: DebugRecorder) {
       selecting = false;
       // A release/selection fade is a presentation transition, not a new
       // visibility owner. A fresh authoritative caret always reveals normally.
-      alphaTarget = 1;
-      breathLow = false;
-      breathRecovering = false;
-      breathWake = 0;
+      resetBreathing();
     }
     const distance = Math.hypot(motion.x.value - target.x, motion.y.value - target.y);
     const response = frame.reducedMotion ? 0 : (typing ? MOTION.caretTypingResponse95Ms :
@@ -190,39 +192,45 @@ export function createCursor(debug?: DebugRecorder) {
     const view = frame.viewport;
     const edge = Math.min(motion.y.value + motion.height.value - view.top, view.bottom - motion.y.value);
     const visible = motion.x.value >= view.left && motion.x.value <= view.right && edge > 0;
-    const breathing = !frame.reducedMotion && !typing && !interacting && !moving && now - lastMotion >= MOTION.breatheDelayMs;
+    const idleDeadline = breathDeadline || lastMotion + MOTION.breatheIdleDelayMs;
+    const idleReady = breathPhase === "normal" && !frame.reducedMotion && !typing && !interacting && !moving &&
+      now >= idleDeadline;
     let alphaPhaseChanged = false;
     if (frame.reducedMotion || typing || interacting || moving) {
-      if (breathLow && alphaTarget !== 1) breathRecovering = true;
-      breathLow = false;
-      breathWake = 0;
+      breathPhase = "normal";
+      breathDeadline = 0;
       if (alphaTarget !== 1) {
         alphaTarget = 1;
         alphaPhaseChanged = true;
       }
-    } else if (!breathLow && !breathRecovering && alphaTarget === 1 && breathing) {
-      breathLow = true;
+    } else if (idleReady) {
+      breathPhase = "down";
       alphaTarget = MOTION.breatheLowAlpha;
       // The hold starts only after the down motion settles, not at phase entry.
-      breathWake = 0;
+      breathDeadline = 0;
       alphaPhaseChanged = true;
-    } else if (breathLow && breathWake !== 0 && now >= breathWake) {
-      breathLow = false;
-      breathRecovering = true;
+    } else if (breathPhase === "hold" && now >= breathDeadline) {
+      breathPhase = "up";
       alphaTarget = 1;
-      breathWake = 0;
-      lastMotion = now;
+      breathDeadline = 0;
       alphaPhaseChanged = true;
     }
-    const alphaResponse = frame.reducedMotion ? 0 : breathLow
-      ? MOTION.breathDownResponse95Ms : breathRecovering
+    const alphaResponse = frame.reducedMotion ? 0 : breathPhase === "down"
+      ? MOTION.breathDownResponse95Ms : breathPhase === "up"
         ? MOTION.breathUpResponse95Ms : alphaTarget < 1
           ? MOTION.cursorDisappearResponse95Ms : MOTION.cursorAppearResponse95Ms;
-    // A phase entered from semantic hold has no active-motion time to consume.
+    // A phase entered after an inactive semantic deadline starts at its own
+    // baseline; hold/rest time never becomes Critical Motion elapsed.
     const alphaElapsed = alphaPhaseChanged && motionClockInactive ? 0 : elapsed;
-    const alphaSettled = stepCritical(alpha, alphaTarget, alphaElapsed, alphaResponse, MOTION.alphaSettleEpsilon);
-    if (breathLow && alphaSettled && breathWake === 0) breathWake = now + MOTION.breatheLowHoldMs;
-    if (breathRecovering && alphaSettled && alphaTarget === 1) breathRecovering = false;
+    const alphaSettled = breathPhase === "hold" ? true :
+      stepCritical(alpha, alphaTarget, alphaElapsed, alphaResponse, MOTION.alphaSettleEpsilon);
+    if (breathPhase === "down" && alphaSettled) {
+      breathPhase = "hold";
+      breathDeadline = now + MOTION.breatheLowHoldMs;
+    } else if (breathPhase === "up" && alphaSettled) {
+      breathPhase = "normal";
+      breathDeadline = now + MOTION.breatheRestMs;
+    }
     if (alpha.value < 0 || alpha.value > 1) {
       alpha.value = clamp(alpha.value, 0, 1);
       alpha.velocity = 0;
@@ -238,7 +246,7 @@ export function createCursor(debug?: DebugRecorder) {
       moving,
       typing,
       interacting,
-      breathing,
+      breathReady: idleReady,
       visible,
       ownerChanged,
       edge,
@@ -250,11 +258,10 @@ export function createCursor(debug?: DebugRecorder) {
 
   /** Fade only the overlay; valid editor bindings keep native caret suppressed. */
   function fadeOut(now: number, reducedMotion: boolean, reason = "release"): boolean {
-    const fromSemanticHold = breathLow && lastTime === null;
+    const fromSemanticHold = breathPhase === "hold" && lastTime === null;
     alphaTarget = 0;
-    breathLow = false;
-    breathRecovering = false;
-    breathWake = 0;
+    breathPhase = "normal";
+    breathDeadline = 0;
     // An ordinary first fade frame gets the same small initial interval as a
     // fresh render. A settled breath hold, however, must not spend its hold
     // time on the new fade phase.
@@ -302,7 +309,8 @@ export function createCursor(debug?: DebugRecorder) {
     },
     wakeDelay(now: number) {
       if (!motion) return null;
-      const wake = breathLow ? breathWake : lastMotion + MOTION.breatheDelayMs;
+      if (breathPhase === "down" || breathPhase === "up") return null;
+      const wake = breathDeadline || lastMotion + MOTION.breatheIdleDelayMs;
       return Math.max(1, wake - now);
     },
     recoveryDelay(now: number) {

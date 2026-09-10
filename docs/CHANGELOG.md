@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.9.0-remake.2.3-critical.3 (2026-09-10) — Cursor breathing phase and cadence
+
+- Cursor breathing now has explicit `normal → down → hold → up → normal` semantic phases while retaining one alpha CriticalState.
+- First idle breathing waits 1100ms; a completed recovery waits 2400ms before the next down phase. Hold and rest deadlines remain separate from Critical Motion elapsed.
+- Added phase-order, post-recovery rest, bounded-wake and interruption regressions. Typewriter, Ripple, StructureGate and block WAAPI are unchanged.
+
 ## v2.9.0-remake.2.3-critical.2 (2026-09-10) — Critical Motion targeted fixes
 
 - Cursor now advances x, y and height independently on every frame, and all migrated Critical Motion features consume real non-negative elapsed time without the old 100ms clamp.
