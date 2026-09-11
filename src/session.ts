@@ -289,9 +289,12 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         // Sentence presentation only needs the current focused block, editable
         // text and collapsed Range, so it can commit on the first authoritative
         // structural frame instead of waiting for topology quiet. The block
-        // neighborhood still waits for the semantic commit.
+        // neighborhood still waits for the semantic commit. The frame's content
+        // evidence travels with it: a host that rewrites the block's text nodes
+        // leaves the registered Highlight ranges collapsed at an element boundary,
+        // where they paint nothing until the next projection.
         if (next && (decision === "wait" || decision === "geometry")) {
-          if (ripple.presentSentences(next, now, reducedMotion.matches)) queue();
+          if (ripple.presentSentences(next, now, reducedMotion.matches, contentDirty)) queue();
         }
         if (decision === "geometry") {
           // Geometry-ready gives Cursor its caret. Ripple stays held until the

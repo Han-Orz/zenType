@@ -282,8 +282,8 @@ export function createRipple(debug?: DebugRecorder) {
   }
   return { sample, prepare(frame: EditorFrame, contentDirty: boolean, structureDirty: boolean, enabled: boolean) {
       sample(frame, contentDirty, structureDirty, enabled)();
-    }, presentSentences(frame: EditorFrame, now: number, reducedMotion: boolean) {
-      sample(frame, false, false, true, true)();
+    }, presentSentences(frame: EditorFrame, now: number, reducedMotion: boolean, contentDirty = false) {
+      sample(frame, contentDirty, false, true, true)();
       // Highlight registration and sentence motion live in render(); without it
       // the stale buckets of the removed block stay on screen.
       return render(now, reducedMotion);

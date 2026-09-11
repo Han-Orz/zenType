@@ -61,7 +61,17 @@ export function planHandoff(old: ReadonlyMap<HTMLElement, number>, targets: Read
   }
   for (const [element, target] of targets) {
     let value = old.get(element) ?? 1;
-    walk(element, parent => { value *= old.get(parent) ?? 1; ancestors.add(parent); });
+    // Folding a released ancestor's value into a target that the plan neutralizes
+    // animates away a dim frame no earlier frame showed. That ancestor is either
+    // already dimming the element through its own opacity, or — after a reparent
+    // such as a list indent — it dimmed a different subtree and this element has
+    // simply moved underneath it. Only a target that inherits the released role
+    // carries the ancestor's factor, and that target is never neutral.
+    const inherits = target !== 1;
+    walk(element, parent => {
+      ancestors.add(parent);
+      if (inherits) value *= old.get(parent) ?? 1;
+    });
     steps.set(element, { value, target });
   }
   for (const [element, value] of old) {

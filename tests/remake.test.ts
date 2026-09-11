@@ -1444,6 +1444,30 @@ test("first-frame sentence presentation commits highlights without touching bloc
   ripple.destroy();
 }));
 
+test("a content-dirty sentences-only frame re-projects instead of keeping collapsed highlights", () => {
+  const recorded: Array<{ name: string; payload: Record<string, unknown> }> = [];
+  const debug = {
+    record: (_source: string, name: string, payload: Record<string, unknown>) => recorded.push({ name, payload }),
+    recordEvent() {}, recordMutations() {}, recordFrame() {},
+  };
+  withSentencePresentation(ctx => {
+    ctx.textA.value = "Alpha one. Alpha two.";
+    const ripple = createRipple(debug as never);
+    ripple.prepare(sentenceFrame(ctx, ctx.blockA, ctx.editableA, ctx.textNodeA, 3), false, true, true);
+
+    // The host rewrites the block's text nodes while the contenteditable element
+    // itself survives: the registered Highlight ranges are left collapsed at an
+    // element boundary. Only the frame's content evidence invalidates the
+    // projection, so the sentences-only path must receive it.
+    ctx.textA.value = "Alpha one. Alpha two. Alpha three.";
+    ripple.presentSentences(sentenceFrame(ctx, ctx.blockA, ctx.editableA, ctx.textNodeA, 3), 1000, false, false);
+    assert.equal(recorded.at(-1)?.payload.sentenceCount, 2);
+    ripple.presentSentences(sentenceFrame(ctx, ctx.blockA, ctx.editableA, ctx.textNodeA, 3), 1000, false, true);
+    assert.equal(recorded.at(-1)?.payload.sentenceCount, 3);
+    ripple.destroy();
+  });
+});
+
 test("a rebuilt sentence without the structural role seed still travels from full brightness", () => withSentencePresentation(ctx => {
   ctx.textB.value = "Bravo one. Bravo two.";
   ctx.textA.value = "Alpha one. Alpha two. Alpha three. Alpha four.";
@@ -2491,7 +2515,7 @@ test("English sentences retain the native Segmenter uppercase and lowercase rule
   }
 });
 
-test("list reparenting transfers parent alpha to disjoint children without restarting stable fades", () => withPresentation(() => {
+test("list reparenting transfers parent alpha to its children without restarting stable fades", () => withPresentation(() => {
   const editor = new PaintElement();
   const active = new PaintElement();
   const parent = new PaintElement();
@@ -2515,7 +2539,10 @@ test("list reparenting transfers parent alpha to disjoint children without resta
   assert.equal(parent.classes.has("zentype-ripple-block"), false);
   const baseline = 1 + (RIPPLE_LEVELS[1] - 1) * 0.875;
   assert.equal(child.animations[0].frames[0].opacity, baseline);
-  assert.equal(active.animations[0].frames[0].opacity, baseline);
+  // The focused block moved under the dim sibling, but this same plan releases
+  // that ancestor, so nothing dims the focused block: it must never render a
+  // dark frame it never had.
+  assert.equal(active.animations.length, 0);
   assert.equal(ripple.render(1000, false), false);
   ripple.prepare(input, false, false, false);
   assert.equal(child.animations.at(-1)?.frames[1].opacity, 1);
