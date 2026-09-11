@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.9.0-remake.2.6-replacement-role.1 (2026-09-11) — Replacement presentation authority
+
+- Narrowed the replacement-carry contract. `same visualKey` proves semantic object continuity, not presentation-role continuity: SiYuan's paragraph merge removes the focused source and re-renders the destination as a fresh element with the same `data-node-id`, so the surviving key previously described a dim neighbour while the new element is the focused block.
+- Session now derives one optional semantic fact at mutation time — the live collapsed Selection's `blockKey`, used only when the classifier already reported `structural` and the captured `editor` is the observed editor. It passes only that key; it never passes an opacity, a "skip" instruction or a key name. Range selection, missing connection, unparsed block and editor mismatch all fail closed to `null`, which leaves ordinary carry intact.
+- `blockPainter.rebind()` skips the replacement for that key, so a focused replacement is presented the way every focused block is: with no block opacity owner. No `1` owner is authored, no freshly carried owner is released and no promotion runs.
+- A detached predecessor is no longer current presentation truth: its stale owner is dropped with that key so the semantic commit cannot fold the old `0.4` back onto the live replacement. Without that second half, dropping the carry alone produces a `1 → 0.4 → 1` regression strictly worse than the original artifact.
+- Removed `identityReady` / `identityPublished` / `structure-identity-ready`. It published a real but unconsumed Host fact and existed only for the rejected destination-release mechanism; the replacement-role authority derives the same fact earlier.
+- Ordinary representation carry, structural carry outside the focused block, same-key sentence-floor carry, the ordinary directional delete fast path, 48ms/160ms, Cursor, Typewriter, sentence Ripple, Critical Motion and the single Session rAF are unchanged. No new state, manager, observer, scheduler, rAF or visual mechanism.
+
 ## v2.9.0-remake.2.6-local-bridge.1 (2026-09-11) — Local Presentation Bridge prototype rejected
 
 - Forensic-only round: no Local Presentation Bridge was implemented. The prototype was rejected on design grounds before writing runtime code, so no `src/modules/localContinuity.ts` or `structuralBridge.ts` exists.

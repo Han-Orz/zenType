@@ -1,4 +1,4 @@
-export const BUILD_LABEL = "v2.9.0-remake.2.6-local-bridge.1";
+export const BUILD_LABEL = "v2.9.0-remake.2.6-replacement-role.1";
 
 /** Larger responseMs values mean slower, softer motion. */
 export const MOTION = {

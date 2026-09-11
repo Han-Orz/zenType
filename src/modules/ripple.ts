@@ -234,10 +234,10 @@ export function createRipple(debug?: DebugRecorder) {
   return { sample, prepare(frame: EditorFrame, contentDirty: boolean, structureDirty: boolean, enabled: boolean) {
       sample(frame, contentDirty, structureDirty, enabled)();
     }, render, clear, invalidateColors: clearColors, freeze: painter.freeze,
-    rebind(added: readonly HTMLElement[]) {
+    rebind(added: readonly HTMLElement[], focusedKey: string | null = null) {
       const floor = sentenceFloor();
       const key = block && !block.isConnected && floor < 1 ? visualKey(block) : undefined;
-      return painter.rebind(added, key ? { key, value: floor } : undefined);
+      return painter.rebind(added, key ? { key, value: floor } : undefined, focusedKey);
     },
     destroy() { clear(); style.remove(); } };
 }

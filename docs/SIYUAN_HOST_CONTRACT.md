@@ -72,6 +72,10 @@ Two consequences bound any local-continuity feature:
 - after the merge the source text is rendered at the **destination's** position, so a second presentation surface drawn at the source's old position renders the same text twice;
 - the destination is a **new element** carrying the old semantic key, which is exactly why same-key replacement carry (not element identity) is the correct continuity primitive.
 
+**Source-proven (same branch).** The merge block performs its DOM work and its Selection restoration in one synchronous span: `range.insertNode(<wbr>)`, `range.extractContents()`, `range.insertNode(leftNodes)`, the `SpinBlockDOM` re-render, `previousLastElement.previousElementSibling.remove()`, `removeElement.remove()`, the `scrollTop` correction, `transaction(...)`, and finally `focusByWbr(protyle.wysiwyg.element, range)` as the **last statement** of `removeBlock` (line 1822). No `await` intervenes on the ordinary paragraph path (`confirmRefRemoval` precedes the span; only the `NodeSuperBlock` branch awaits afterwards). Therefore at the MutationObserver microtask that follows the task, the live collapsed Selection has already been moved into the surviving destination.
+
+**Runtime-observed (2026-09-11, read-only CDP probe, live page).** The renderer hosts **more than one `.protyle-wysiwyg`**; the then-current Selection resolved to a block whose `closest('.protyle-wysiwyg')` was *not* the first editor in the document. Any feature that derives a focused semantic key from the live Selection at mutation time must therefore match the editor it observed and fail closed otherwise. This probe was read-only and did not edit the document.
+
 **Runtime-observed (2026-09-11, read-only CDP probe).** SiYuan 3.8.3 / Electron 44.2.0 / Chrome 152.0.7977.76, live document, no editing performed:
 
 - `.protyle-wysiwyg` itself carries `contenteditable="true"`, and the focused block's own inner contenteditable is a child of it, so a presentation surface placed inside the editor subtree is both a Host-observable mutation and editable Host content;

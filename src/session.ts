@@ -90,6 +90,15 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     return undefined;
   }
 
+  /**
+   * The live collapsed Selection's semantic block when it belongs to the observed
+   * editor. `null` means "unknown", never "no focus".
+   */
+  function focusedSelectionKey(): string | null {
+    const handoff = captureCollapsedSelection();
+    return handoff && handoff.editor === observedEditor ? handoff.blockKey : null;
+  }
+
   function noteSampledSelection(next: EditorFrame | null) {
     if (next?.selection === "range") {
       selectionMode = "range";
@@ -131,10 +140,14 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     if (observedEditor && !blocked && !pointerDown) {
       structure.mutation(observedEditor, performance.now(), changes.kind, changes.textOnly);
       if (changes.kind === "representation" || changes.kind === "structural") {
-        // Replacement DOM is already live when the observer runs. Rebind only
-        // committed semantic owners now, before a throttled rAF can expose an
-        // unpainted frame; new topology remains gated until update().
-        const carry = ripple.rebind(changes.added);
+        // A structural topology change can replace the destination element under
+        // the same semantic key while its Ripple role changes from dim neighbour
+        // to focused. The Host has already restored the collapsed Selection into
+        // the final block by the time this microtask runs, so its semantic key is
+        // the evidence for that role change. Only the key crosses the boundary;
+        // Ripple decides that the old non-focused presentation role is stale.
+        const focusedKey = changes.kind === "structural" ? focusedSelectionKey() : null;
+        const carry = ripple.rebind(changes.added, focusedKey);
         ripple.freeze();
         carry();
       }

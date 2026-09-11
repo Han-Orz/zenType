@@ -94,15 +94,25 @@ export function createBlockPainter(debug?: DebugRecorder) {
       ZENTYPE_DEBUG: debug?.record("ripple", "presentation-hold", { blockCount: paints.size });
     },
     /** Rebind only existing semantic owners; never plan against intermediate DOM. */
-    rebind(added: readonly HTMLElement[], seed?: CarrySeed) {
+    rebind(added: readonly HTMLElement[], seed?: CarrySeed, focusedKey?: string | null) {
       const previous = new Map<string, Pick<Paint, "value" | "target">>();
       for (const paint of paints.values()) if (paint.key) { sample(paint); previous.set(paint.key, paint); }
       if (seed && !previous.has(seed.key)) previous.set(seed.key, { value: seed.value, target: seed.value });
       const replacements = added.flatMap(element => {
         const key = visualKey(element);
+        // A same-key replacement that the Host has already made the focused block
+        // does not inherit the previous dim role: the key proves semantic object
+        // continuity, not presentation-role continuity. The focused block is
+        // represented by having no block opacity owner at all.
+        if (key && key === focusedKey) return [];
         const old = key && previous.get(key);
         return old && !paints.has(element) && element.isConnected ? [{ element, old, base: Number(getComputedStyle(element).opacity) }] : [];
       });
+      ZENTYPE_DEBUG: if (focusedKey && added.some(element => visualKey(element) === focusedKey)) {
+        debug?.record("ripple", "replacement-role-invalidated", {
+          key: focusedKey, reason: "focused-structural-replacement", carried: false,
+        });
+      }
       return () => {
         if (paints.size + replacements.length > STRUCTURE_LIMITS.nodes) {
           ZENTYPE_DEBUG: debug?.record("ripple", "ownership-limit", { phase: "replacement" });
@@ -120,7 +130,9 @@ export function createBlockPainter(debug?: DebugRecorder) {
     prepare(targets: ReadonlyMap<HTMLElement, number>, editor: HTMLElement, reducedMotion: boolean) {
       const old = snapshot();
       const byKey = new Map<string, number>();
-      for (const [element, paint] of paints) if (paint.key) byKey.set(paint.key, old.get(element)!);
+      // Current semantic projection. A detached owner is no longer presenting
+      // anything, so its value must not be folded onto a live replacement.
+      for (const [element, paint] of paints) if (paint.key && element.isConnected) byKey.set(paint.key, old.get(element)!);
       // Match replacement owners and ancestors against the previous committed
       // bindings, even if SiYuan inserted before removing the old DOM element.
       for (const target of targets.keys()) {

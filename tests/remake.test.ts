@@ -1073,7 +1073,7 @@ test("structural handoff binds geometry stability to semantic block identity", (
   assert.equal(gate.sample(replaced, 32), "geometry");
   assert.deepEqual(gate.handoff(), {
     generation: 1, topologyChanged: true, fromBlockKey: "same-block", toBlockKey: "same-block",
-    identityReady: true, geometryReady: true, semanticReady: false,
+    geometryReady: true, semanticReady: false,
   });
   assert.equal(gate.sample(replaced, 56), "commit");
   assert.equal(gate.handoff()?.semanticReady, true);
@@ -1089,102 +1089,6 @@ test("structural handoff binds geometry stability to semantic block identity", (
   assert.equal(nextGate.sample({ ...initial, block: different as unknown as HTMLElement }, 48), "geometry");
   assert.equal(nextGate.handoff()?.toBlockKey, "different-block");
 }));
-
-test("structural identity becomes ready before caret geometry and topology quiet", () => withPresentation(() => {
-  const editor = new PaintElement();
-  const destination = new PaintElement();
-  destination.dataset.nodeId = "destination-block";
-  const records: Array<{ name: string; payload: Record<string, unknown> }> = [];
-  const gate = createStructureGate({
-    record: (_source: string, name: string, payload: Record<string, unknown>) => records.push({ name, payload }),
-  } as never);
-  const base = frame({ editor: editor as unknown as HTMLElement, block: destination as unknown as HTMLElement,
-    caret: { x: 320, y: 360, height: 20 } });
-
-  gate.intent(editor as unknown as HTMLElement, 0);
-  gate.mutation(editor as unknown as HTMLElement, 4, "structural");
-  assert.equal(gate.sample(base, 16), "wait");
-  assert.deepEqual(gate.handoff(), {
-    generation: 1, topologyChanged: true, fromBlockKey: null, toBlockKey: "destination-block",
-    identityReady: true, geometryReady: false, semanticReady: false,
-  });
-  assert.deepEqual(records.find(record => record.name === "structure-identity-ready")?.payload, {
-    now: 16, generation: 1, topologyChanged: true, fromBlockKey: null, toBlockKey: "destination-block",
-  });
-
-  assert.equal(gate.sample(base, 32), "geometry");
-  assert.deepEqual(gate.handoff(), {
-    generation: 1, topologyChanged: true, fromBlockKey: null, toBlockKey: "destination-block",
-    identityReady: true, geometryReady: true, semanticReady: false,
-  });
-
-  assert.equal(gate.sample(base, 52), "commit");
-  assert.deepEqual(gate.handoff(), {
-    generation: 1, topologyChanged: true, fromBlockKey: null, toBlockKey: "destination-block",
-    identityReady: true, geometryReady: true, semanticReady: true,
-  });
-  assert.equal(records.filter(record => record.name === "structure-identity-ready").length, 1);
-  assert.equal(records.filter(record => record.name === "structure-geometry-ready").length, 1);
-}));
-
-test("structural identity fails closed without an authoritative block, caret or editor", () => withPresentation(() => {
-  const editor = new PaintElement();
-  const destination = new PaintElement();
-  const caretless = new PaintElement();
-  destination.dataset.nodeId = "destination-block";
-  caretless.dataset.nodeId = "caretless-block";
-  const cases: Array<[string, EditorFrame | null]> = [
-    ["missing frame", null],
-    ["missing selection", frame({ editor: editor as unknown as HTMLElement, block: destination as unknown as HTMLElement,
-      selection: "missing", caret: null })],
-    ["caretless block", frame({ editor: editor as unknown as HTMLElement, block: caretless as unknown as HTMLElement,
-      caretless: true, caret: null })],
-    ["missing block", frame({ editor: editor as unknown as HTMLElement, block: null, caret: null })],
-    ["block without a semantic key", frame({ editor: editor as unknown as HTMLElement,
-      block: new PaintElement() as unknown as HTMLElement, caret: null })],
-  ];
-  for (const [name, sample] of cases) {
-    const gate = createStructureGate();
-    gate.intent(editor as unknown as HTMLElement, 0);
-    gate.mutation(editor as unknown as HTMLElement, 4, "structural");
-    assert.equal(gate.sample(sample, 16), "wait", name);
-    assert.equal(gate.handoff(), null, name);
-  }
-  // A range selection cancels the transaction outright; native ownership wins.
-  const ranged = createStructureGate();
-  ranged.intent(editor as unknown as HTMLElement, 0);
-  ranged.mutation(editor as unknown as HTMLElement, 4, "structural");
-  assert.equal(ranged.sample(frame({ editor: editor as unknown as HTMLElement,
-    block: destination as unknown as HTMLElement, selection: "range", caret: null }), 16), "ordinary");
-  assert.equal(ranged.handoff(), null);
-  const foreign = createStructureGate();
-  const other = new PaintElement();
-  foreign.intent(editor as unknown as HTMLElement, 0);
-  foreign.mutation(editor as unknown as HTMLElement, 4, "structural");
-  assert.equal(foreign.sample(frame({ editor: other as unknown as HTMLElement,
-    block: destination as unknown as HTMLElement }), 16), "ordinary");
-  assert.equal(foreign.handoff(), null);
-}));
-
-test("non-structural evidence never publishes structural identity", () => withPresentation(() => {
-  const editor = new PaintElement();
-  const block = new PaintElement();
-  block.dataset.nodeId = "block";
-  const records: Array<{ name: string; payload: Record<string, unknown> }> = [];
-  const gate = createStructureGate({
-    record: (_source: string, name: string, payload: Record<string, unknown>) => records.push({ name, payload }),
-  } as never);
-  const base = frame({ editor: editor as unknown as HTMLElement, block: block as unknown as HTMLElement });
-
-  gate.intent(editor as unknown as HTMLElement, 0, "backspace");
-  gate.mutation(editor as unknown as HTMLElement, 4, "text", true);
-  gate.input();
-  assert.equal(gate.sample(base, 16), "wait");
-  gate.mutation(editor as unknown as HTMLElement, 52, "text", true);
-  assert.equal(gate.sample(base, 104), "ordinary");
-  assert.equal(records.some(record => record.name === "structure-identity-ready"), false);
-}));
-
 
 test("unknown structural origin remains null instead of being backfilled from the destination", () => withPresentation(() => {
   const editor = new PaintElement();
@@ -1346,77 +1250,206 @@ test("Session withholds native text evidence until delayed host structure settle
   assert.ok(harness.events.filter(event => event.name === "prepare").length > prepared);
 }, { typewriter: true, ripple: true }));
 
-test("structural identity never changes Ripple ownership before the semantic commit", () => withSessionHarness(harness => {
-  const source = harness.editable;
+/** Ad-hoc harness blocks need their own closest() for the live-Selection probe. */
+function linkBlock(element: PaintElement, nodeId: string, editor: PaintElement): PaintElement {
+  element.dataset.nodeId = nodeId;
+  element.parentElement = editor;
+  Object.assign(element, { closest: (selector: string) =>
+    selector === "[data-node-id]" ? element : selector === ".protyle-wysiwyg" ? editor : null });
+  return element;
+}
+
+test("a structural replacement that becomes the focused block does not inherit the dim role", () => withSessionHarness(harness => {
+  const focused = harness.editable;
   const destination = new PaintElement();
-  source.dataset.nodeId = "source-block";
-  destination.dataset.nodeId = "destination-block";
-  destination.parentElement = source.parentElement = harness.editor;
-  destination.nextElementSibling = source;
-  source.previousElementSibling = destination;
-  harness.editor.children = [destination, source];
-  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range,
-    editable: source as unknown as HTMLElement, block: source as unknown as HTMLElement });
+  focused.dataset.nodeId = "B";
+  destination.dataset.nodeId = "A";
+  destination.parentElement = focused.parentElement = harness.editor;
+  destination.nextElementSibling = focused;
+  focused.previousElementSibling = destination;
+  harness.editor.children = [destination, focused];
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
   harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
   harness.tick(0);
   const dim = destination.animations.at(-1)!;
   dim.currentTime = MOTION.blockFadeMs;
-  const overlay = harness.body.children[0];
-  const origin = overlay.style.transform;
+  assert.equal(dim.frames[1].opacity, RIPPLE_LEVELS[1]);
 
-  harness.dispatch(4, "keydown", { key: "Backspace", defaultPrevented: false });
-  source.isConnected = false;
-  source.parentElement = null;
-  source.previousElementSibling = null;
-  destination.nextElementSibling = null;
-  harness.editor.children = [destination];
-  harness.mutate(6, [{ type: "childList", target: harness.editor,
-    addedNodes: [], removedNodes: [source] } as unknown as MutationRecord]);
-  harness.setFrame({ ...harness.getFrame(), editable: destination as unknown as HTMLElement,
-    block: destination as unknown as HTMLElement, range: {} as Range,
+  // Host merge: the destination is re-rendered as a fresh same-key element, the
+  // focused source is removed, and the live collapsed Selection already sits
+  // inside the replacement.
+  const replacement = linkBlock(new PaintElement(), "A", harness.editor);
+  destination.isConnected = false;
+  focused.isConnected = false;
+  harness.setSelection("caret", replacement as unknown as Node);
+  harness.setFrame({ ...harness.getFrame(), editable: replacement as unknown as HTMLElement,
+    block: replacement as unknown as HTMLElement, range: {} as Range,
     caret: { x: 220, y: 420, height: 20 } });
+  harness.mutate(6, [{ type: "childList", target: harness.editor,
+    addedNodes: [replacement], removedNodes: [destination, focused] } as unknown as MutationRecord]);
 
-  // Identity readiness is evidence about the Host, not a destination opacity
-  // command: the committed dim owner is neither released nor promoted here, and
-  // Cursor authority has not moved.
+  assert.equal(replacement.animations.length, 0);
+  assert.ok(harness.events.some(event => event.name === "replacement-role-invalidated" &&
+    event.payload.key === "A" && event.payload.reason === "focused-structural-replacement"));
+
+  // The semantic commit must not fold the detached predecessor back either.
   harness.tick(16);
-  assert.ok(harness.events.some(event => event.name === "structure-identity-ready"));
-  assert.equal(dim.playState, "paused");
-  assert.equal(destination.animations.length, 1);
-  assert.equal(overlay.style.transform, origin);
-  assert.equal(harness.events.some(event => event.name === "structure-geometry-ready"), false);
-
   harness.tick(32);
-  assert.ok(harness.events.some(event => event.name === "structure-geometry-ready"));
-  assert.notEqual(overlay.style.transform, origin);
-  assert.equal(destination.animations.length, 1);
-
-  // Only the semantic commit may re-plan the neighborhood: the existing owner is
-  // retargeted from its committed value to the authoritative focused value.
   harness.tick(80);
   assert.ok(harness.events.some(event => event.name === "structure-commit"));
-  const retarget = destination.animations.at(-1)!;
-  assert.notEqual(retarget, dim);
-  assert.equal(retarget.frames[0].opacity, RIPPLE_LEVELS[1]);
-  assert.equal(retarget.frames[1].opacity, 1);
+  assert.equal(replacement.animations.length, 0);
 }, { typewriter: false, ripple: true }));
 
-test("Session never publishes structural identity for ordinary or range evidence", () => withSessionHarness(harness => {
+test("a representation replacement keeps its committed presentation role", () => withSessionHarness(harness => {
+  const focused = harness.editable;
+  focused.dataset.nodeId = "B";
+  const neighbor = new PaintElement();
+  neighbor.dataset.nodeId = "A";
+  neighbor.parentElement = harness.editor;
+  neighbor.nextElementSibling = focused;
+  focused.previousElementSibling = neighbor;
+  harness.editor.children = [neighbor, focused];
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
+  harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
   harness.tick(0);
-  setTextCaret(harness);
-  harness.dispatch(0, "keydown", { key: "Backspace", defaultPrevented: false });
-  harness.dispatch(4, "input", { inputType: "deleteContentBackward", isComposing: false });
-  harness.mutate(6, [{ type: "characterData", target: harness.editable,
-    addedNodes: [], removedNodes: [] } as unknown as MutationRecord]);
-  harness.tick(16);
-  assert.equal(harness.events.some(event => event.name === "structure-identity-ready"), false);
+  const dim = neighbor.animations.at(-1)!;
+  dim.currentTime = MOTION.blockFadeMs;
+  assert.equal(dim.frames[1].opacity, RIPPLE_LEVELS[1]);
 
-  harness.dispatch(20, "keydown", { key: "Tab", defaultPrevented: false });
-  harness.setSelection("range");
-  harness.setFrame({ ...harness.getFrame(), selection: "range", range: null, caret: null });
-  harness.tick(36);
-  assert.equal(harness.events.some(event => event.name === "structure-identity-ready"), false);
+  // Balanced same-key remove/add: representation, not a topology change.
+  const replacement = new PaintElement();
+  replacement.dataset.nodeId = "A";
+  replacement.parentElement = harness.editor;
+  neighbor.isConnected = false;
+  harness.mutate(6, [{ type: "childList", target: harness.editor,
+    addedNodes: [replacement], removedNodes: [neighbor] } as unknown as MutationRecord]);
+
+  const carried = replacement.animations.at(-1)!;
+  assert.equal(carried.frames[0].opacity, RIPPLE_LEVELS[1]);
+  assert.equal(carried.frames[1].opacity, RIPPLE_LEVELS[1]);
+  assert.equal(carried.playState, "paused");
+  assert.equal(harness.events.some(event => event.name === "replacement-role-invalidated"), false);
 }, { typewriter: false, ripple: true }));
+
+test("a structural replacement outside the focused block still carries", () => withSessionHarness(harness => {
+  const focused = harness.editable;
+  focused.dataset.nodeId = "B";
+  const neighbor = new PaintElement();
+  const removed = new PaintElement();
+  neighbor.dataset.nodeId = "A";
+  removed.dataset.nodeId = "C";
+  neighbor.parentElement = removed.parentElement = harness.editor;
+  neighbor.nextElementSibling = focused;
+  focused.previousElementSibling = neighbor;
+  harness.editor.children = [neighbor, focused, removed];
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
+  harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
+  harness.tick(0);
+  neighbor.animations.at(-1)!.currentTime = MOTION.blockFadeMs;
+
+  // Structural, but the live Selection stays in the untouched focused block.
+  const replacement = new PaintElement();
+  replacement.dataset.nodeId = "A";
+  replacement.parentElement = harness.editor;
+  neighbor.isConnected = false;
+  removed.isConnected = false;
+  harness.setSelection("caret", focused as unknown as Node);
+  harness.mutate(6, [{ type: "childList", target: harness.editor,
+    addedNodes: [replacement], removedNodes: [neighbor, removed] } as unknown as MutationRecord]);
+
+  const carried = replacement.animations.at(-1)!;
+  assert.equal(carried.frames[0].opacity, RIPPLE_LEVELS[1]);
+  assert.equal(carried.frames[1].opacity, RIPPLE_LEVELS[1]);
+  assert.equal(harness.events.some(event => event.name === "replacement-role-invalidated"), false);
+}, { typewriter: false, ripple: true }));
+
+test("a range selection never invalidates a replacement role", () => withSessionHarness(harness => {
+  const focused = harness.editable;
+  focused.dataset.nodeId = "B";
+  const neighbor = new PaintElement();
+  const removed = new PaintElement();
+  neighbor.dataset.nodeId = "A";
+  removed.dataset.nodeId = "C";
+  neighbor.parentElement = removed.parentElement = harness.editor;
+  neighbor.nextElementSibling = focused;
+  focused.previousElementSibling = neighbor;
+  harness.editor.children = [neighbor, focused, removed];
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
+  harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
+  harness.tick(0);
+  neighbor.animations.at(-1)!.currentTime = MOTION.blockFadeMs;
+
+  const replacement = linkBlock(new PaintElement(), "A", harness.editor);
+  neighbor.isConnected = false;
+  removed.isConnected = false;
+  harness.setSelection("range");
+  harness.mutate(6, [{ type: "childList", target: harness.editor,
+    addedNodes: [replacement], removedNodes: [neighbor, removed] } as unknown as MutationRecord]);
+
+  const carried = replacement.animations.at(-1)!;
+  assert.equal(carried.frames[0].opacity, RIPPLE_LEVELS[1]);
+  assert.equal(harness.events.some(event => event.name === "replacement-role-invalidated"), false);
+}, { typewriter: false, ripple: true }));
+
+test("invalidating a focused replacement is a no-op when the block had no owner", () => withSessionHarness(harness => {
+  const focused = harness.editable;
+  focused.dataset.nodeId = "F";
+  const removed = new PaintElement();
+  removed.dataset.nodeId = "X";
+  removed.parentElement = harness.editor;
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
+  harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
+  harness.tick(0);
+  // The focused block is represented by having no block opacity owner.
+  assert.equal(focused.animations.length, 0);
+
+  const replacement = linkBlock(new PaintElement(), "F", harness.editor);
+  focused.isConnected = false;
+  removed.isConnected = false;
+  harness.setSelection("caret", replacement as unknown as Node);
+  harness.mutate(6, [{ type: "childList", target: harness.editor,
+    addedNodes: [replacement], removedNodes: [focused, removed] } as unknown as MutationRecord]);
+  assert.equal(replacement.animations.length, 0);
+}, { typewriter: false, ripple: true }));
+
+test("a detached owner no longer enters the current semantic projection", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const old = new PaintElement();
+  const fresh = new PaintElement();
+  old.dataset.nodeId = fresh.dataset.nodeId = "K";
+  fresh.parentElement = editor;
+  const painter = createBlockPainter();
+  painter.prepare(new Map([[old as unknown as HTMLElement, RIPPLE_LEVELS[1]]]), editor as unknown as HTMLElement, false)();
+  old.animations.at(-1)!.currentTime = MOTION.blockFadeMs;
+  old.isConnected = false;
+
+  painter.prepare(new Map([[fresh as unknown as HTMLElement, 1]]), editor as unknown as HTMLElement, false)();
+  assert.equal(fresh.animations.length, 0);
+  assert.equal(painter.size(), 0);
+  painter.clear();
+}));
+
+test("a connected replacement still contributes its carried value", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const old = new PaintElement();
+  const fresh = new PaintElement();
+  old.dataset.nodeId = fresh.dataset.nodeId = "K";
+  fresh.parentElement = editor;
+  const painter = createBlockPainter();
+  painter.prepare(new Map([[old as unknown as HTMLElement, RIPPLE_LEVELS[1]]]), editor as unknown as HTMLElement, false)();
+  old.animations.at(-1)!.currentTime = MOTION.blockFadeMs;
+  old.isConnected = false;
+  const carry = painter.rebind([fresh as unknown as HTMLElement]);
+  painter.freeze();
+  carry();
+  assert.equal(fresh.animations.at(-1)!.frames[1].opacity, RIPPLE_LEVELS[1]);
+
+  painter.prepare(new Map([[fresh as unknown as HTMLElement, RIPPLE_LEVELS[2]]]), editor as unknown as HTMLElement, false)();
+  const stepped = fresh.animations.at(-1)!;
+  assert.equal(stepped.frames[0].opacity, RIPPLE_LEVELS[1]);
+  assert.equal(stepped.frames[1].opacity, RIPPLE_LEVELS[2]);
+  painter.clear();
+}));
 
 test("Session routes typing, navigation and structural CursorIntent independently", () => withSessionHarness(harness => {
   harness.tick(0);
@@ -2295,7 +2328,12 @@ test("replacement handoff never writes host opacity or repairs ambiguous legacy 
       ripple.prepare({ ...input, block: merged as unknown as HTMLElement,
         editable: merged as unknown as HTMLElement }, true, true, true);
       assert.equal(merged.style.opacity, replacementStyle);
-      merged.animations.at(-1)!.onfinish!();
+      // A detached predecessor is no longer current presentation truth, so its
+      // committed binding must not be folded onto the live replacement; a still
+      // connected predecessor still contributes it.
+      assert.equal(merged.animations.length, connected ? 1 : 0);
+      assert.equal(merged.style.opacity ?? "", replacementStyle);
+      merged.animations.at(-1)?.onfinish?.();
       const expected = replacementStyle;
       assert.equal(merged.style.opacity ?? "", expected);
       assert.equal(merged.classes.has("zentype-ripple-block"), false);
