@@ -62,22 +62,22 @@ const json = debug.exportRecording();
 
 ## 诊断限制
 
-### remake.2.2 结构事务
+### v2.9.0-remake.2.5 Structural Contract
 
 Session 的 `structure-*` 事件来自共享 gate，不增加 snapshot、observer 或 scheduler：
 
-- `structure-intent`：输入可能编辑结构，尚无宿主证据。
+- `structure-intent`：输入可能编辑结构，尚无宿主证据；若可得，同时记录 `fromBlockKey`。
 - `structure-generation-superseded`：新的明确结构输入替换同一 editor 的旧 pending generation；presentation 保持不变。
 - `structure-begin` / `structure-evidence`：mutation classifier 发现结构变化或观察预算溢出。
 - `structure-activity`：input、Selection 或 mutation 打断了安静窗口。
 - `structure-sample`：intent 阶段记录 input/non-structural observation 与等待/ordinary 原因；evidence 阶段记录 caret、quiet、stableFrames、`geometryReady`、`semanticReady` 与等待/geometry/commit 原因。
-- `structure-geometry-ready`：同一 generation 的连续可信 caret geometry 首次达到两次稳定采样；只授权 Cursor，不代表 Ripple/Typewriter 已获得 semantic commit。
+- `structure-geometry-ready`：同一 generation 的连续可信 caret geometry 首次达到两次稳定采样；只授权 Cursor，不代表 Ripple/Typewriter 已获得 semantic commit。结构样本带有 `topologyChanged`、`fromBlockKey`、`toBlockKey`、`geometryReady` 和 `semanticReady`。
 - `ordinary-delete-admitted`：严格的 characterData-only、折叠且位于文本节点内部的 Backspace/Delete 直接通过 ordinary admission。
 - `structure-stable` / `structure-commit`：安静窗口和连续几何采样通过，允许统一提交。
 - `structure-timeout` / `structure-release`：没有证明稳定，释放效果；不能把它当成成功提交。
 - `structure-cancel`：ordinary 已经通过 strict fast admission 或 quiet confirmation，或用户抢占、生命周期取消。
 
-Ripple 的 `presentation-hold`、`replacement-carry`、`ownership-commit`、`stale-recovery` 与 `ownership-limit` 解释暂停、旧 owner 接管、最终计划、低频异常生命周期回收和有界退让。`blockCount` 表示内存中持有的 WAAPI effects；正常 block 绘制不再生成 `.zentype-ripple-block` 或 inline opacity。动画 id 为 `zentype-ripple`，仅用于精确识别插件所有权，不是 DOM 属性或持久 registry。
+Cursor 的 `render` 事件记录 `intent`（`typing` / `navigation` / `structural`）以及 `currentX/currentY`、`targetX/targetY`、`xVelocity/yVelocity/heightVelocity`，用于区分错误的 typing response、陈旧 target 和 velocity carry。Ripple 的 `presentation-hold`、`replacement-carry`、`ownership-commit`、`stale-recovery` 与 `ownership-limit` 解释暂停、旧 owner 接管、最终计划、低频异常生命周期回收和有界退让。`blockCount` 表示内存中持有的 WAAPI effects；正常 block 绘制不再生成 `.zentype-ripple-block` 或 inline opacity。动画 id 为 `zentype-ripple`，仅用于精确识别插件所有权，不是 DOM 属性或持久 registry。
 
 仓库未包含此次用户提到的原始 DebugKit JSON；不能把人工序列或代码推断标成 trace-derived evidence。deterministic ordering 已自动测试；当前环境没有 Docker、本地思源进程或 Chromium binary，因此没有把 marker/布局连续性标成真实宿主观测。
 

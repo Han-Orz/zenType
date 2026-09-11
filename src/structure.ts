@@ -5,6 +5,16 @@ import type { DebugRecorder } from "./debug/types";
 export type MutationKind = "text" | "representation" | "structural" | "overflow";
 export const STRUCTURE_LIMITS = { records: 256, nodes: 2048, depth: 64 } as const;
 type IntentKind = "backspace" | "delete" | "other";
+export type StructureDecision = "ordinary" | "wait" | "geometry" | "commit" | "timeout" | "overflow";
+
+export interface StructuralHandoff {
+  generation: number;
+  topologyChanged: boolean;
+  fromBlockKey: string | null;
+  toBlockKey: string | null;
+  geometryReady: boolean;
+  semanticReady: boolean;
+}
 
 interface PendingStructure {
   generation: number;
@@ -20,7 +30,7 @@ interface PendingStructure {
   stable: number;
   geometryPublished: boolean;
   caret: CursorRect | null;
-  block: HTMLElement | null;
+  handoff: StructuralHandoff;
 }
 
 /** Includes marker identity, but markers are not semantic blocks. */
@@ -28,6 +38,11 @@ export function visualKey(element: HTMLElement): string | undefined {
   if (!element.classList.contains("protyle-action")) return element.dataset.nodeId;
   const parent = element.parentElement?.dataset.nodeId;
   return parent ? parent + ":action" : undefined;
+}
+
+/** Semantic blocks use their Host key; DOM object identity is only a sample handle. */
+export function semanticBlockKey(block: HTMLElement | null): string | null {
+  return block?.dataset.nodeId ?? null;
 }
 
 /** Mutation records supply the *old* parent of a moved root; live parentElement cannot. */
@@ -94,37 +109,60 @@ function hasSafeOrdinaryTextPosition(frame: EditorFrame | null, intent: IntentKi
   return true;
 }
 
-/** Clock-free policy: Session owns observation, sampling, rAF and the deadline wake. */
+/** Session supplies the monotonic time; the gate owns no clock, rAF or wake. */
 export function createStructureGate(debug?: DebugRecorder) {
   let pending: PendingStructure | null = null;
   let nextGeneration = 0;
+  let lastHostEditor: HTMLElement | null = null;
+  let lastHostBlockKey: string | null = null;
+  let publishedHandoff: StructuralHandoff | null = null;
+
+  function rememberHost(frame: EditorFrame | null) {
+    if (!frame || frame.selection !== "caret") return;
+    if (lastHostEditor !== frame.editor) {
+      lastHostEditor = frame.editor;
+      lastHostBlockKey = null;
+    }
+    if (frame.block) lastHostBlockKey = semanticBlockKey(frame.block);
+  }
+
   function cancel(reason: string) {
     ZENTYPE_DEBUG: if (pending) debug?.record("session", "structure-cancel", { reason });
     pending = null;
+    publishedHandoff = null;
   }
   function createPending(editor: HTMLElement, now: number, evidence: "structural" | "overflow" | null,
-    intent: IntentKind): PendingStructure {
-    return { generation: ++nextGeneration, editor, start: now, activity: now, evidence, intent,
+    intent: IntentKind, fromBlockKey?: string | null): PendingStructure {
+    const generation = ++nextGeneration;
+    return { generation, editor, start: now, activity: now, evidence, intent,
       inputObserved: false, nonStructuralObserved: false, textObserved: false, replacementObserved: false,
-      stable: 0, geometryPublished: false, caret: null, block: null };
+      stable: 0, geometryPublished: false, caret: null,
+      handoff: { generation, topologyChanged: evidence === "structural",
+        fromBlockKey: fromBlockKey === undefined ? lastHostEditor === editor ? lastHostBlockKey : null : fromBlockKey,
+        toBlockKey: null, geometryReady: false, semanticReady: false } };
   }
   function begin(editor: HTMLElement, now: number, evidence: "structural" | "overflow" | null) {
     if (pending?.editor !== editor) {
       pending = createPending(editor, now, evidence, "other");
+      publishedHandoff = null;
       ZENTYPE_DEBUG: debug?.record("session", evidence ? "structure-begin" : "structure-intent",
-        { now, generation: pending.generation, intent: pending.intent });
+        { now, generation: pending.generation, intent: pending.intent,
+          fromBlockKey: pending.handoff.fromBlockKey });
     }
   }
-  function intent(editor: HTMLElement, now: number, kind: IntentKind = "other") {
+  function intent(editor: HTMLElement, now: number, kind: IntentKind = "other", fromBlockKey?: string | null) {
     const previous = pending?.editor === editor ? pending : null;
-    pending = createPending(editor, now, null, kind);
+    pending = createPending(editor, now, null, kind, fromBlockKey);
+    publishedHandoff = null;
     ZENTYPE_DEBUG: if (previous) {
       debug?.record("session", "structure-generation-superseded", {
         now, from: previous.generation, to: pending.generation, intent: kind,
+        fromBlockKey: pending.handoff.fromBlockKey,
       });
     } else {
       debug?.record("session", "structure-intent", {
         now, generation: pending.generation, intent: kind,
+        fromBlockKey: pending.handoff.fromBlockKey,
       });
     }
   }
@@ -134,6 +172,10 @@ export function createStructureGate(debug?: DebugRecorder) {
     pending.stable = 0;
     pending.geometryPublished = false;
     pending.caret = null;
+    pending.handoff.geometryReady = false;
+    pending.handoff.semanticReady = false;
+    pending.handoff.toBlockKey = null;
+    publishedHandoff = null;
     ZENTYPE_DEBUG: debug?.record("session", "structure-activity", { now, reason });
   }
   return {
@@ -142,6 +184,7 @@ export function createStructureGate(debug?: DebugRecorder) {
       if (kind === "structural" || kind === "overflow") {
         begin(editor, now, kind);
         pending!.evidence = kind;
+        pending!.handoff.topologyChanged = kind === "structural";
         ZENTYPE_DEBUG: debug?.record("session", "structure-evidence", { now, kind });
       } else if (pending) {
         pending.nonStructuralObserved = true;
@@ -162,7 +205,10 @@ export function createStructureGate(debug?: DebugRecorder) {
         : pending.start + MOTION.structureDeadlineMs;
       return Math.max(1, wakeAt - now);
     },
-    sample(frame: EditorFrame | null, now: number): "ordinary" | "wait" | "geometry" | "commit" | "timeout" | "overflow" {
+    handoff() { return publishedHandoff; },
+    sample(frame: EditorFrame | null, now: number): StructureDecision {
+      publishedHandoff = null;
+      rememberHost(frame);
       if (!pending) return "ordinary";
       if (frame && (frame.editor !== pending.editor || frame.selection === "range")) {
         cancel(frame.selection === "range" ? "selection" : "editor-switch");
@@ -208,20 +254,31 @@ export function createStructureGate(debug?: DebugRecorder) {
       }
       const caret = frame?.caret ?? null;
       const previous = pending.caret;
-      const same = caret && previous && frame?.block === pending.block &&
+      const blockKey = semanticBlockKey(frame?.block ?? null);
+      const same = caret && previous && blockKey === pending.handoff.toBlockKey &&
         Math.hypot(caret.x - previous.x, caret.y - previous.y) <= 0.15 && Math.abs(caret.height - previous.height) <= 0.15;
       pending.stable = caret ? same ? pending.stable + 1 : 1 : 0;
       pending.caret = caret && { ...caret };
-      pending.block = frame?.block ?? null;
+      pending.handoff.toBlockKey = blockKey;
+      if (pending.handoff.fromBlockKey === null && frame?.selection === "caret") {
+        pending.handoff.fromBlockKey = blockKey;
+      }
       const quiet = now - pending.activity;
       const geometryReady = !!frame && frame.selection === "caret" && frame.caretless !== true && pending.stable >= 2;
       const semanticReady = geometryReady && quiet >= MOTION.structureQuietMs;
+      pending.handoff.geometryReady = geometryReady;
+      pending.handoff.semanticReady = semanticReady;
       if (!geometryReady) pending.geometryPublished = false;
       if (geometryReady && !pending.geometryPublished) {
         pending.geometryPublished = true;
+        publishedHandoff = pending.handoff;
         ZENTYPE_DEBUG: debug?.record("session", "structure-geometry-ready", {
           now, quiet, stableFrames: pending.stable, generation: pending.generation,
-          caret: caret ? { ...caret } : null, block: frame?.block?.dataset.nodeId ?? null,
+          caret: caret ? { ...caret } : null, block: blockKey,
+          topologyChanged: pending.handoff.topologyChanged,
+          fromBlockKey: pending.handoff.fromBlockKey,
+          toBlockKey: pending.handoff.toBlockKey,
+          geometryReady: true, semanticReady,
         });
       }
       const expired = elapsed >= MOTION.structureDeadlineMs;
@@ -230,9 +287,13 @@ export function createStructureGate(debug?: DebugRecorder) {
         : "awaiting-stable-geometry";
       ZENTYPE_DEBUG: debug?.record("session", "structure-sample", { now, quiet, stableFrames: pending.stable,
         state: "structural", evidence: pending.evidence, generation: pending.generation,
-        caret: caret ? { ...caret } : null, geometryReady, semanticReady, decision, reason });
+        caret: caret ? { ...caret } : null, geometryReady, semanticReady, decision, reason,
+        topologyChanged: pending.handoff.topologyChanged,
+        fromBlockKey: pending.handoff.fromBlockKey,
+        toBlockKey: pending.handoff.toBlockKey });
       if (semanticReady || expired) {
         const result = semanticReady ? "commit" : "timeout";
+        if (semanticReady) publishedHandoff = pending.handoff;
         ZENTYPE_DEBUG: debug?.record("session", semanticReady ? "structure-stable" : "structure-timeout", {
           now, elapsed, generation: pending.generation,
         });

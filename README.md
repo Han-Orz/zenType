@@ -1,4 +1,4 @@
-# zenType v2.9.0-remake.2.4-structural.2
+# zenType v2.9.0-remake.2.5-structural.1
 
 Smooth cursor, typewriter scrolling and ripple focus for SiYuan. The critical-motion development build keeps one Session/rAF coordinator while giving Cursor, Typewriter and sentence Ripple state their own analytic critical-damping motion.
 
@@ -12,7 +12,7 @@ A missing caret rectangle keeps the current presentation for a bounded 160ms rec
 
 Typewriter motion starts from an actual scroll position, then advances a separate virtual position so quantized browser readback cannot stall it; it supports reverse retargeting and yields to browsing and unexpected host scrolling. Ripple retains current brightness across navigation and unambiguous local text edits. New DOM bindings do not inherit historical animation identities.
 
-Potential structural edits withhold new Typewriter and Ripple targets until host evidence is either confirmed ordinary or semantically quiet. After two continuous, trustworthy caret samples, the Cursor may retarget at `geometry-ready`; full structural ownership still waits for 48ms of quiet. Input alone never disproves structural intent, and every path remains bounded by 160ms.
+Potential structural edits withhold new Typewriter and Ripple targets until host evidence is either confirmed ordinary or semantically quiet. After two continuous, trustworthy caret samples, the Cursor may retarget at `geometry-ready` with a softer distance-aware relocation; full structural ownership still waits for 48ms of quiet. Input alone never disproves structural intent, and every path remains bounded by 160ms.
 
 The topbar button or Ctrl+Alt+Z toggles typewriter and ripple together. The smooth cursor remains independently enabled. Reduced motion disables movement and breathing.
 
@@ -31,7 +31,7 @@ npm run verify:prod
 
 Development output: `dev/`. Production output: `dist/`. Installable archive: `package.zip`.
 
-Disable zenType, back up the existing installation outside the plugins directory, extract the archive into your SiYuan workspace's `data/plugins/zenType/`, then enable it. Do not run two copies. The topbar tooltip identifies `v2.9.0-remake.2.3-critical.6`; the numeric plugin manifest version is `2.9.0`.
+Disable zenType, back up the existing installation outside the plugins directory, extract the archive into your SiYuan workspace's `data/plugins/zenType/`, then enable it. Do not run two copies. The topbar tooltip identifies `v2.9.0-remake.2.5-structural.1`; the numeric plugin manifest version is `2.9.0`.
 
 Existing development links can use `dev/`. To create one, use `node scripts/make_dev_link.js --workspace <workspace-path>`; it refuses to overwrite an existing installation.
 

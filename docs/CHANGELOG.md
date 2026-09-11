@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.9.0-remake.2.5-structural.1 (2026-09-11) — Architecture closeout and structural handoff
+
+- Canonical architecture now defines five responsibilities: Host Truth, Structural Contract, Session Authority, Feature Semantics, and Motion + Painter.
+- `structure.ts` exposes the minimal structural handoff context: generation, topology change, semantic from/to block keys, geometry readiness and semantic readiness; stable binding uses semantic block identity rather than HTMLElement equality.
+- Session routes `CursorIntent` explicitly, so structural geometry relocation uses its independent structural branch and the existing navigation distance-aware response law instead of the 55ms typing response.
+- Selection → Caret → Structural Edit now cancels the stale transaction and requires a fresh collapsed Selection, active editor/editable and caret frame before a new structural generation can proceed.
+- The existing 48ms quiet window, 160ms deadline, generation supersession, ordinary deletion fast path, Critical Motion parameters, Ripple/WAAPI backend and one-Session scheduling remain unchanged. FLIP, global structure animation and new motion calibration remain deferred.
+
 ## v2.9.0-remake.2.4-structural.2 (2026-09-11) — Structural geometry handoff
 
 - StructureGate now separates two continuous caret samples (`geometry-ready`) from the existing 48ms semantic quiet required for full structural commit.

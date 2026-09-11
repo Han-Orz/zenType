@@ -151,19 +151,19 @@ test("cursor transports scroll, transfers editable ownership, and survives a sho
     const secondOwner = new ElementStub();
     const input = frame({ editable: firstOwner as unknown as HTMLElement, scrollTop: 0,
       caret: { x: 100, y: 200, height: 20 } });
-    cursor.render(input, 1000, true);
-    cursor.render({ ...input, scrollTop: 30, caret: { x: 100, y: 170, height: 20 } }, 1016, true);
+    cursor.render(input, 1000, "typing");
+    cursor.render({ ...input, scrollTop: 30, caret: { x: 100, y: 170, height: 20 } }, 1016, "typing");
     const overlay = body.children[0];
     assert.equal(overlay.style.transform, `translate3d(${input.caret!.x}px,${input.caret!.y - 30 - MOTION.caretLiftPx}px,0)`);
     cursor.render({ ...input, editable: secondOwner as unknown as HTMLElement, scrollTop: 30,
-      caret: { x: 140, y: 170, height: 20 } }, 1032, true);
+      caret: { x: 140, y: 170, height: 20 } }, 1032, "typing");
     const x = Number(overlay.style.transform.match(/translate3d\(([^p]+)/)![1]);
     assert.ok(x > 100 && x < 140);
     assert.equal(firstOwner.classes.has("zentype-custom-caret-active"), false);
     assert.equal(secondOwner.classes.has("zentype-custom-caret-active"), true);
-    cursor.render({ ...input, editable: secondOwner as unknown as HTMLElement, scrollTop: 30, caret: null }, 1048, true);
+    cursor.render({ ...input, editable: secondOwner as unknown as HTMLElement, scrollTop: 30, caret: null }, 1048, "typing");
     assert.equal(overlay.hidden, false);
-    cursor.render({ ...input, editable: secondOwner as unknown as HTMLElement, scrollTop: 30, caret: null }, 1300, true);
+    cursor.render({ ...input, editable: secondOwner as unknown as HTMLElement, scrollTop: 30, caret: null }, 1300, "typing");
     assert.equal(overlay.hidden, true);
     assert.equal(secondOwner.classes.has("zentype-custom-caret-active"), true);
     cursor.destroy();
@@ -178,9 +178,9 @@ test("cursor advances x, y and height on the same retarget frame", () => withPre
   const cursor = createCursor();
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement,
     caret: { x: 100, y: 200, height: 20 } });
-  cursor.render(input, 1000, true);
+  cursor.render(input, 1000, "typing");
   const overlay = body.children[0];
-  cursor.render({ ...input, caret: { x: 400, y: 360, height: 36 } }, 1016, true);
+  cursor.render({ ...input, caret: { x: 400, y: 360, height: 36 } }, 1016, "typing");
   const coordinates = overlay.style.transform.match(/translate3d\(([-\d.]+)px,([-\d.]+)px,0\)/);
   assert.ok(coordinates);
   assert.notEqual(Number(coordinates[1]), 100);
@@ -301,6 +301,7 @@ interface SessionHarness {
   events: Array<{ name: string; payload: Record<string, unknown> }>;
   getFrame(): EditorFrame;
   setFrame(next: EditorFrame | null): void;
+  setSelection(mode: "caret" | "range", focusNode?: Node): void;
   dispatch(at: number, type: string, event?: Record<string, unknown>): void;
   mutate(at: number, records: MutationRecord[]): void;
   tick(at: number, rafTimestamp?: number): void;
@@ -320,12 +321,15 @@ function withSessionHarness(run: (harness: SessionHarness) => void, features = {
     let serial = 0;
     let now = 0;
     let reads = 0;
+    let selectionMode: "caret" | "range" = "caret";
     const editor = new PaintElement();
     editor.classes.add("protyle-wysiwyg");
     const editable = new PaintElement();
     editable.dataset.nodeId = "active";
     editable.parentElement = editor;
-    Object.assign(editable, { closest: (selector: string) => selector === ".protyle-wysiwyg" ? editor : null });
+    Object.assign(editable, { closest: (selector: string) => selector === ".protyle-wysiwyg" ? editor :
+      selector === "[data-node-id]" ? editable : null });
+    let selectionFocusNode: Node = editable as unknown as Node;
     const scroll = Object.assign(new PaintElement(), { scrollTop: 300 });
     let current: EditorFrame | null = frame({ editor: editor as unknown as HTMLElement, editable: editable as unknown as HTMLElement,
       block: editable as unknown as HTMLElement, scroll: scroll as unknown as HTMLElement, reducedMotion: true });
@@ -352,6 +356,7 @@ function withSessionHarness(run: (harness: SessionHarness) => void, features = {
     const values: Record<string, unknown> = {
       window: {
         addEventListener: (name: string, callback: (event: Record<string, unknown>) => void) => callbacks.set("window:" + name, callback),
+        getSelection: () => ({ isCollapsed: selectionMode === "caret", focusNode: selectionFocusNode }),
       },
       MutationObserver: Observer,
       ResizeObserver: Resize,
@@ -375,6 +380,10 @@ function withSessionHarness(run: (harness: SessionHarness) => void, features = {
         body, editor, editable, scroll, events, session,
         getFrame: () => { assert.ok(current); return current; },
         setFrame: next => { current = next; },
+        setSelection(mode, focusNode = editable as unknown as Node) {
+          selectionMode = mode;
+          selectionFocusNode = focusNode;
+        },
         dispatch(at, type, event = {}) {
           now = at;
           const callback = callbacks.get(type) ?? callbacks.get("window:" + type);
@@ -479,10 +488,10 @@ test("cursor interrupts breathing from displayed opacity and fades through selec
   } as never;
   const cursor = createCursor(debug);
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
-  for (let now = 1000; now <= 2000; now += 100) cursor.render(input, now, true);
+  for (let now = 1000; now <= 2000; now += 100) cursor.render(input, now, "typing");
   const breathStart = 2000 + MOTION.breatheIdleDelayMs;
-  cursor.render(input, breathStart, false);
-  cursor.render(input, breathStart + 16, false);
+  cursor.render(input, breathStart, "navigation");
+  cursor.render(input, breathStart + 16, "navigation");
   const downSample = renders.at(-1)!;
   const expectedRecovery: CriticalState = {
     value: Number(downSample.alpha), velocity: Number(downSample.alphaVelocity),
@@ -492,7 +501,7 @@ test("cursor interrupts breathing from displayed opacity and fades through selec
   const breathingOpacity = Number(overlay.style.opacity);
   assert.ok(breathingOpacity < 1);
   const interruptAt = breathStart + 32;
-  cursor.render(input, interruptAt, false, true);
+  cursor.render(input, interruptAt, "navigation", true);
   const interruptSample = renders.at(-1)!;
   const interruptedOpacity = Number(overlay.style.opacity);
   assert.ok(interruptedOpacity > 0 && interruptedOpacity < 1);
@@ -502,14 +511,14 @@ test("cursor interrupts breathing from displayed opacity and fades through selec
   assert.ok(Number(downSample.alphaVelocity) < 0);
   assert.ok(Number(interruptSample.alphaVelocity) < 0);
   const recoveredAt = interruptAt + MOTION.cursorAppearResponseMs * 3;
-  cursor.render(input, recoveredAt, false, true);
+  cursor.render(input, recoveredAt, "navigation", true);
   assert.ok(Number(overlay.style.opacity) > breathingOpacity);
   assert.ok(Number(overlay.style.opacity) > interruptedOpacity);
   assert.ok(cursor.yieldSelection(recoveredAt + 16, false));
   assert.equal(overlay.hidden, false);
   assert.ok(Number(overlay.style.opacity) > 0 && Number(overlay.style.opacity) < 1);
   cursor.yieldSelection(recoveredAt + 116, false);
-  cursor.render(input, recoveredAt + 132, false);
+  cursor.render(input, recoveredAt + 132, "navigation");
   assert.equal(overlay.hidden, false);
   assert.ok(Number(overlay.style.opacity) > 0);
   cursor.destroy();
@@ -524,16 +533,16 @@ test("breathing reaches exact low alpha and hands off without a low-hold timer",
   } as never;
   const cursor = createCursor(debug);
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
-  for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, true);
+  for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, "typing");
   const breathStart = 2000 + MOTION.breatheIdleDelayMs;
-  assert.equal(cursor.render(input, breathStart, false), true);
+  assert.equal(cursor.render(input, breathStart, "navigation"), true);
   const overlay = body.children[0];
   const downResponseAt = breathStart + MOTION.breathDownResponseMs;
-  cursor.render(input, downResponseAt, false);
+  cursor.render(input, downResponseAt, "navigation");
   assert.ok(Math.abs(Number(overlay.style.opacity) - 0.1) < 0.001);
   let lowSettledAt = 0;
   for (let now = downResponseAt + 16; now <= breathStart + 3000; now += 16) {
-    cursor.render(input, now, false);
+    cursor.render(input, now, "navigation");
     if (renders.at(-1)?.breathPhase === "hold") {
       lowSettledAt = now;
       break;
@@ -545,10 +554,10 @@ test("breathing reaches exact low alpha and hands off without a low-hold timer",
   assert.equal(lowOpacity, MOTION.breatheLowAlpha);
   assert.equal(cursor.wakeDelay(lowSettledAt), null);
   const upAt = lowSettledAt + 16;
-  assert.equal(cursor.render(input, upAt, false), true);
+  assert.equal(cursor.render(input, upAt, "navigation"), true);
   assert.equal(renders.at(-1)?.breathPhase, "up");
   assert.equal(Number(overlay.style.opacity), lowOpacity);
-  cursor.render(input, upAt + 16, false);
+  cursor.render(input, upAt + 16, "navigation");
   assert.ok(Number(overlay.style.opacity) > lowOpacity);
   assert.ok(Number(overlay.style.opacity) < 1);
   cursor.destroy();
@@ -563,14 +572,14 @@ test("cursor activity restarts the full breathing idle deadline", () => withPres
   } as never;
   const cursor = createCursor(debug);
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
-  for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, true);
+  for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, "typing");
 
   const activityAt = 5000;
-  cursor.render(input, activityAt, false, true);
+  cursor.render(input, activityAt, "navigation", true);
   assert.equal(phases.at(-1), "normal");
-  cursor.render(input, activityAt + MOTION.breatheIdleDelayMs - 1, false);
+  cursor.render(input, activityAt + MOTION.breatheIdleDelayMs - 1, "navigation");
   assert.equal(phases.at(-1), "normal");
-  cursor.render(input, activityAt + MOTION.breatheIdleDelayMs, false);
+  cursor.render(input, activityAt + MOTION.breatheIdleDelayMs, "navigation");
   assert.equal(phases.at(-1), "down");
   cursor.destroy();
 }));
@@ -584,12 +593,12 @@ test("cursor breathing follows normal, down, hold, up, normal phases", () => wit
   } as never;
   const cursor = createCursor(debug);
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
-  for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, true);
+  for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, "typing");
   const downAt = 2000 + MOTION.breatheIdleDelayMs;
-  cursor.render(input, downAt, false);
+  cursor.render(input, downAt, "navigation");
   let lowSettledAt = 0;
   for (let now = downAt + 16; now <= downAt + 3000; now += 16) {
-    cursor.render(input, now, false);
+    cursor.render(input, now, "navigation");
     if (phases.at(-1) === "hold") {
       lowSettledAt = now;
       break;
@@ -597,11 +606,11 @@ test("cursor breathing follows normal, down, hold, up, normal phases", () => wit
   }
   assert.ok(lowSettledAt > downAt);
   const upAt = lowSettledAt + 16;
-  assert.equal(cursor.render(input, upAt, false), true);
+  assert.equal(cursor.render(input, upAt, "navigation"), true);
   assert.equal(phases.at(-1), "up");
   let upSettledAt = 0;
   for (let now = upAt + 16; now <= upAt + 3000; now += 16) {
-    if (!cursor.render(input, now, false)) {
+    if (!cursor.render(input, now, "navigation")) {
       upSettledAt = now;
       break;
     }
@@ -621,12 +630,12 @@ test("next breathing starts only after the post-recovery bright rest", () => wit
   } as never;
   const cursor = createCursor(debug);
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
-  for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, true);
+  for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, "typing");
   const downAt = 2000 + MOTION.breatheIdleDelayMs;
-  cursor.render(input, downAt, false);
+  cursor.render(input, downAt, "navigation");
   let lowSettledAt = 0;
   for (let now = downAt + 16; now <= downAt + 3000; now += 16) {
-    cursor.render(input, now, false);
+    cursor.render(input, now, "navigation");
     if (phases.at(-1) === "hold") {
       lowSettledAt = now;
       break;
@@ -634,11 +643,11 @@ test("next breathing starts only after the post-recovery bright rest", () => wit
   }
   assert.ok(lowSettledAt > downAt);
   const upAt = lowSettledAt + 16;
-  assert.equal(cursor.render(input, upAt, false), true);
+  assert.equal(cursor.render(input, upAt, "navigation"), true);
   assert.equal(phases.at(-1), "up");
   let upSettledAt = 0;
   for (let now = upAt + 16; now <= upAt + 3000; now += 16) {
-    if (!cursor.render(input, now, false)) {
+    if (!cursor.render(input, now, "navigation")) {
       upSettledAt = now;
       break;
     }
@@ -646,9 +655,9 @@ test("next breathing starts only after the post-recovery bright rest", () => wit
   assert.ok(upSettledAt > upAt);
   assert.equal(cursor.wakeDelay(upSettledAt), MOTION.breatheRestMs);
   const beforeRest = upSettledAt + MOTION.breatheRestMs - 1;
-  assert.equal(cursor.render(input, beforeRest, false), false);
+  assert.equal(cursor.render(input, beforeRest, "navigation"), false);
   assert.equal(phases.at(-1), "normal");
-  cursor.render(input, upSettledAt + MOTION.breatheRestMs, false);
+  cursor.render(input, upSettledAt + MOTION.breatheRestMs, "navigation");
   assert.equal(phases.at(-1), "down");
   cursor.destroy();
 }));
@@ -662,13 +671,13 @@ test("cursor avoids a zero-duration low wake and exposes one bounded bright-rest
   } as never;
   const cursor = createCursor(debug);
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
-  for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, true);
+  for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, "typing");
   const downAt = 2000 + MOTION.breatheIdleDelayMs;
-  assert.equal(cursor.render(input, downAt, false), true);
+  assert.equal(cursor.render(input, downAt, "navigation"), true);
   assert.equal(cursor.wakeDelay(downAt), null);
   let lowSettledAt = 0;
   for (let now = downAt + 16; now <= downAt + 3000; now += 16) {
-    cursor.render(input, now, false);
+    cursor.render(input, now, "navigation");
     if (phases.at(-1) === "hold") {
       lowSettledAt = now;
       break;
@@ -677,7 +686,7 @@ test("cursor avoids a zero-duration low wake and exposes one bounded bright-rest
   assert.ok(lowSettledAt > downAt);
   assert.equal(cursor.wakeDelay(lowSettledAt), null);
   const upAt = lowSettledAt + 16;
-  assert.equal(cursor.render(input, upAt, false), true);
+  assert.equal(cursor.render(input, upAt, "navigation"), true);
   assert.equal(phases.at(-1), "up");
   assert.equal(cursor.wakeDelay(upAt), null);
   cursor.destroy();
@@ -686,16 +695,16 @@ test("cursor avoids a zero-duration low wake and exposes one bounded bright-rest
 test("geometry release freezes breathing and fades the outer cursor promptly", () => withPresentation(body => {
   const cursor = createCursor();
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
-  for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, true);
+  for (let now = 1000; now <= 2000; now += 16) cursor.render(input, now, "typing");
   const breathStart = 2000 + MOTION.breatheIdleDelayMs;
-  cursor.render(input, breathStart, false);
-  cursor.render(input, breathStart + 16, false);
+  cursor.render(input, breathStart, "navigation");
+  cursor.render(input, breathStart + 16, "navigation");
   const overlay = body.children[0];
   assert.ok(Number(overlay.style.opacity) < 1);
   cursor.release(breathStart + 32, false);
   for (let now = breathStart + 48; now <= breathStart + 1000 && !overlay.hidden; now += 16) cursor.release(now, false);
   assert.equal(overlay.hidden, true);
-  cursor.render({ ...input, caret: { x: 300, y: 200, height: 20 } }, breathStart + 1016, false);
+  cursor.render({ ...input, caret: { x: 300, y: 200, height: 20 } }, breathStart + 1016, "navigation");
   assert.equal(overlay.style.transform, `translate3d(300px,${200 - MOTION.caretLiftPx}px,0)`);
   assert.ok(Number(overlay.style.opacity) > 0);
   cursor.release(breathStart + 1032, true);
@@ -712,12 +721,12 @@ test("editor switch commits hidden geometry before a full reveal motion", () => 
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
   cursor.switched(input.editor, 1000);
   const overlay = body.children[0];
-  for (let i = 0; i < 7; i++) cursor.render(input, 1000 + i * 16, false);
+  for (let i = 0; i < 7; i++) cursor.render(input, 1000 + i * 16, "navigation");
   assert.equal(overlay.hidden, true);
   const moved = { ...input, caret: { x: 200, y: 300, height: 24 } };
-  for (let i = 0; i < 7; i++) cursor.render(moved, 1112 + i * 16, false);
+  for (let i = 0; i < 7; i++) cursor.render(moved, 1112 + i * 16, "navigation");
   assert.equal(overlay.hidden, true);
-  cursor.render(moved, 1224, false);
+  cursor.render(moved, 1224, "navigation");
   assert.equal(cursor.isSettling(), true);
   assert.equal(overlay.hidden, true);
   assert.equal(overlay.style.opacity, "0");
@@ -728,12 +737,12 @@ test("editor switch commits hidden geometry before a full reveal motion", () => 
   assert.equal(hiddenCommit.payload.alphaVelocity, 0);
   assert.equal(hiddenCommit.payload.revealElapsed, 0);
 
-  cursor.render(moved, 1240, false);
+  cursor.render(moved, 1240, "navigation");
   assert.equal(cursor.isSettling(), true);
   assert.equal(overlay.hidden, false);
   assert.equal(overlay.style.opacity, "0");
   assert.equal(records.at(-1)?.payload.revealElapsed, 0);
-  cursor.render(moved, 1256, false);
+  cursor.render(moved, 1256, "navigation");
   assert.ok(Number(overlay.style.opacity) > 0 && Number(overlay.style.opacity) < 1);
   const expectedReveal: CriticalState = { value: 0, velocity: 0 };
   stepCritical(expectedReveal, 1, 16, MOTION.cursorAppearResponseMs, MOTION.alphaSettleEpsilon);
@@ -742,7 +751,7 @@ test("editor switch commits hidden geometry before a full reveal motion", () => 
 
   let settledAt = 0;
   for (let now = 1272; now <= 5000; now += 16) {
-    cursor.render(moved, now, false);
+    cursor.render(moved, now, "navigation");
     if (!cursor.isSettling()) { settledAt = now; break; }
   }
   assert.ok(settledAt > 1256);
@@ -757,7 +766,7 @@ test("shared authority withholds a transient caret until mutation and geometry s
     record: (_source: string, name: string, payload: Record<string, unknown>) => records.push({ name, payload }),
   } as never);
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
-  cursor.render(input, 1000, true);
+  cursor.render(input, 1000, "typing");
   const overlay = body.children[0];
   const original = overlay.style.transform;
   gate.intent(input.editor, 1016);
@@ -774,8 +783,68 @@ test("shared authority withholds a transient caret until mutation and geometry s
   assert.equal(geometry.payload.quiet, 24);
   assert.deepEqual(geometry.payload.caret, final.caret);
   assert.equal(gate.sample(final, 1088), "commit");
-  cursor.render(final, 1088, true);
+  cursor.render(final, 1088, "structural");
   assert.notEqual(overlay.style.transform, `translate3d(500px,${300 - MOTION.caretLiftPx}px,0)`);
+  cursor.destroy();
+}));
+
+test("structural handoff binds geometry stability to semantic block identity", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const original = new PaintElement();
+  const replacement = new PaintElement();
+  original.dataset.nodeId = replacement.dataset.nodeId = "same-block";
+  const initial = frame({ editor: editor as unknown as HTMLElement,
+    block: original as unknown as HTMLElement, caret: { x: 100, y: 200, height: 20 } });
+  const gate = createStructureGate();
+
+  assert.equal(gate.sample(initial, 0), "ordinary");
+  gate.intent(editor as unknown as HTMLElement, 4);
+  gate.mutation(editor as unknown as HTMLElement, 8, "structural");
+  const replaced = { ...initial, block: replacement as unknown as HTMLElement,
+    caret: { x: 320, y: 360, height: 20 } };
+  assert.equal(gate.sample(replaced, 16), "wait");
+  assert.equal(gate.sample(replaced, 32), "geometry");
+  assert.deepEqual(gate.handoff(), {
+    generation: 1, topologyChanged: true, fromBlockKey: "same-block", toBlockKey: "same-block",
+    geometryReady: true, semanticReady: false,
+  });
+  assert.equal(gate.sample(replaced, 56), "commit");
+  assert.equal(gate.handoff()?.semanticReady, true);
+
+  const different = new PaintElement();
+  different.dataset.nodeId = "different-block";
+  const nextGate = createStructureGate();
+  assert.equal(nextGate.sample(initial, 0), "ordinary");
+  nextGate.intent(editor as unknown as HTMLElement, 4);
+  nextGate.mutation(editor as unknown as HTMLElement, 8, "structural");
+  assert.equal(nextGate.sample(initial, 16), "wait");
+  assert.equal(nextGate.sample({ ...initial, block: different as unknown as HTMLElement }, 32), "wait");
+  assert.equal(nextGate.sample({ ...initial, block: different as unknown as HTMLElement }, 48), "geometry");
+  assert.equal(nextGate.handoff()?.toBlockKey, "different-block");
+}));
+
+test("Cursor structural intent uses the navigation distance-aware response law", () => withPresentation(body => {
+  const records: Array<{ name: string; payload: Record<string, unknown> }> = [];
+  const cursor = createCursor({
+    record: (_source: string, name: string, payload: Record<string, unknown>) => records.push({ name, payload }),
+  } as never);
+  const input = frame({ editable: new PaintElement() as unknown as HTMLElement, reducedMotion: false,
+    caret: { x: 100, y: 200, height: 20 } });
+  cursor.render(input, 1000, "navigation");
+  const moved = { ...input, caret: { x: 500, y: 200, height: 20 } };
+  cursor.render(moved, 1016, "structural");
+
+  const expectedStructural: CriticalState = { value: 100, velocity: 0 };
+  stepCritical(expectedStructural, 500, 16, MOTION.caretNavigationResponseMs + 120, MOTION.cursorSettlePx);
+  const expectedTyping: CriticalState = { value: 100, velocity: 0 };
+  stepCritical(expectedTyping, 500, 16, MOTION.caretTypingResponseMs, MOTION.cursorSettlePx);
+  const actualX = Number(body.children[0].style.transform.match(/translate3d\(([-\d.]+)px/)![1]);
+  assert.equal(records.at(-1)?.payload.intent, "structural");
+  assert.equal(actualX, expectedStructural.value);
+  assert.notEqual(actualX, expectedTyping.value);
+  assert.equal(typeof records.at(-1)?.payload.xVelocity, "number");
+  assert.equal(typeof records.at(-1)?.payload.yVelocity, "number");
+  assert.equal(typeof records.at(-1)?.payload.heightVelocity, "number");
   cursor.destroy();
 }));
 
@@ -824,6 +893,36 @@ test("Session withholds native text evidence until delayed host structure settle
   assert.equal(overlay.style.transform, `translate3d(200px,${300 - MOTION.caretLiftPx}px,0)`);
   assert.ok(harness.events.some(event => event.name === "structure-commit"));
   assert.ok(harness.events.filter(event => event.name === "prepare").length > prepared);
+}, { typewriter: true, ripple: true }));
+
+test("Session routes typing, navigation and structural CursorIntent independently", () => withSessionHarness(harness => {
+  harness.tick(0);
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, caret: { x: 150, y: 300, height: 20 } });
+  harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
+  harness.tick(16);
+  assert.equal(harness.events.filter(event => event.name === "render" && "intent" in event.payload).at(-1)?.payload.intent, "typing");
+
+  harness.dispatch(20, "keydown", { key: "ArrowRight", defaultPrevented: false });
+  harness.setFrame({ ...harness.getFrame(), caret: { x: 220, y: 300, height: 20 } });
+  harness.tick(36);
+  assert.equal(harness.events.filter(event => event.name === "render" && "intent" in event.payload).at(-1)?.payload.intent, "navigation");
+
+  const typewriterFrames = harness.events.filter(event => event.name === "frame" && "requestedScroll" in event.payload).length;
+  const ripplePrepares = harness.events.filter(event => event.name === "prepare").length;
+  harness.dispatch(40, "keydown", { key: "Enter", defaultPrevented: false });
+  const removed = new PaintElement();
+  removed.dataset.nodeId = "removed";
+  harness.mutate(44, [{ type: "childList", target: harness.editor,
+    addedNodes: [], removedNodes: [removed] } as unknown as MutationRecord]);
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, caret: { x: 500, y: 420, height: 20 } });
+  harness.tick(56);
+  harness.tick(72);
+
+  assert.equal(harness.events.filter(event => event.name === "render" && "intent" in event.payload).at(-1)?.payload.intent, "structural");
+  assert.equal(harness.events.filter(event => event.name === "frame" && "requestedScroll" in event.payload).length, typewriterFrames);
+  assert.equal(harness.events.filter(event => event.name === "prepare").length, ripplePrepares);
+  assert.ok(harness.events.some(event => event.name === "structure-geometry-ready" &&
+    event.payload.topologyChanged === true && event.payload.fromBlockKey === "active" && event.payload.toBlockKey === "active"));
 }, { typewriter: true, ripple: true }));
 
 test("ordinary character deletion admits at the first safe text sample", () => withSessionHarness(harness => {
@@ -1061,10 +1160,10 @@ test("typing pause uses the execution clock under rAF skew", () => withSessionHa
   harness.tick(300, 434);
 
   assert.equal(harness.scroll.scrollTop, 300);
-  assert.equal(harness.events.filter(event => event.name === "render" && "typing" in event.payload).at(-1)?.payload.typing, true);
+  assert.equal(harness.events.filter(event => event.name === "render" && "intent" in event.payload).at(-1)?.payload.intent, "typing");
   harness.tick(MOTION.typingPauseMs + 1, MOTION.typingPauseMs + 135);
   assert.ok(harness.scroll.scrollTop > 300);
-  assert.equal(harness.events.filter(event => event.name === "render" && "typing" in event.payload).at(-1)?.payload.typing, false);
+  assert.equal(harness.events.filter(event => event.name === "render" && "intent" in event.payload).at(-1)?.payload.intent, "navigation");
 }));
 
 test("interaction hold uses the execution clock under rAF skew", () => withSessionHarness(harness => {
@@ -1321,24 +1420,24 @@ test("switch settling is bounded through missing geometry and cancelled by lifec
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
   const overlay = body.children[0];
   cursor.switched(input.editor, 1000);
-  for (let i = 0; i < 7; i++) cursor.render(input, 1000 + i * 16, false);
-  cursor.render({ ...input, caret: null }, 1112, false);
-  cursor.render(input, 1128, false);
+  for (let i = 0; i < 7; i++) cursor.render(input, 1000 + i * 16, "navigation");
+  cursor.render({ ...input, caret: null }, 1112, "navigation");
+  cursor.render(input, 1128, "navigation");
   assert.equal(overlay.hidden, true);
-  cursor.render({ ...input, caret: { x: 400, y: 300, height: 20 } }, 1700, false);
+  cursor.render({ ...input, caret: { x: 400, y: 300, height: 20 } }, 1700, "navigation");
   assert.equal(cursor.isSettling(), true);
   assert.equal(overlay.hidden, true);
   assert.equal(overlay.style.transform, `translate3d(400px,${300 - MOTION.caretLiftPx}px,0)`);
-  cursor.render({ ...input, caret: { x: 400, y: 300, height: 20 } }, 1716, false);
+  cursor.render({ ...input, caret: { x: 400, y: 300, height: 20 } }, 1716, "navigation");
   assert.equal(cursor.isSettling(), true);
   assert.equal(overlay.hidden, false);
   assert.equal(overlay.style.opacity, "0");
   for (let now = 1732; now <= 5000 && cursor.isSettling(); now += 16) {
-    cursor.render({ ...input, caret: { x: 400, y: 300, height: 20 } }, now, false);
+    cursor.render({ ...input, caret: { x: 400, y: 300, height: 20 } }, now, "navigation");
   }
   assert.equal(cursor.isSettling(), false);
   cursor.switched(input.editor, 2000);
-  cursor.render({ ...input, caret: null }, 2700, false);
+  cursor.render({ ...input, caret: null }, 2700, "navigation");
   assert.equal(cursor.isSettling(), false);
   assert.equal(overlay.hidden, true);
   cursor.switched(input.editor, 3000);
@@ -1351,7 +1450,7 @@ test("switch settling is bounded through missing geometry and cancelled by lifec
   cursor.yieldSelection(5016, false);
   assert.equal(cursor.isSettling(), false);
   cursor.switched(input.editor, 6000);
-  cursor.render({ ...input, reducedMotion: true }, 6000, false);
+  cursor.render({ ...input, reducedMotion: true }, 6000, "navigation");
   assert.equal(cursor.isSettling(), false);
   assert.equal(overlay.hidden, false);
   cursor.destroy();
@@ -1363,10 +1462,10 @@ test("caretless and selected editables retain native suppression until host rele
   const second = new PaintElement();
   const input = frame({ editable: first as unknown as HTMLElement });
   const overlay = body.children[0];
-  cursor.render(input, 1000, false);
+  cursor.render(input, 1000, "navigation");
   for (let now = 1016; now < 1400; now += 16) {
     cursor.render({ ...input, editable: second as unknown as HTMLElement,
-      caret: null, caretless: true }, now, false);
+      caret: null, caretless: true }, now, "navigation");
   }
   assert.equal(overlay.hidden, true);
   assert.equal(first.classes.has("zentype-custom-caret-active"), false);
@@ -1374,11 +1473,11 @@ test("caretless and selected editables retain native suppression until host rele
   assert.equal(cursor.yieldSelection(1400, false, first as unknown as HTMLElement), false);
   assert.equal(second.classes.has("zentype-custom-caret-active"), false);
   assert.equal(first.classes.has("zentype-custom-caret-active"), true);
-  cursor.render(input, 1416, false);
+  cursor.render(input, 1416, "navigation");
   assert.equal(overlay.hidden, false);
   cursor.release(1432, false);
   assert.equal(first.classes.has("zentype-custom-caret-active"), false);
-  cursor.render({ ...input, caret: null }, 2000, false);
+  cursor.render({ ...input, caret: null }, 2000, "navigation");
   assert.equal(first.classes.has("zentype-custom-caret-active"), true);
   cursor.hide();
   assert.equal(first.classes.has("zentype-custom-caret-active"), false);
@@ -1664,4 +1763,42 @@ test("range selection cancels structural intent without leaving a recovery loop"
   harness.dispatch(176, "selectionchange");
   harness.tick(192);
   assert.equal(harness.readCount(), sampled + 1);
+}, { typewriter: false, ripple: false }));
+
+test("selection collapse reacquires fresh authority before immediate structural Backspace", () => withSessionHarness(harness => {
+  harness.tick(0);
+  harness.dispatch(2, "keydown", { key: "Tab", defaultPrevented: false });
+
+  harness.setSelection("range");
+  harness.setFrame({ ...harness.getFrame(), selection: "range", range: null, caret: null });
+  harness.dispatch(4, "selectionchange");
+  harness.tick(16);
+
+  harness.editable.dataset.nodeId = "source-block";
+  harness.setSelection("caret");
+  harness.setFrame({ ...harness.getFrame(), selection: "caret", range: textRange(harness.editable, "abcdef", 0),
+    caret: { x: 100, y: 220, height: 20 }, block: harness.editable as unknown as HTMLElement, caretless: false });
+  harness.dispatch(20, "selectionchange");
+  harness.dispatch(21, "keydown", { key: "Backspace", defaultPrevented: false });
+
+  const survivor = new PaintElement();
+  survivor.dataset.nodeId = "survivor-block";
+  const removed = new PaintElement();
+  removed.dataset.nodeId = "source-block";
+  harness.mutate(22, [{ type: "childList", target: harness.editor,
+    addedNodes: [survivor], removedNodes: [removed] } as unknown as MutationRecord]);
+  harness.setFrame({ ...harness.getFrame(), caret: { x: 260, y: 420, height: 20 },
+    block: survivor as unknown as HTMLElement });
+  harness.tick(38);
+  harness.tick(54);
+
+  const geometry = harness.events.find(event => event.name === "structure-geometry-ready");
+  assert.ok(harness.events.some(event => event.name === "structure-cancel" && event.payload.reason === "selection"));
+  assert.ok(geometry);
+  assert.equal(geometry.payload.fromBlockKey, "source-block");
+  assert.equal(geometry.payload.toBlockKey, "survivor-block");
+  assert.equal(geometry.payload.topologyChanged, true);
+  assert.equal(harness.events.filter(event => event.name === "structure-geometry-ready").length, 1);
+  harness.tick(70);
+  assert.ok(harness.events.some(event => event.name === "structure-commit"));
 }, { typewriter: false, ripple: false }));

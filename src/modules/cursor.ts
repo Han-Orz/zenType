@@ -9,6 +9,7 @@ interface CursorMotion {
   height: CriticalState;
 }
 
+export type CursorIntent = "typing" | "navigation" | "structural";
 type BreathPhase = "normal" | "down" | "hold" | "up";
 type SwitchRevealPhase = "none" | "pending" | "active";
 
@@ -109,7 +110,8 @@ export function createCursor(debug?: DebugRecorder) {
     element.hidden = true;
   }
 
-  function render(frame: EditorFrame, now: number, typing: boolean, interacting = false): boolean {
+  function render(frame: EditorFrame, now: number, intent: CursorIntent, interacting = false): boolean {
+    const isTyping = intent === "typing";
     if (editor !== frame.editor) {
       hide();
       editor = frame.editor;
@@ -205,21 +207,25 @@ export function createCursor(debug?: DebugRecorder) {
       resetBreathing();
     }
     const distance = Math.hypot(motion.x.value - target.x, motion.y.value - target.y);
-    const response = frame.reducedMotion ? 0 : (typing ? MOTION.caretTypingResponseMs :
-      MOTION.caretNavigationResponseMs + Math.min(120, distance * 0.3));
+    const navigationResponse = MOTION.caretNavigationResponseMs + Math.min(120, distance * 0.3);
+    let response: number;
+    if (frame.reducedMotion) response = 0;
+    else if (intent === "typing") response = MOTION.caretTypingResponseMs;
+    else if (intent === "structural") response = navigationResponse;
+    else response = navigationResponse;
     const xSettled = stepCritical(motion.x, target.x, elapsed, response, MOTION.cursorSettlePx);
     const ySettled = stepCritical(motion.y, target.y, elapsed, response, MOTION.cursorSettlePx);
     const heightSettled = stepCritical(motion.height, target.height, elapsed, response, MOTION.cursorSettlePx);
     const moving = !(xSettled && ySettled && heightSettled);
-    if (moving || typing || interacting) lastMotion = now;
+    if (moving || isTyping || interacting) lastMotion = now;
     const view = frame.viewport;
     const edge = Math.min(motion.y.value + motion.height.value - view.top, view.bottom - motion.y.value);
     const visible = motion.x.value >= view.left && motion.x.value <= view.right && edge > 0;
     const idleDeadline = breathDeadline || lastMotion + MOTION.breatheIdleDelayMs;
-    const idleReady = breathPhase === "normal" && !frame.reducedMotion && !typing && !interacting && !moving &&
+    const idleReady = breathPhase === "normal" && !frame.reducedMotion && !isTyping && !interacting && !moving &&
       now >= idleDeadline;
     let alphaPhaseChanged = false;
-    if (frame.reducedMotion || typing || interacting || moving) {
+    if (frame.reducedMotion || isTyping || interacting || moving) {
       breathPhase = "normal";
       breathDeadline = 0;
       if (alphaTarget !== 1) {
@@ -268,7 +274,10 @@ export function createCursor(debug?: DebugRecorder) {
     ZENTYPE_DEBUG: debugState("render", frame, {
       now,
       moving,
-      typing,
+      intent,
+      xVelocity: motion.x.velocity,
+      yVelocity: motion.y.velocity,
+      heightVelocity: motion.height.velocity,
       interacting,
       breathReady: idleReady,
       revealElapsed: switchRevealPhase === "active" ? alphaElapsed : null,

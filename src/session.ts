@@ -1,11 +1,11 @@
 import { MOTION } from "./config";
 import type { Features, EditorFrame } from "./types";
 import { editableAt, readEditorFrame } from "./utils/editorScope";
-import { createCursor } from "./modules/cursor";
+import { createCursor, type CursorIntent } from "./modules/cursor";
 import { createTypewriter } from "./modules/typewriter";
 import { createRipple } from "./modules/ripple";
 import type { DebugRecorder } from "./debug/types";
-import { classifyMutations, createStructureGate, STRUCTURE_LIMITS } from "./structure";
+import { classifyMutations, createStructureGate, semanticBlockKey, STRUCTURE_LIMITS } from "./structure";
 
 export interface WritingSession {
   configure(features: Features): void;
@@ -40,6 +40,61 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
   let clickEditor: HTMLElement | null = null;
   let retryUntil = 0;
   const added = new Set<HTMLElement>();
+  let cursorIntent: CursorIntent = "navigation";
+  let selectionMode: "unknown" | "caret" | "range" = "unknown";
+  let selectionHandoffPending = false;
+  let freshSelectionEditable: HTMLElement | null = null;
+  let freshSelectionEditor: HTMLElement | null = null;
+  let freshSelectionBlockKey: string | null = null;
+
+  function currentCursorIntent(now: number, structural = false): CursorIntent {
+    if (structural) {
+      cursorIntent = "structural";
+      return cursorIntent;
+    }
+    if (cursorIntent === "typing" && now - lastInput >= MOTION.typingPauseMs) cursorIntent = "navigation";
+    return cursorIntent;
+  }
+
+  function readSelectionMode(): "caret" | "range" | null {
+    const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
+    if (selection) return selection.isCollapsed ? "caret" : "range";
+    if (frame?.selection === "caret" || frame?.selection === "range") return frame.selection;
+    return null;
+  }
+
+  function captureCollapsedSelection() {
+    freshSelectionEditable = null;
+    freshSelectionEditor = null;
+    freshSelectionBlockKey = null;
+    const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
+    const node = selection?.isCollapsed ? selection.focusNode : null;
+    if (!node || !node.isConnected) return;
+    const element = node instanceof Element ? node : node.parentElement;
+    const editable = editableAt(node);
+    const editor = editable?.closest<HTMLElement>(".protyle-wysiwyg") ?? null;
+    if (!editor) return;
+    freshSelectionEditable = editable;
+    freshSelectionEditor = editor;
+    freshSelectionBlockKey = semanticBlockKey(element?.closest<HTMLElement>("[data-node-id]") ?? null);
+  }
+
+  function blockKeyForStructuralIntent(editable: HTMLElement, editor: HTMLElement): string | null {
+    if (selectionHandoffPending) return freshSelectionEditable === editable && freshSelectionEditor === editor
+      ? freshSelectionBlockKey : null;
+    return frame?.editor === editor && frame.selection === "caret" ? semanticBlockKey(frame.block) : null;
+  }
+
+  function noteSampledSelection(next: EditorFrame | null) {
+    if (next?.selection === "range") selectionMode = "range";
+    else if (next?.selection === "caret") {
+      selectionMode = "caret";
+      selectionHandoffPending = false;
+      freshSelectionEditable = null;
+      freshSelectionEditor = null;
+      freshSelectionBlockKey = null;
+    }
+  }
 
   function queue() {
     if (!disposed && pending === null) pending = requestAnimationFrame(update);
@@ -123,6 +178,12 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     blocked = true;
     structure.cancel("lifecycle");
     composingEditor = null;
+    cursorIntent = "navigation";
+    selectionMode = "unknown";
+    selectionHandoffPending = false;
+    freshSelectionEditable = null;
+    freshSelectionEditor = null;
+    freshSelectionBlockKey = null;
     stopWriting();
     cursor.hide();
     if (!immediate && frame) {
@@ -139,6 +200,12 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     blocked = true;
     structure.cancel("lifecycle");
     composingEditor = null;
+    cursorIntent = "navigation";
+    selectionMode = "unknown";
+    selectionHandoffPending = false;
+    freshSelectionEditable = null;
+    freshSelectionEditor = null;
+    freshSelectionBlockKey = null;
     stopWriting();
     if (pending !== null) cancelAnimationFrame(pending);
     pending = null;
@@ -181,8 +248,10 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         sampled = true;
         const next = readEditorFrame(reducedMotion.matches, composingEditor, frame?.editor);
         geometryDirty = false;
+        noteSampledSelection(next);
         if (next && frame && next.editor !== frame.editor) structure.cancel("editor-switch");
         const decision = structure.sample(next, now);
+        const handoff = structure.handoff();
         if (decision === "geometry") {
           // Geometry-ready is a Cursor-only handoff. Keep structural dirty state
           // and all semantic owners held until the shared gate reaches commit.
@@ -197,7 +266,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           observe(frame);
           const writing = writingEditor === frame.editor;
           const composing = composingEditor === frame.editor;
-          const cursorMoving = cursor.render(frame, now, composing || now - lastInput < MOTION.typingPauseMs,
+          const cursorMoving = cursor.render(frame, now, currentCursorIntent(now, handoff?.topologyChanged === true),
             pointerDown || now - lastInteraction < MOTION.interactionHoldMs);
           const settling = cursor.isSettling();
           geometryDirty = true;
@@ -229,7 +298,12 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
             ZENTYPE_DEBUG: debug?.record("session", "structure-release", { now, reason: decision });
             return;
           }
-          ZENTYPE_DEBUG: debug?.record("session", "structure-commit", { now, authority: "quiet-and-stable" });
+          cursorIntent = handoff?.topologyChanged === true ? "structural" : cursorIntent;
+          ZENTYPE_DEBUG: debug?.record("session", "structure-commit", {
+            now, authority: "quiet-and-stable", generation: handoff?.generation ?? null,
+            topologyChanged: handoff?.topologyChanged ?? false,
+            fromBlockKey: handoff?.fromBlockKey ?? null, toBlockKey: handoff?.toBlockKey ?? null,
+          });
         }
         if (!next) {
           ZENTYPE_DEBUG: debug?.record("session", "frame-missing", {
@@ -313,7 +387,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
       // Ripple invalidates a large part of the editor, so no frame forces a style
       // recalc of its own invalidation (that recalc measured ~150ms on a long
       // document, once per focus-mode entry and exit).
-      const cursorMoving = cursor.render(frame, now, composing || now - lastInput < MOTION.typingPauseMs,
+      const cursorMoving = cursor.render(frame, now, currentCursorIntent(now),
         pointerDown || now - lastInteraction < MOTION.interactionHoldMs);
       const settling = cursor.isSettling();
       if (settling) geometryDirty = true;
@@ -369,6 +443,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
             (event as MouseEvent).detail <= 1 && window.getSelection()?.isCollapsed &&
             !(event.target as Element).closest('[data-type="a"], a, button')) {
           clickEditor = editable.closest<HTMLElement>(".protyle-wysiwyg");
+          cursorIntent = "navigation";
         }
         break;
       case "focusin":
@@ -385,9 +460,13 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         activate(editable);
         contentDirty = true;
         if (event.type === "beforeinput" && /^(insertParagraph|insertLineBreak|formatIndent|formatOutdent|historyUndo|historyRedo|deleteByCut|deleteByDrag)$/.test((event as InputEvent).inputType)) {
-          structure.intent(editable.closest<HTMLElement>(".protyle-wysiwyg")!, performance.now(), "other");
+          const editor = editable.closest<HTMLElement>(".protyle-wysiwyg")!;
+          structure.intent(editor, performance.now(), "other", blockKeyForStructuralIntent(editable, editor));
         }
-        if (event.type === "input") structure.input();
+        if (event.type === "input") {
+          cursorIntent = "typing";
+          structure.input();
+        }
         structure.activity(performance.now(), event.type);
         if ((event as InputEvent).isComposing) composingEditor = editable.closest<HTMLElement>(".protyle-wysiwyg");
         break;
@@ -397,6 +476,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         blocked = false;
         if (key.isComposing) break;
         if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", "Escape"].includes(key.key)) {
+          cursorIntent = "navigation";
           structure.cancel("navigation");
         }
         if (["ArrowUp", "ArrowDown", "PageUp", "PageDown"].includes(key.key)) {
@@ -407,7 +487,8 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           const now = performance.now();
           retryUntil = now + MOTION.recoveryMs;
           const intent = key.key === "Backspace" ? "backspace" : key.key === "Delete" ? "delete" : "other";
-          structure.intent(editable.closest<HTMLElement>(".protyle-wysiwyg")!, now, intent);
+          const editor = editable.closest<HTMLElement>(".protyle-wysiwyg")!;
+          structure.intent(editor, now, intent, blockKeyForStructuralIntent(editable, editor));
         }
         break;
       }
@@ -416,17 +497,19 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         blocked = false;
         structure.cancel("composition");
         composingEditor = editable.closest<HTMLElement>(".protyle-wysiwyg");
+        cursorIntent = "typing";
         activate(editable);
         typewriter.cancel();
         break;
       case "compositionend":
         composingEditor = null;
-        if (editable) { blocked = false; activate(editable); }
+        if (editable) { blocked = false; cursorIntent = "typing"; activate(editable); }
         contentDirty = true;
         retryUntil = performance.now() + MOTION.recoveryMs;
         break;
       case "pointerdown":
         pointerDown = true;
+        cursorIntent = "navigation";
         structure.cancel("pointer");
         stopWriting();
         break;
@@ -438,6 +521,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         break;
       case "wheel":
       case "touchmove":
+        cursorIntent = "navigation";
         structure.cancel(event.type);
         stopWriting();
         break;
@@ -450,9 +534,29 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         if (target === observedScroll && typewriter.ownsScroll(observedScroll.scrollTop)) return;
         break;
       }
-      case "selectionchange":
-        structure.activity(performance.now(), "selection");
+      case "selectionchange": {
+        const now = performance.now();
+        const previous = selectionMode;
+        const next = readSelectionMode();
+        if (next === "range") {
+          selectionMode = "range";
+          selectionHandoffPending = true;
+          freshSelectionEditable = null;
+          freshSelectionEditor = null;
+          freshSelectionBlockKey = null;
+          structure.cancel("selection");
+        } else if (next === "caret") {
+          const collapsedAfterRange = previous === "range" || previous === "unknown" && frame?.selection === "range";
+          selectionMode = "caret";
+          if (collapsedAfterRange) {
+            selectionHandoffPending = true;
+            captureCollapsedSelection();
+            structure.cancel("selection-collapse");
+          }
+        }
+        structure.activity(now, "selection");
         break;
+      }
       case "blur":
         pointerDown = false;
         suspendForWindowBlur();

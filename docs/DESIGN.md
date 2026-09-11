@@ -1,12 +1,63 @@
-# v2.9.0-remake.2.4-structural.2
+# v2.9.0-remake.2.5-structural.1
 
-## Ownership and authority
+## Canonical five-layer architecture
 
-One WritingSession owns document events, the active host binding, observers, one rAF and one idle wake timer. Cursor, Typewriter and Ripple import no other effect. There is no structural scheduler, subscriber runtime, second editor observer, FLIP engine or persistent visual identity registry.
+The product boundary is deliberately small:
 
-The host adapter validates the official active Protyle, DOM focus, Selection endpoints and editability. Frame data can carry a valid editor with missing caret geometry. Composition uses its focus endpoint, never rewrites browser Selection, and remains distinct from an ordinary range selection.
+> Host decides truth. Structure describes change. Session grants authority. Feature decides target and personality. Motion decides trajectory. Painter commits.
 
-**Host sampling is not visual commit.** Session may read transient DOM/Selection/caret facts while withholding all new effect targets. `structure.ts` is a clock-free decision policy owned by Session, not an independent runtime. Only Session decides when Cursor may approach a target, Typewriter may write scrollTop and Ripple may rebuild its owner plan.
+### 1. Host Truth
+
+**Owns:** the facts returned by SiYuan and the browser: `EditorFrame`, active editor, editable, Selection and Range, caret geometry, block, scroll/origin/nested scroll state, connectivity, semantic `data-node-id`, and delivered `MutationRecord`s.
+
+**May know:** which DOM nodes are connected, which Selection endpoints belong to the active editor, and the semantic key of the block containing the current caret. `HTMLElement` identity is a handle for one Host sample, not a long-lived semantic identity. Block relations use `data-node-id` (and the existing `visualKey()` convention for visual markers); no global identity registry is built.
+
+**Must not know:** whether a change is being animated, Cursor speed, Ripple alpha, Typewriter targets, `responseMs`, FLIP, or any other presentation policy. Host Truth reports facts; it does not choose effects.
+
+### 2. Structural Contract (`src/structure.ts`)
+
+**Owns:** bounded input intent, MutationRecord classification, generation supersession, structural evidence, geometry readiness, semantic readiness, deadline/overflow release, and one per-transaction `StructuralHandoff`.
+
+**May know:** the Host frame and bounded mutation summary supplied by Session, the monotonic execution time, and semantic block keys. The handoff is intentionally minimal: `generation`, `topologyChanged`, `fromBlockKey`, `toBlockKey`, `geometryReady`, and `semanticReady`. `fromBlockKey` is the semantic block at the last trustworthy caret when the intent starts; `toBlockKey` is the block in the new authoritative frame. A different key is evidence for features to interpret, not an animation prescription.
+
+**Must not know:** Critical Motion, `responseMs`, opacity, transform, scrollTop, WAAPI, rAF ownership, animation duration, Cursor speed, Ripple alpha, or Typewriter targets. Structure describes; it never animates. `input` intent remains a candidate; Host mutation evidence decides whether topology actually changed.
+
+The contract answers only three questions: (1) did Host structure become ordinary, representation, structural, or overflow; (2) is the new caret geometry trustworthy; and (3) is the new topology quiet and stable enough to commit? It does not classify merge, split, indent, or outdent from the key name. A range-selection handoff cancels the pending transaction; after collapse, a fresh live Selection, active editor/editable and caret frame must be reacquired before a new structural edit can use that authority.
+
+### 3. Session Authority (`WritingSession`)
+
+**Owns:** event routing, the active Host binding, the existing editor observers, one primary rAF, the bounded wake, shared frame ordering, and the authority decision that gates feature consumption. Host sampling is not visual commit: transient facts can be read while targets remain withheld.
+
+**May know:** all five-layer outputs needed to route authority, including the Structural Contract decision/handoff and lifecycle state. Session routes `CursorIntent` (`"typing"`, `"navigation"`, or `"structural"`) but never selects a motion curve. It grants geometry-ready only to Cursor; Typewriter and Ripple stay held until semantic-ready.
+
+**Must not know:** feature-specific trajectories, sentence topology, Cursor response laws, or painter implementation details. There is no second Session, scheduler, rAF, observer, FLIP manager, or timeline service.
+
+The authority matrix is:
+
+| Authority | Cursor | Typewriter | Ripple |
+| --- | --- | --- | --- |
+| ordinary admitted | yes | yes | yes |
+| structural wait | hold | hold | hold |
+| geometry-ready | yes | hold | hold |
+| semantic-ready | yes | yes | yes |
+| range selection | yield/native | cancel/hold | selection policy |
+| lifecycle hard release | release | cancel | clear/release |
+
+### 4. Feature Semantics
+
+**Owns:** Cursor target/personality and selection behavior, Typewriter comfort-band target, and Ripple sentence/block target and ownership decisions. Cursor keeps an explicit `CursorIntent`: ordinary typing uses the fixed typing response; navigation uses the existing distance-aware response; structural relocation has its own semantic branch and initially reuses that navigation distance-aware law. Typewriter and Ripple independently interpret structural holds.
+
+**May know:** the Host frame and the authority/handoff granted by Session, including semantic identity, old/new geometry and topology evidence when a feature needs it. Future Local Layout Continuity belongs here as a bounded presentation feature using the existing Session frame.
+
+**Must not know:** how StructureGate proves readiness, how Session schedules frames, or how Critical Motion integrates values. Features do not turn a key name into merge/split semantics and do not create a second runtime.
+
+### 5. Motion + Painter
+
+**Owns:** `motion.ts`'s pure Critical Motion integration and the existing Cursor, Ripple and Typewriter presentation writers. Painters commit transform/height/opacity/clip, WAAPI/highlight presentation, or scrollTop after Session grants authority.
+
+**May know:** numerical state, targets and the selected feature response. Motion stays continuous across retargets; the block Ripple WAAPI owner remains the existing presentation owner.
+
+**Must not know:** SiYuan, Selection, structural key names, merge/split/Tab, authority readiness, or semantic inference. Painters only commit presentation.
 
 Input establishes writing intent; browsing cancels automatic scrolling. Composition belongs to an editor. Editor switches discard old effect bindings. Horizontal navigation keeps writing intent while vertical/page navigation exits it; all navigation cancels pending structural intent. Lifecycle and DOM events invalidate observations; none certifies host completion on its own.
 
