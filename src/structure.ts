@@ -18,6 +18,7 @@ interface PendingStructure {
   textObserved: boolean;
   replacementObserved: boolean;
   stable: number;
+  geometryPublished: boolean;
   caret: CursorRect | null;
   block: HTMLElement | null;
 }
@@ -105,7 +106,7 @@ export function createStructureGate(debug?: DebugRecorder) {
     intent: IntentKind): PendingStructure {
     return { generation: ++nextGeneration, editor, start: now, activity: now, evidence, intent,
       inputObserved: false, nonStructuralObserved: false, textObserved: false, replacementObserved: false,
-      stable: 0, caret: null, block: null };
+      stable: 0, geometryPublished: false, caret: null, block: null };
   }
   function begin(editor: HTMLElement, now: number, evidence: "structural" | "overflow" | null) {
     if (pending?.editor !== editor) {
@@ -131,6 +132,7 @@ export function createStructureGate(debug?: DebugRecorder) {
     if (!pending) return;
     pending.activity = now;
     pending.stable = 0;
+    pending.geometryPublished = false;
     pending.caret = null;
     ZENTYPE_DEBUG: debug?.record("session", "structure-activity", { now, reason });
   }
@@ -160,7 +162,7 @@ export function createStructureGate(debug?: DebugRecorder) {
         : pending.start + MOTION.structureDeadlineMs;
       return Math.max(1, wakeAt - now);
     },
-    sample(frame: EditorFrame | null, now: number): "ordinary" | "wait" | "commit" | "timeout" | "overflow" {
+    sample(frame: EditorFrame | null, now: number): "ordinary" | "wait" | "geometry" | "commit" | "timeout" | "overflow" {
       if (!pending) return "ordinary";
       if (frame && (frame.editor !== pending.editor || frame.selection === "range")) {
         cancel(frame.selection === "range" ? "selection" : "editor-switch");
@@ -212,20 +214,32 @@ export function createStructureGate(debug?: DebugRecorder) {
       pending.caret = caret && { ...caret };
       pending.block = frame?.block ?? null;
       const quiet = now - pending.activity;
-      const stable = pending.stable >= 2 && quiet >= MOTION.structureQuietMs;
+      const geometryReady = !!frame && frame.selection === "caret" && frame.caretless !== true && pending.stable >= 2;
+      const semanticReady = geometryReady && quiet >= MOTION.structureQuietMs;
+      if (!geometryReady) pending.geometryPublished = false;
+      if (geometryReady && !pending.geometryPublished) {
+        pending.geometryPublished = true;
+        ZENTYPE_DEBUG: debug?.record("session", "structure-geometry-ready", {
+          now, quiet, stableFrames: pending.stable, generation: pending.generation,
+          caret: caret ? { ...caret } : null, block: frame?.block?.dataset.nodeId ?? null,
+        });
+      }
+      const expired = elapsed >= MOTION.structureDeadlineMs;
+      const decision = semanticReady ? "commit" : expired ? "timeout" : geometryReady ? "geometry" : "wait";
+      const reason = semanticReady ? "quiet-and-stable" : geometryReady ? "awaiting-semantic-quiet"
+        : "awaiting-stable-geometry";
       ZENTYPE_DEBUG: debug?.record("session", "structure-sample", { now, quiet, stableFrames: pending.stable,
         state: "structural", evidence: pending.evidence, generation: pending.generation,
-        caret: caret ? { ...caret } : null,
-        decision: stable ? "commit" : "wait", reason: stable ? "quiet-and-stable" : "awaiting-stable-geometry" });
-      if (stable || elapsed >= MOTION.structureDeadlineMs) {
-        const result = stable ? "commit" : "timeout";
-        ZENTYPE_DEBUG: debug?.record("session", stable ? "structure-stable" : "structure-timeout", {
+        caret: caret ? { ...caret } : null, geometryReady, semanticReady, decision, reason });
+      if (semanticReady || expired) {
+        const result = semanticReady ? "commit" : "timeout";
+        ZENTYPE_DEBUG: debug?.record("session", semanticReady ? "structure-stable" : "structure-timeout", {
           now, elapsed, generation: pending.generation,
         });
         pending = null;
         return result;
       }
-      return "wait";
+      return geometryReady ? "geometry" : "wait";
     },
   };
 }

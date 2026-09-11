@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.9.0-remake.2.4-structural.2 (2026-09-11) — Structural geometry handoff
+
+- StructureGate now separates two continuous caret samples (`geometry-ready`) from the existing 48ms semantic quiet required for full structural commit.
+- Cursor can retarget the latest trustworthy Host caret during repeated Enter/Backspace/Delete input while Typewriter and Ripple remain held until semantic commit.
+- The 48ms quiet window, 160ms deadline, generation supersession, ordinary deletion fast path, Critical Motion parameters, Ripple/WAAPI backend and one-Session scheduling remain unchanged.
+
 ## v2.9.0-remake.2.3-critical.6 (2026-09-11) — Cursor and Ripple interaction semantics
 
 - Cursor breathing now uses a 900ms down response; the 3000ms idle delay, exact-zero low target, zero hold, 600ms up response and 2000ms bright rest remain unchanged.

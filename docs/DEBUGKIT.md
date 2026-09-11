@@ -70,7 +70,8 @@ Session 的 `structure-*` 事件来自共享 gate，不增加 snapshot、observe
 - `structure-generation-superseded`：新的明确结构输入替换同一 editor 的旧 pending generation；presentation 保持不变。
 - `structure-begin` / `structure-evidence`：mutation classifier 发现结构变化或观察预算溢出。
 - `structure-activity`：input、Selection 或 mutation 打断了安静窗口。
-- `structure-sample`：intent 阶段记录 input/non-structural observation 与等待/ordinary 原因；evidence 阶段记录 caret、quiet、stableFrames 与等待/commit 原因。
+- `structure-sample`：intent 阶段记录 input/non-structural observation 与等待/ordinary 原因；evidence 阶段记录 caret、quiet、stableFrames、`geometryReady`、`semanticReady` 与等待/geometry/commit 原因。
+- `structure-geometry-ready`：同一 generation 的连续可信 caret geometry 首次达到两次稳定采样；只授权 Cursor，不代表 Ripple/Typewriter 已获得 semantic commit。
 - `ordinary-delete-admitted`：严格的 characterData-only、折叠且位于文本节点内部的 Backspace/Delete 直接通过 ordinary admission。
 - `structure-stable` / `structure-commit`：安静窗口和连续几何采样通过，允许统一提交。
 - `structure-timeout` / `structure-release`：没有证明稳定，释放效果；不能把它当成成功提交。

@@ -752,7 +752,10 @@ test("editor switch commits hidden geometry before a full reveal motion", () => 
 
 test("shared authority withholds a transient caret until mutation and geometry settle", () => withPresentation(body => {
   const cursor = createCursor();
-  const gate = createStructureGate();
+  const records: Array<{ name: string; payload: Record<string, unknown> }> = [];
+  const gate = createStructureGate({
+    record: (_source: string, name: string, payload: Record<string, unknown>) => records.push({ name, payload }),
+  } as never);
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement });
   cursor.render(input, 1000, true);
   const overlay = body.children[0];
@@ -764,7 +767,12 @@ test("shared authority withholds a transient caret until mutation and geometry s
   const final = { ...input, caret: { x: 200, y: 300, height: 20 } };
   assert.equal(gate.sample(final, 1048), "wait");
   assert.equal(overlay.style.transform, original);
-  assert.equal(gate.sample(final, 1064), "wait");
+  assert.equal(gate.sample(final, 1064), "geometry");
+  const geometry = records.find(record => record.name === "structure-geometry-ready");
+  assert.ok(geometry);
+  assert.equal(geometry.payload.stableFrames, 2);
+  assert.equal(geometry.payload.quiet, 24);
+  assert.deepEqual(geometry.payload.caret, final.caret);
   assert.equal(gate.sample(final, 1088), "commit");
   cursor.render(final, 1088, true);
   assert.notEqual(overlay.style.transform, `translate3d(500px,${300 - MOTION.caretLiftPx}px,0)`);
@@ -799,8 +807,18 @@ test("Session withholds native text evidence until delayed host structure settle
   const final = { ...harness.getFrame(), caret: { x: 200, y: 300, height: 20 } };
   harness.setFrame(final);
   harness.tick(48);
-  harness.tick(64);
   assert.equal(overlay.style.transform, original);
+  const commitsBeforeGeometry = harness.events.filter(event => event.name === "frame-commit").length;
+  const preparedBeforeGeometry = harness.events.filter(event => event.name === "prepare").length;
+  const typewriterBeforeGeometry = harness.events.filter(event => event.name === "frame" && "requestedScroll" in event.payload).length;
+  harness.tick(64);
+  assert.equal(overlay.style.transform, `translate3d(200px,${300 - MOTION.caretLiftPx}px,0)`);
+  assert.equal(harness.events.filter(event => event.name === "frame-commit").length, commitsBeforeGeometry);
+  assert.equal(harness.events.filter(event => event.name === "prepare").length, preparedBeforeGeometry);
+  assert.equal(harness.events.filter(event => event.name === "frame" && "requestedScroll" in event.payload).length, typewriterBeforeGeometry);
+  assert.ok(harness.events.some(event => event.name === "structure-geometry-ready" && event.payload.caret));
+  assert.ok(harness.events.some(event => event.name === "structure-sample" &&
+    event.payload.geometryReady === true && event.payload.semanticReady === false));
   harness.tick(80);
 
   assert.equal(overlay.style.transform, `translate3d(200px,${300 - MOTION.caretLiftPx}px,0)`);
@@ -992,6 +1010,35 @@ test("repeated structural intent supersedes the old deadline without releasing p
   assert.equal(harness.events.some(event => event.name === "structure-commit"), true);
 }, { typewriter: false, ripple: true }));
 
+test("repeated structural generations retarget Cursor at each geometry-ready handoff", () => withSessionHarness(harness => {
+  harness.tick(0);
+  const overlay = harness.body.children[0];
+  harness.dispatch(0, "keydown", { key: "Enter", defaultPrevented: false });
+  const firstRemoved = new PaintElement();
+  firstRemoved.dataset.nodeId = "first-removed";
+  harness.mutate(4, [{ type: "childList", target: harness.editor, addedNodes: [], removedNodes: [firstRemoved] } as unknown as MutationRecord]);
+  harness.setFrame({ ...harness.getFrame(), caret: { x: 200, y: 300, height: 20 } });
+  harness.tick(16);
+  harness.tick(32);
+  assert.equal(overlay.style.transform, `translate3d(200px,${300 - MOTION.caretLiftPx}px,0)`);
+
+  harness.dispatch(36, "keydown", { key: "Enter", defaultPrevented: false });
+  const secondRemoved = new PaintElement();
+  secondRemoved.dataset.nodeId = "second-removed";
+  harness.mutate(40, [{ type: "childList", target: harness.editor, addedNodes: [], removedNodes: [secondRemoved] } as unknown as MutationRecord]);
+  harness.setFrame({ ...harness.getFrame(), caret: { x: 360, y: 420, height: 20 } });
+  harness.tick(48);
+  harness.tick(64);
+  assert.equal(overlay.style.transform, `translate3d(360px,${420 - MOTION.caretLiftPx}px,0)`);
+  assert.equal(harness.events.filter(event => event.name === "structure-geometry-ready").length, 2);
+  assert.ok(harness.events.some(event => event.name === "structure-generation-superseded"));
+  assert.equal(harness.events.some(event => event.name === "structure-release" && event.payload.reason === "timeout"), false);
+  assert.equal(harness.events.some(event => event.name === "structure-commit"), false);
+
+  harness.tick(96);
+  assert.equal(harness.events.some(event => event.name === "structure-commit"), true);
+}, { typewriter: true, ripple: true }));
+
 test("ordinary quiet window uses 48ms of execution time under rAF skew", () => withSessionHarness(harness => {
   harness.tick(0);
   harness.dispatch(0, "keydown", { key: "Backspace", defaultPrevented: false });
@@ -1086,6 +1133,7 @@ test("structural evidence keeps bounded frame sampling through a caret gap", () 
   assert.equal(overlay.style.transform, `translate3d(220px,${310 - MOTION.caretLiftPx}px,0)`);
   assert.equal(harness.rafCount(), 0);
   assert.ok(harness.events.some(event => event.name === "structure-commit"));
+  assert.equal(harness.events.some(event => event.name === "structure-geometry-ready" && event.payload.caret === null), false);
   assert.equal(harness.events.some(event => event.name === "structure-timeout"), false);
 }));
 
@@ -1097,11 +1145,14 @@ test("unstable structural geometry times out without committing or leaving work 
   removed.dataset.nodeId = "removed";
   harness.mutate(4, [{ type: "childList", target: harness.editor,
     addedNodes: [], removedNodes: [removed] } as unknown as MutationRecord]);
-  harness.setFrame({ ...harness.getFrame(), caret: null });
-  for (let now = 16; now <= MOTION.structureDeadlineMs; now += 16) harness.tick(now);
+  for (let now = 16; now <= MOTION.structureDeadlineMs; now += 16) {
+    harness.setFrame({ ...harness.getFrame(), caret: { x: 220 + now, y: 310 + now / 10, height: 20 } });
+    harness.tick(now);
+  }
 
   assert.equal(harness.events.filter(event => event.name === "frame-commit").length, committed);
   assert.ok(harness.events.some(event => event.name === "structure-release" && event.payload.reason === "timeout"));
+  assert.equal(harness.events.some(event => event.name === "structure-geometry-ready"), false);
   assert.equal(harness.rafCount(), 0);
   assert.equal(harness.timerCount(), 0);
 }));

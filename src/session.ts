@@ -183,6 +183,28 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         geometryDirty = false;
         if (next && frame && next.editor !== frame.editor) structure.cancel("editor-switch");
         const decision = structure.sample(next, now);
+        if (decision === "geometry") {
+          // Geometry-ready is a Cursor-only handoff. Keep structural dirty state
+          // and all semantic owners held until the shared gate reaches commit.
+          ripple.freeze();
+          typewriter.cancel();
+          if (!next) {
+            geometryDirty = true;
+            queue();
+            return;
+          }
+          frame = next;
+          observe(frame);
+          const writing = writingEditor === frame.editor;
+          const composing = composingEditor === frame.editor;
+          const cursorMoving = cursor.render(frame, now, composing || now - lastInput < MOTION.typingPauseMs,
+            pointerDown || now - lastInteraction < MOTION.interactionHoldMs);
+          const settling = cursor.isSettling();
+          geometryDirty = true;
+          cleanClones();
+          if (cursorMoving || settling || structure.needsFrameSampling()) queue();
+          return;
+        }
         if (decision === "wait") {
           // Existing visual owners were rebound in the mutation microtask. No
           // effect may consume a new target or write scrollTop until the shared

@@ -1,4 +1,4 @@
-# zenType v2.9.0-remake.2.3-critical.6
+# zenType v2.9.0-remake.2.4-structural.2
 
 顺滑光标、打字机滚动、涟漪聚焦。critical-motion 开发构建保留单一 WritingSession / rAF / observer，并让 Cursor、Typewriter 和句级 Ripple 使用统一的解析临界阻尼数学；生产构建继续编译期剔除开发诊断代码。
 
@@ -11,7 +11,7 @@
 - 几何暂不可读时按 160ms 预算保留并重新观测；空块与块边界按光标所在块恢复位置，而不是按整个 editable。预算用尽后，若仍在同一 editable、仍是带 Range 的折叠选区且冻结位置在屏幕内，则继续保留呈现而不交还原生 caret。160ms 是基线恢复预算，不是宿主事务完成时限。
 - 打字机滚动以当前 scrollTop 建立独立的连续虚拟位置；浏览器像素量化不会冻结运动，快速反向输入可以接管，手动浏览会停止自动跟随。
 - Ripple 从当前亮度接续，普通文本变化不会整组重置；当前句使用 CSS Highlight，保留文字自身颜色。
-- 可能的结构编辑会暂缓 Cursor、Typewriter 与 Ripple 的新目标；input 本身不能否定结构意图。思源会在后续 task 做输入归一化，因此普通 mutation 需经过 48ms 无新增分类活动才确认，所有路径受 160ms deadline 约束。
+- 可能的结构编辑会暂缓 Typewriter 与 Ripple 的新目标；连续两次可信 caret geometry 后，Cursor 可先在 `geometry-ready` 时重新指向，完整结构 ownership 仍需 48ms quiet。input 本身不能否定结构意图，所有路径继续受 160ms deadline 约束。
 - 鼠标选择、普通非折叠选区使用宿主选择呈现。系统减少动态效果时关闭位移动画与呼吸。
 
 顶栏按钮或 Ctrl+Alt+Z 联合切换打字机与涟漪；命令面板支持单独切换。顺滑光标独立持续启用。设置沿用原来的 zenType 功能开关。
