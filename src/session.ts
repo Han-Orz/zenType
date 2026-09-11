@@ -134,6 +134,20 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     observe(null);
   }
 
+  function suspendForWindowBlur() {
+    ZENTYPE_DEBUG: debug?.record("session", "suspend", { reason: "window-blur", preserveCursor: true });
+    blocked = true;
+    structure.cancel("lifecycle");
+    composingEditor = null;
+    stopWriting();
+    if (pending !== null) cancelAnimationFrame(pending);
+    pending = null;
+    ripple.clear();
+    cleanClones();
+    frame = null;
+    observe(null);
+  }
+
   function update(rafTimestamp: number) {
     pending = null;
     if (disposed) return;
@@ -361,7 +375,10 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         blocked = false;
         if (key.isComposing) break;
         if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", "Escape"].includes(key.key)) {
-          structure.cancel("navigation"); stopWriting();
+          structure.cancel("navigation");
+        }
+        if (["ArrowUp", "ArrowDown", "PageUp", "PageDown"].includes(key.key)) {
+          stopWriting();
         }
         if (!key.ctrlKey && !key.metaKey && !key.altKey && ["Enter", "Backspace", "Delete", "Tab"].includes(key.key)) {
           activate(editable);
@@ -415,7 +432,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         break;
       case "blur":
         pointerDown = false;
-        suspend();
+        suspendForWindowBlur();
         return;
       case "visibilitychange":
         if (document.hidden) { pointerDown = false; suspend(); return; }

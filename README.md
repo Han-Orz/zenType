@@ -1,8 +1,8 @@
-# zenType v2.9.0-remake.2.3-critical.5
+# zenType v2.9.0-remake.2.3-critical.6
 
 Smooth cursor, typewriter scrolling and ripple focus for SiYuan. The critical-motion development build keeps one Session/rAF coordinator while giving Cursor, Typewriter and sentence Ripple state their own analytic critical-damping motion.
 
-All Critical Motion consumers share a fixed-zeta=1 law: `ResponseMs` means approximately 90% of a fixed displacement from rest at the configured time. Cursor breathing waits 3000ms, moves to exact zero over 1000ms, has no low hold, returns over 600ms and rests bright for 2000ms. Normal appearance and editor-switch reveal share a 370ms response; switch reveal still retains its hidden-geometry handoff.
+All Critical Motion consumers share a fixed-zeta=1 law: `ResponseMs` means approximately 90% of a fixed displacement from rest at the configured time. Cursor breathing waits 3000ms, moves to exact zero over 900ms, has no low hold, returns over 600ms and rests bright for 2000ms. Normal appearance and editor-switch reveal share a 370ms response; switch reveal still retains its hidden-geometry handoff.
 
 ## Behavior
 
@@ -15,6 +15,8 @@ Typewriter motion starts from an actual scroll position, then advances a separat
 Potential structural edits withhold new Cursor, Typewriter and Ripple targets until host evidence is either confirmed ordinary or quiet, stable structural geometry is observed. Input alone never disproves structural intent. Because SiYuan performs post-input normalization in a later task, ordinary text deletion is admitted after 48ms without further classified activity; every path is bounded by 160ms.
 
 The topbar button or Ctrl+Alt+Z toggles typewriter and ripple together. The smooth cursor remains independently enabled. Reduced motion disables movement and breathing.
+
+Window blur stops writing and presentation work but preserves the last trusted Cursor presentation; focus triggers a fresh host sample. All navigation cancels pending structural intent, while horizontal navigation keeps writing/Ripple mode and vertical/page navigation exits it.
 
 ## Build and install
 
@@ -29,7 +31,7 @@ npm run verify:prod
 
 Development output: `dev/`. Production output: `dist/`. Installable archive: `package.zip`.
 
-Disable zenType, back up the existing installation outside the plugins directory, extract the archive into your SiYuan workspace's `data/plugins/zenType/`, then enable it. Do not run two copies. The topbar tooltip identifies `v2.9.0-remake.2.3-critical.5`; the numeric plugin manifest version is `2.9.0`.
+Disable zenType, back up the existing installation outside the plugins directory, extract the archive into your SiYuan workspace's `data/plugins/zenType/`, then enable it. Do not run two copies. The topbar tooltip identifies `v2.9.0-remake.2.3-critical.6`; the numeric plugin manifest version is `2.9.0`.
 
 Existing development links can use `dev/`. To create one, use `node scripts/make_dev_link.js --workspace <workspace-path>`; it refuses to overwrite an existing installation.
 

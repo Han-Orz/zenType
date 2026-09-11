@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.9.0-remake.2.3-critical.6 (2026-09-11) — Cursor and Ripple interaction semantics
+
+- Cursor breathing now uses a 900ms down response; the 3000ms idle delay, exact-zero low target, zero hold, 600ms up response and 2000ms bright rest remain unchanged.
+- Window blur stops writing and background presentation work while preserving the last trusted Cursor presentation; focus performs a fresh host reacquire. Document-hidden and other true release paths retain their existing hide semantics.
+- All navigation cancels pending StructureGate intent. Horizontal navigation keeps writing/Ripple mode; vertical and page navigation continue to exit it. Typewriter, StructureGate policy, Ripple implementation and motion architecture are unchanged.
+
 ## v2.9.0-remake.2.3-critical.5 (2026-09-10) — Critical Motion response convergence
 
 - Shared fixed-zeta=1 `ResponseMs` calibration now reaches approximately 90% displacement from rest at the configured response time; the analytic law and retarget semantics are unchanged.

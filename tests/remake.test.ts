@@ -417,7 +417,7 @@ test("motion configuration exposes explicit responseMs semantics", () => {
   assert.equal(MOTION.scrollResponseMs, 300);
   assert.equal(MOTION.breatheIdleDelayMs, 3000);
   assert.equal(MOTION.breatheRestMs, 2000);
-  assert.equal(MOTION.breathDownResponseMs, 1000);
+  assert.equal(MOTION.breathDownResponseMs, 900);
   assert.equal(MOTION.breathUpResponseMs, 600);
   assert.equal(MOTION.breatheLowAlpha, 0);
   assert.equal(MOTION.breatheLowHoldMs, 0);
@@ -518,8 +518,11 @@ test("breathing reaches exact low alpha and hands off without a low-hold timer",
   const breathStart = 2000 + MOTION.breatheIdleDelayMs;
   assert.equal(cursor.render(input, breathStart, false), true);
   const overlay = body.children[0];
+  const downResponseAt = breathStart + MOTION.breathDownResponseMs;
+  cursor.render(input, downResponseAt, false);
+  assert.ok(Math.abs(Number(overlay.style.opacity) - 0.1) < 0.001);
   let lowSettledAt = 0;
-  for (let now = breathStart + 16; now <= breathStart + 3000; now += 16) {
+  for (let now = downResponseAt + 16; now <= breathStart + 3000; now += 16) {
     cursor.render(input, now, false);
     if (renders.at(-1)?.breathPhase === "hold") {
       lowSettledAt = now;
@@ -993,6 +996,40 @@ test("unstable structural geometry times out without committing or leaving work 
   assert.equal(harness.timerCount(), 0);
 }));
 
+test("horizontal navigation cancels structure intent but keeps writing and Ripple active", () => {
+  for (const key of ["ArrowLeft", "ArrowRight", "Home", "End", "Escape"]) {
+    withSessionHarness(harness => {
+      harness.tick(0);
+      harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
+      harness.tick(16);
+      harness.dispatch(20, "keydown", { key: "Tab", defaultPrevented: false });
+      harness.dispatch(24, "keydown", { key, defaultPrevented: false });
+      harness.tick(40);
+
+      assert.ok(harness.events.some(event => event.name === "structure-cancel" && event.payload.reason === "navigation"), key);
+      const prepare = harness.events.filter(event => event.name === "prepare").at(-1);
+      assert.equal(prepare?.payload.enabled, true, key);
+    }, { typewriter: true, ripple: true });
+  }
+});
+
+test("vertical navigation cancels structure intent and exits writing and Ripple", () => {
+  for (const key of ["ArrowUp", "ArrowDown", "PageUp", "PageDown"]) {
+    withSessionHarness(harness => {
+      harness.tick(0);
+      harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
+      harness.tick(16);
+      harness.dispatch(20, "keydown", { key: "Tab", defaultPrevented: false });
+      harness.dispatch(24, "keydown", { key, defaultPrevented: false });
+      harness.tick(40);
+
+      assert.ok(harness.events.some(event => event.name === "structure-cancel" && event.payload.reason === "navigation"), key);
+      const prepare = harness.events.filter(event => event.name === "prepare").at(-1);
+      assert.equal(prepare?.payload.enabled, false, key);
+    }, { typewriter: true, ripple: true });
+  }
+});
+
 test("interaction and lifecycle interruptions cancel a pending structure gate", () => {
   for (const [type, reason] of [["pointerdown", "pointer"], ["wheel", "wheel"], ["blur", "lifecycle"]]) {
     withSessionHarness(harness => {
@@ -1024,7 +1061,7 @@ test("interaction and lifecycle interruptions cancel a pending structure gate", 
   });
 });
 
-test("lifecycle suspension releases owned Ripple opacity instead of clearing it", () => withSessionHarness(harness => {
+test("explicit lifecycle suspension releases owned Ripple opacity instead of clearing it", () => withSessionHarness(harness => {
   const previous = new PaintElement();
   previous.dataset.nodeId = "previous";
   previous.parentElement = harness.editor;
@@ -1038,7 +1075,7 @@ test("lifecycle suspension releases owned Ripple opacity instead of clearing it"
   assert.ok(dim);
   dim.currentTime = MOTION.blockFadeMs;
 
-  harness.dispatch(16, "blur");
+  harness.session.suspend();
 
   const release = previous.animations.at(-1)!;
   assert.notEqual(release, dim);
@@ -1046,9 +1083,50 @@ test("lifecycle suspension releases owned Ripple opacity instead of clearing it"
   assert.equal(release.frames[0].opacity, RIPPLE_LEVELS[1]);
   assert.equal(release.frames[1].opacity, 1);
   assert.equal(release.playState, "running");
-  harness.dispatch(17, "blur");
+  harness.session.suspend();
   assert.equal(release.playState, "running");
 }, { typewriter: false, ripple: true }));
+
+test("window blur preserves Cursor presentation while hidden document still releases it", () => withSessionHarness(harness => {
+  const previous = new PaintElement();
+  previous.dataset.nodeId = "previous";
+  previous.parentElement = harness.editor;
+  previous.nextElementSibling = harness.editable;
+  harness.editable.previousElementSibling = previous;
+  harness.editor.children = [previous, harness.editable];
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
+
+  harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
+  harness.tick(0);
+  const overlay = harness.body.children[0];
+  const opacityBefore = Number(overlay.style.opacity);
+  const scrollBeforeBlur = harness.scroll.scrollTop;
+  assert.equal(overlay.hidden, false);
+  assert.ok(opacityBefore > 0);
+
+  harness.dispatch(4, "keydown", { key: "Tab", defaultPrevented: false });
+  const readsBeforeFocus = harness.readCount();
+  harness.dispatch(16, "blur");
+
+  assert.equal(overlay.hidden, false);
+  assert.equal(Number(overlay.style.opacity), opacityBefore);
+  assert.equal(harness.rafCount(), 0);
+  assert.equal(harness.timerCount(), 0);
+  assert.ok(harness.events.some(event => event.name === "structure-cancel" && event.payload.reason === "lifecycle"));
+  assert.ok(harness.events.some(event => event.name === "clear"));
+  assert.equal(previous.animations.some(animation => animation.playState === "running"), false);
+
+  harness.dispatch(100, "focus");
+  harness.tick(100);
+  assert.ok(harness.readCount() > readsBeforeFocus);
+  assert.equal(harness.scroll.scrollTop, scrollBeforeBlur);
+  assert.equal(harness.events.filter(event => event.name === "prepare").at(-1)?.payload.enabled, false);
+  assert.equal(harness.events.filter(event => event.name === "frame-commit").at(-1)?.payload.typewriterMoving, false);
+
+  Object.defineProperty(document, "hidden", { configurable: true, value: true });
+  harness.dispatch(120, "visibilitychange");
+  assert.equal(overlay.hidden, true);
+}, { typewriter: true, ripple: true }));
 
 test("mutation delivery rebinds a semantic replacement before the next rAF", () => withSessionHarness(harness => {
   const old = new PaintElement();
