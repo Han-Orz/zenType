@@ -274,6 +274,13 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         if (next && frame && next.editor !== frame.editor) structure.cancel("editor-switch");
         const decision = structure.sample(next, now);
         const handoff = structure.handoff();
+        // Sentence presentation only needs the current focused block, editable
+        // text and collapsed Range, so it can commit on the first authoritative
+        // structural frame instead of waiting for topology quiet. The block
+        // neighborhood still waits for the semantic commit.
+        if (next && (decision === "wait" || decision === "geometry")) {
+          if (ripple.presentSentences(next, now, reducedMotion.matches)) queue();
+        }
         if (decision === "geometry") {
           // Geometry-ready gives Cursor its caret. Ripple stays held until the
           // semantic commit; the Structural Contract's identity readiness is

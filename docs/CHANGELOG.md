@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.9.0-remake.2.6-sentence-first-frame.1 (2026-09-11) — Sentence presentation on the first structural frame
+
+- Fixed the residual full-brightness plateau on the merged destination. Runtime CDP on SiYuan 3.8.3 proved the first authoritative post-mutation frame arrives ~2ms after the mutation (and ~50ms before the semantic commit) with the final destination already resolved, but the stale sentence buckets of the removed block were still registered: they point at detached text, so the new destination rendered with no highlight at full brightness under an already-focused block.
+- `ripple.presentSentences(frame, now, reducedMotion)` runs the existing sentence read/prepare path on that first frame and calls `render()` so the highlight buckets are actually re-registered. It is the same `sample()` with a `sentencesOnly` flag: no block plan, no `collectTargets`, and it never resumes the block owners the structural hold deliberately froze.
+- Session calls it on the `wait` and `geometry` decisions. Block neighborhood ownership still waits for semantic-ready, Cursor still waits for geometry-ready, Typewriter is untouched, and the ordinary path gains no work.
+- The semantic commit reuses the early state: the rebuild guard sees the same editable with no forced content dirty, so the projection, boundaries and color cache are not recomputed.
+- Runtime-observed before/after on the real host: first-frame buckets went from the removed block's `b50,b58` (≈66ms plateau) to `b38` (SENTENCE_ALPHA), with the destination still holding no block owner.# Changelog
+
+## v2.9.0-remake.2.6-sentence-role.1 (2026-09-11) — Sentence role through focused replacement
+
+- Fixed the residual `dim → 1 → dim` on the merged destination's existing sentences. After a block-start merge the destination becomes focused immediately (block A+), but its sentence model was rebuilt from scratch: SiYuan replaces the destination element, so `sameContent` is false, every boundary is fresh and `value` defaulted to `1` before being retargeted to `SENTENCE_ALPHA`. The block went straight to full brightness while the sentences were still at full brightness, giving a combined overshoot before both settled.
+- A fresh **non-active** sentence now takes `SENTENCE_ALPHA` when the focused block was previously on screen as a dim neighbour. That authority is the same mutation-time semantic key as block A+: `blockPainter.rebind()` reports back the key whose stale dim role it actually dropped, and only a replacement that carried a committed role qualifies.
+- The seed is one-shot and narrow. A reusable boundary still keeps its old `value`/`velocity`; a fresh active sentence is still `1`; ordinary navigation, click, editor switch, ordinary content rebuild and Enter split keep their existing full-brightness entrance. `clear()` drops the seed with the rest of the presentation state.
+- Active-sentence resolution, `SENTENCE_ALPHA`, bucket count, highlight registration, Critical Motion and the block layer are unchanged. The block layer never compensates sentence alpha; `0.4 → 0.6` is accepted as a real role change.
+- No new motion, easing, WAAPI, timer, rAF, observer, manager or registry. Runtime change is initial `value`/`velocity` provenance plus one one-shot semantic key.
+
 ## v2.9.0-remake.2.6-replacement-role.1 (2026-09-11) — Replacement presentation authority
 
 - Narrowed the replacement-carry contract. `same visualKey` proves semantic object continuity, not presentation-role continuity: SiYuan's paragraph merge removes the focused source and re-renders the destination as a fresh element with the same `data-node-id`, so the surviving key previously described a dim neighbour while the new element is the focused block.
@@ -500,3 +516,4 @@ Branch: `fix/v2.2.0-cursor-optimization`（8 commits ahead of v2.2.0，尚未发
 ### Fixed
 - 全屏模式高亮条层级问题
 - 退格/回车时空行聚焦问题
+
