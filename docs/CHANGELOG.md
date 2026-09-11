@@ -1,5 +1,33 @@
 # Changelog
 
+## v2.9.0-remake.2.7-list-presentation.1 (2026-09-12) — One structural displacement owner
+
+Real-device feedback on the previous round: window blur was correct, but Tab/Shift+Tab still flashed strongly and the focused-only transform felt slow and looked like several systems fighting. The prototype was reverted and re-derived from evidence.
+
+### Forensic finding: the flash was the prototype
+
+- Sentence presentation continuity was **never** lost on Tab. Instrumented evidence from the real host: `sameContent: true`, `sameText: true`, all sentences `fresh: false`, values `1 / 0.6 / 0.6` preserved exactly, `movingCount: 0`. The earlier hypothesis that a Range rebuild discards sentence alpha state is disproven for this path.
+- The block plan stays clean: the focused paragraph and its marker never enter the owner plan (`changedCount: 6`).
+- Painted-frame measurement settles it. With no structural transform, Tab, Shift+Tab and a 90 ms double-Tab all move the whole-editor mean luma monotonically by ~0.5 with a largest adjacent-frame step of 0.070 / 0.050 / 0.400 — no flash exists to fix.
+- The prototype's own paint timing was the flash: it attached at `geometry-ready` (two stable caret samples), so the item was **painted once at the Host's new position** and only then pulled back and animated. The recorded sequence was `itemLeft 964.2` (untransformed) at dt≈15.6 → `translate(-34px, 0)` clamping it to `930.2` at dt≈21.1. This is `STRUCTURAL_TRANSFORM_CONFLICT`, and it is why the displacement must be in place inside the mutation delivery.
+
+### One displacement owner
+
+- `modules/structurePresentation.ts` replaces the prototype. `capture()` reads one rect before the mutation; `attach()` runs inside the mutation delivery so no frame can paint the new layout first; `step()` advances on the shared Session frame. No new manager, observer, scheduler, rAF, DOM layer or second generation id.
+- The Host moves the item node itself, so the captured element is the primary subject and the live Selection is only a fallback — SiYuan restores the Selection through a `<wbr>` that outdent resolves after that delivery. Continuity is proved by `visualKey`; a Host that owns its own inline transform is never overwritten; a capture whose generation ends without acting is abandoned while a running displacement keeps converging.
+- `MOTION.structuralMoveResponseMs = 150` is a new, deliberately separate personality: a spatial displacement is not the block alpha timescale. One frame may advance at most a quarter of the response, so a renderer stall cannot teleport the subject — measured directly against a 265 ms rAF gap under a minimized window.
+- Cursor consumes the same offset through a new `carried` option: the position is placed, not approached, so one physical displacement is never chased twice. Cursor keeps its own Critical Motion for every other intent.
+
+### Runtime-observed
+
+- Tab (indent) `dx = -34`; Shift+Tab (outdent, real reparent) `dx = +34`; both attach at the mutation delivery before the first following frame.
+- Cursor/text agreement, measured with a sampler that reads no layout: `max |cursor step − offset step| = 0.001 px` across the whole motion, and the derived caret-presentation error peaks at 0.10 px (Tab) and 0.15 px (Shift+Tab) — the settled-caret threshold itself.
+- Supersession: a double-Tab and a Tab-then-Shift+Tab both attach a second time from the **current visual position** (`dx = +23.94`, not the stale rect delta), write a single transform value with no accumulation, and settle naturally.
+- With the motion active, the painted-frame luma steps are unchanged (0.070 / 0.400 / 0.050).
+- One measurement caveat recorded in the host contract: a per-frame `getBoundingClientRect()` sampler perturbs SiYuan's outdent path, so all motion numbers come from a layout-read-free probe.
+
+- Runtime LOC: 169 added non-comment lines in `src`, of which the new module is 175 lines (~125 code). No new manager, observer, scheduler, rAF or DOM layer. This is above the round's 140-line soft cap and below its 180-line stop threshold.
+
 ## v2.9.0-remake.2.7-product-closeout.1 (2026-09-12) — Window blur release, list reparent presentation, structural motion
 
 Three product closeout items, in order. Each is validated on the real SiYuan 3.8.3 host through CDP before the next one starts.

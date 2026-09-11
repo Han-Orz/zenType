@@ -36,6 +36,12 @@
 
 **Runtime-observed (2026-09-12, full CDP, caret under transform).** `Range.getBoundingClientRect()` 会包含祖先元素的 transform：对 item 施加 `translate(dx, 0)` 时，caret rect 与 item rect 同步位移。因此如果 Session 在此期间继续采样 host geometry，caret 读数会带上 presentation 位移；zenType 在采样后立刻减去当前 presentation offset，使 Structural Contract 与存储的 frame 始终消费未变换的 Host truth。
 
+**Runtime-observed (2026-09-12, full CDP, list outdent).** Shift+Tab 的 DOM 序列与 Tab 不同：它可能**替换聚焦 item 的 `<li>` 元素对象**——捕获到的 `<li>` 在下一次 mutation delivery 时已经 `isConnected === false`，而且此刻 caret 所在的 paragraph 还没有 `[data-type="NodeListItem"]` 祖先，按 semantic key 做全文档查询也找不到替代节点。也就是说 outdent 的 mutation delivery 可能落在 Host 事务中途，此时不存在可移动的列表 item。zenType 对这种 capture 选择 fail closed：不覆盖 transform、不猜几何、也不把动画推迟到元素出现之后（推迟会在元素已按新布局绘制过之后再把它拉回旧位置，制造第二次跳变）。
+
+**Runtime-observed (2026-09-12, full CDP, 测量本身会扰动 Host).** 在同一宿主上，如果注入一个每帧读取 `getBoundingClientRect()` 的 rAF 采样器，list outdent 会稳定地走上面那条“替换 `<li>` 且替代节点缺席”的路径；移除全部逐帧 layout 读取、只采样 `style.transform` 字符串后，同一条 outdent 连续 3/3 次都能在 mutation delivery 内解析出同一个 `<li>`（`data-node-id` 保持）并正常附着。因此本轮所有 motion 数值都改用不读 layout 的探针测量；工具造成的差异不当作宿主常量。
+
+**Runtime-observed (2026-09-12, painted frames, prototype rejection).** 用 screencast 的已绘制帧测量整个编辑区平均亮度：在“无 structural transform”基线上，Tab、Shift+Tab、90ms 内连续两次 Tab 的最大相邻帧亮度差分别为 0.070 / 0.050 / 0.400（整体范围约 0.5，单调收敛）。而在上一轮的原型上，item 在 repaint 后先以未被 transform 的 Host 位置被绘制了一帧（`itemLeft` 由 930.2 变为 964.2），下一帧才被拉回旧位置再开始滑动——这个“先跳过去再跳回来”就是用户感受到的强闪。结论：位移必须在 mutation delivery 内、第一帧绘制之前就位。
+
 ## Editing paths
 
 ### Tab / Shift+Tab
