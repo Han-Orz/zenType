@@ -1,4 +1,4 @@
-# zenType v2.9.0-remake.2.5-structural.1
+# zenType v2.9.0-remake.2.5-structural.2
 
 顺滑光标、打字机滚动、涟漪聚焦。critical-motion 开发构建保留单一 WritingSession / rAF / observer，并让 Cursor、Typewriter 和句级 Ripple 使用统一的解析临界阻尼数学；生产构建继续编译期剔除开发诊断代码。
 
@@ -33,7 +33,7 @@ npm run verify:prod
 
 开发构建在 `dev/`，生产构建在 `dist/`，安装包为 `package.zip`。包内文件位于压缩包根目录。
 
-停用现有 zenType，将现有插件目录备份到插件目录之外；把包内文件放入思源工作空间的 `data/plugins/zenType/`，再启用插件。不要同时运行两个 zenType 副本。顶栏提示包含 `v2.9.0-remake.2.5-structural.1`，插件 manifest 保持数字版本 `2.9.0`。
+停用现有 zenType，将现有插件目录备份到插件目录之外；把包内文件放入思源工作空间的 `data/plugins/zenType/`，再启用插件。不要同时运行两个 zenType 副本。顶栏提示包含 `v2.9.0-remake.2.5-structural.2`，插件 manifest 保持数字版本 `2.9.0`。
 
 已有开发链接可以继续使用 `dev/`。创建新链接可运行 `node scripts/make_dev_link.js --workspace <思源工作空间路径>`，脚本拒绝覆盖已有插件目录。
 

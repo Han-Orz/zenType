@@ -823,6 +823,89 @@ test("structural handoff binds geometry stability to semantic block identity", (
   assert.equal(nextGate.handoff()?.toBlockKey, "different-block");
 }));
 
+test("unknown structural origin remains null instead of being backfilled from the destination", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const destination = new PaintElement();
+  destination.dataset.nodeId = "destination-block";
+  const gate = createStructureGate();
+
+  gate.intent(editor as unknown as HTMLElement, 0);
+  gate.mutation(editor as unknown as HTMLElement, 4, "structural");
+  const destinationFrame = frame({ editor: editor as unknown as HTMLElement,
+    block: destination as unknown as HTMLElement, caret: { x: 320, y: 360, height: 20 } });
+  assert.equal(gate.sample(destinationFrame, 16), "wait");
+  assert.equal(gate.sample(destinationFrame, 32), "geometry");
+  assert.equal(gate.handoff()?.fromBlockKey, null);
+  assert.equal(gate.handoff()?.toBlockKey, "destination-block");
+  assert.equal(gate.sample(destinationFrame, 80), "commit");
+  assert.equal(gate.handoff()?.fromBlockKey, null);
+}));
+
+test("unstable structural samples never replace the trusted origin", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const trusted = new PaintElement();
+  const unstableA = new PaintElement();
+  const unstableB = new PaintElement();
+  const destination = new PaintElement();
+  trusted.dataset.nodeId = "trusted-block";
+  unstableA.dataset.nodeId = "unstable-a";
+  unstableB.dataset.nodeId = "unstable-b";
+  destination.dataset.nodeId = "destination-block";
+  const gate = createStructureGate();
+
+  const initial = frame({ editor: editor as unknown as HTMLElement,
+    block: trusted as unknown as HTMLElement, caret: { x: 100, y: 200, height: 20 } });
+  assert.equal(gate.sample(initial, 0), "ordinary");
+  gate.intent(editor as unknown as HTMLElement, 4);
+  gate.mutation(editor as unknown as HTMLElement, 8, "structural");
+  assert.equal(gate.sample({ ...initial, block: unstableA as unknown as HTMLElement,
+    caret: { x: 200, y: 300, height: 20 } }, 16), "wait");
+  assert.equal(gate.sample({ ...initial, block: unstableB as unknown as HTMLElement,
+    caret: { x: 210, y: 310, height: 20 } }, 32), "wait");
+
+  gate.intent(editor as unknown as HTMLElement, 40);
+  gate.mutation(editor as unknown as HTMLElement, 44, "structural");
+  const destinationFrame = { ...initial, block: destination as unknown as HTMLElement,
+    caret: { x: 320, y: 360, height: 20 } };
+  assert.equal(gate.sample(destinationFrame, 56), "wait");
+  assert.equal(gate.sample(destinationFrame, 72), "geometry");
+  assert.equal(gate.handoff()?.generation, 2);
+  assert.equal(gate.handoff()?.fromBlockKey, "trusted-block");
+  assert.equal(gate.handoff()?.toBlockKey, "destination-block");
+}));
+
+test("geometry-ready caret becomes the trusted origin for the next structural generation", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const first = new PaintElement();
+  const second = new PaintElement();
+  const third = new PaintElement();
+  first.dataset.nodeId = "first-block";
+  second.dataset.nodeId = "second-block";
+  third.dataset.nodeId = "third-block";
+  const gate = createStructureGate();
+  const initial = frame({ editor: editor as unknown as HTMLElement,
+    block: first as unknown as HTMLElement, caret: { x: 100, y: 200, height: 20 } });
+
+  assert.equal(gate.sample(initial, 0), "ordinary");
+  gate.intent(editor as unknown as HTMLElement, 4);
+  gate.mutation(editor as unknown as HTMLElement, 8, "structural");
+  const secondFrame = { ...initial, block: second as unknown as HTMLElement,
+    caret: { x: 220, y: 320, height: 20 } };
+  assert.equal(gate.sample(secondFrame, 16), "wait");
+  assert.equal(gate.sample(secondFrame, 32), "geometry");
+  assert.equal(gate.handoff()?.fromBlockKey, "first-block");
+
+  gate.intent(editor as unknown as HTMLElement, 40);
+  gate.mutation(editor as unknown as HTMLElement, 44, "structural");
+  const thirdFrame = { ...initial, block: third as unknown as HTMLElement,
+    caret: { x: 340, y: 440, height: 20 } };
+  assert.equal(gate.sample(thirdFrame, 56), "wait");
+  assert.equal(gate.sample(thirdFrame, 72), "geometry");
+  assert.equal(gate.handoff()?.generation, 2);
+  assert.equal(gate.handoff()?.fromBlockKey, "second-block");
+  assert.equal(gate.handoff()?.toBlockKey, "third-block");
+}));
+
 test("Cursor structural intent uses the navigation distance-aware response law", () => withPresentation(body => {
   const records: Array<{ name: string; payload: Record<string, unknown> }> = [];
   const cursor = createCursor({
@@ -924,6 +1007,41 @@ test("Session routes typing, navigation and structural CursorIntent independentl
   assert.ok(harness.events.some(event => event.name === "structure-geometry-ready" &&
     event.payload.topologyChanged === true && event.payload.fromBlockKey === "active" && event.payload.toBlockKey === "active"));
 }, { typewriter: true, ripple: true }));
+
+test("structural CursorIntent stays with its target through commit, then yields to new targets", () => withSessionHarness(harness => {
+  harness.tick(0);
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, caret: { x: 500, y: 420, height: 20 } });
+  harness.dispatch(0, "keydown", { key: "Enter", defaultPrevented: false });
+  const removed = new PaintElement();
+  removed.dataset.nodeId = "removed";
+  harness.mutate(4, [{ type: "childList", target: harness.editor,
+    addedNodes: [], removedNodes: [removed] } as unknown as MutationRecord]);
+  harness.tick(16);
+  harness.tick(32);
+  harness.tick(80);
+
+  const renders = () => harness.events.filter(event => event.name === "render" && "intent" in event.payload);
+  assert.equal(renders().at(-1)?.payload.intent, "structural");
+  assert.ok(harness.events.some(event => event.name === "structure-commit"));
+
+  harness.tick(5000);
+  assert.equal(renders().at(-1)?.payload.intent, "structural");
+  harness.dispatch(5016, "selectionchange");
+  harness.tick(5016);
+  assert.equal(renders().at(-1)?.payload.intent, "navigation");
+
+  harness.dispatch(5020, "keydown", { key: "ArrowRight", defaultPrevented: false });
+  harness.setFrame({ ...harness.getFrame(), caret: { x: 520, y: 420, height: 20 } });
+  harness.tick(5036);
+  assert.equal(renders().at(-1)?.payload.intent, "navigation");
+  assert.equal(renders().at(-1)?.payload.targetX, 520);
+
+  harness.dispatch(5040, "input", { inputType: "insertText", isComposing: false });
+  harness.setFrame({ ...harness.getFrame(), caret: { x: 540, y: 420, height: 20 } });
+  harness.tick(5056);
+  assert.equal(renders().at(-1)?.payload.intent, "typing");
+  assert.equal(renders().at(-1)?.payload.targetX, 540);
+}, { typewriter: false, ripple: false }));
 
 test("ordinary character deletion admits at the first safe text sample", () => withSessionHarness(harness => {
   harness.tick(0);
@@ -1795,6 +1913,8 @@ test("selection collapse reacquires fresh authority before immediate structural 
   const geometry = harness.events.find(event => event.name === "structure-geometry-ready");
   assert.ok(harness.events.some(event => event.name === "structure-cancel" && event.payload.reason === "selection"));
   assert.ok(geometry);
+  assert.ok(harness.events.some(event => event.name === "structure-intent" &&
+    event.payload.fromBlockKey === "source-block"));
   assert.equal(geometry.payload.fromBlockKey, "source-block");
   assert.equal(geometry.payload.toBlockKey, "survivor-block");
   assert.equal(geometry.payload.topologyChanged, true);

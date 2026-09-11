@@ -1,4 +1,4 @@
-# v2.9.0-remake.2.5-structural.1
+# v2.9.0-remake.2.5-structural.2
 
 ## Canonical five-layer architecture
 
@@ -18,11 +18,13 @@ The product boundary is deliberately small:
 
 **Owns:** bounded input intent, MutationRecord classification, generation supersession, structural evidence, geometry readiness, semantic readiness, deadline/overflow release, and one per-transaction `StructuralHandoff`.
 
-**May know:** the Host frame and bounded mutation summary supplied by Session, the monotonic execution time, and semantic block keys. The handoff is intentionally minimal: `generation`, `topologyChanged`, `fromBlockKey`, `toBlockKey`, `geometryReady`, and `semanticReady`. `fromBlockKey` is the semantic block at the last trustworthy caret when the intent starts; `toBlockKey` is the block in the new authoritative frame. A different key is evidence for features to interpret, not an animation prescription.
+**May know:** the Host frame and bounded mutation summary supplied by Session, the monotonic execution time, and semantic block keys. The handoff is intentionally minimal: `generation`, `topologyChanged`, `fromBlockKey`, `toBlockKey`, `geometryReady`, and `semanticReady`. `fromBlockKey` is the semantic block at the last trustworthy caret when the transaction starts; `toBlockKey` is the destination block in the new authoritative frame. A different key is evidence for features to interpret, not an animation prescription.
 
 **Must not know:** Critical Motion, `responseMs`, opacity, transform, scrollTop, WAAPI, rAF ownership, animation duration, Cursor speed, Ripple alpha, or Typewriter targets. Structure describes; it never animates. `input` intent remains a candidate; Host mutation evidence decides whether topology actually changed.
 
 The contract answers only three questions: (1) did Host structure become ordinary, representation, structural, or overflow; (2) is the new caret geometry trustworthy; and (3) is the new topology quiet and stable enough to commit? It does not classify merge, split, indent, or outdent from the key name. A range-selection handoff cancels the pending transaction; after collapse, a fresh live Selection, active editor/editable and caret frame must be reacquired before a new structural edit can use that authority.
+
+`fromBlockKey` has strict trusted provenance: it may come only from an ordinary-admitted caret, a prior structural caret that reached `geometry-ready`, or Session's explicit fresh collapsed-Selection handoff. Waiting, unstable or missing structural samples never update it, and the post-mutation destination never backfills it. If the transaction starts without a trusted origin, `fromBlockKey` remains `null`; unknown is not the same block. `toBlockKey` describes the authoritative destination published with the geometry handoff; sampling is not authority.
 
 ### 3. Session Authority (`WritingSession`)
 
@@ -43,9 +45,11 @@ The authority matrix is:
 | range selection | yield/native | cancel/hold | selection policy |
 | lifecycle hard release | release | cancel | clear/release |
 
+Selection ownership is a short bridge, not a subsystem: range entry gives presentation to native Selection and cancels the pending structure transaction; a collapse captures only a fresh `{ editable, editor, blockKey }` handoff; the first authoritative caret frame consumes and discards it. Failed or mismatched validation keeps the object `null`. No Range, Node, geometry, velocity or old generation is retained.
+
 ### 4. Feature Semantics
 
-**Owns:** Cursor target/personality and selection behavior, Typewriter comfort-band target, and Ripple sentence/block target and ownership decisions. Cursor keeps an explicit `CursorIntent`: ordinary typing uses the fixed typing response; navigation uses the existing distance-aware response; structural relocation has its own semantic branch and initially reuses that navigation distance-aware law. Typewriter and Ripple independently interpret structural holds.
+**Owns:** Cursor target/personality and selection behavior, Typewriter comfort-band target, and Ripple sentence/block target and ownership decisions. Cursor keeps an explicit `CursorIntent`: ordinary typing uses the fixed typing response; navigation uses the existing distance-aware response; structural relocation has its own semantic branch and initially reuses that navigation distance-aware law. `CursorIntent` is target provenance, not a long-lived application mode: a structural target keeps that branch through semantic commit until the target settles or a newer authoritative navigation/typing target replaces it. Typewriter and Ripple independently interpret structural holds.
 
 **May know:** the Host frame and the authority/handoff granted by Session, including semantic identity, old/new geometry and topology evidence when a feature needs it. Future Local Layout Continuity belongs here as a bounded presentation feature using the existing Session frame.
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.9.0-remake.2.5-structural.2 (2026-09-11) — Structural semantic closeout
+
+- Trusted `fromBlockKey` provenance now comes only from an ordinary admitted caret, a prior geometry-ready structural caret, or an explicitly captured fresh collapsed Selection authority; unstable samples never update it and an unknown origin is never backfilled from `toBlockKey`.
+- Session selection state is a short-lived `SelectionHandoff` bridge from native range ownership to a fresh caret authority; it does not retain Range, Node, geometry or velocity objects.
+- `CursorIntent` is target provenance rather than a long-lived application mode. Structural targets retain the structural branch through semantic commit and release it after geometric settling or when a newer navigation/typing target takes authority.
+- No Critical Motion response, 48ms quiet window, 160ms deadline, Ripple/WAAPI backend or scheduling topology changed; structural hand-feel, FLIP and Local Layout Continuity remain deferred.
+
 ## v2.9.0-remake.2.5-structural.1 (2026-09-11) — Architecture closeout and structural handoff
 
 - Canonical architecture now defines five responsibilities: Host Truth, Structural Contract, Session Authority, Feature Semantics, and Motion + Painter.

@@ -29,6 +29,8 @@ export function createCursor(debug?: DebugRecorder) {
   let lastTime: number | null = null;
   let lastValid = -Infinity;
   let lastMotion = 0;
+  // Separate geometry settling from render's broader presentation-work result.
+  let targetMoving = false;
   const alpha: CriticalState = { value: 0, velocity: 0 };
   let alphaTarget = 1;
   let selecting = false;
@@ -100,6 +102,7 @@ export function createCursor(debug?: DebugRecorder) {
       editor = null;
     }
     motion = target = null;
+    targetMoving = false;
     lastTime = null;
     alpha.value = 0;
     alpha.velocity = 0;
@@ -217,6 +220,7 @@ export function createCursor(debug?: DebugRecorder) {
     const ySettled = stepCritical(motion.y, target.y, elapsed, response, MOTION.cursorSettlePx);
     const heightSettled = stepCritical(motion.height, target.height, elapsed, response, MOTION.cursorSettlePx);
     const moving = !(xSettled && ySettled && heightSettled);
+    targetMoving = moving;
     if (moving || isTyping || interacting) lastMotion = now;
     const view = frame.viewport;
     const edge = Math.min(motion.y.value + motion.height.value - view.top, view.bottom - motion.y.value);
@@ -310,6 +314,7 @@ export function createCursor(debug?: DebugRecorder) {
     if (alpha.value < 0) { alpha.value = 0; alpha.velocity = 0; }
     element.style.opacity = String(alpha.value);
     motion = target = null;
+    targetMoving = false;
     ZENTYPE_DEBUG: debugState("fade-out", null, { now, reason, fading: !settled });
     if (settled) { hide(true); return false; }
     return true;
@@ -357,6 +362,8 @@ export function createCursor(debug?: DebugRecorder) {
     },
     /** True while the overlay waits out a switched editor's animation. */
     isSettling() { return settleUntil !== 0 || switchRevealPhase !== "none"; },
+    /** True when the current caret target's x/y/height motion has settled. */
+    isTargetSettled() { return !targetMoving; },
     /**
      * The host switched editor (tab, split, popup). Themed switch animations keep
      * moving the caret geometry. Reveal after consecutive stable samples, bounded
