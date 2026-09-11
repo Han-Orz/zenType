@@ -4,6 +4,7 @@ import { editableAt, readEditorFrame } from "./utils/editorScope";
 import { createCursor, type CursorIntent } from "./modules/cursor";
 import { createTypewriter } from "./modules/typewriter";
 import { createRipple } from "./modules/ripple";
+import { createStructurePresentation } from "./modules/structurePresentation";
 import type { DebugRecorder } from "./debug/types";
 import { classifyMutations, createStructureGate, semanticBlockKey, STRUCTURE_LIMITS } from "./structure";
 
@@ -27,6 +28,9 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
   const cursor = createCursor(debug);
   const typewriter = createTypewriter();
   const ripple = createRipple(debug);
+  // The one presentation owner of a structural displacement. Ripple keeps
+  // owning alpha; this owns geometry, and the Cursor consumes the same offset.
+  const presentation = createStructurePresentation(debug);
   const structure = createStructureGate(debug);
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
   const listeners = new AbortController();
@@ -92,21 +96,22 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     return block ? block.closest<HTMLElement>('[data-type="NodeListItem"]') ?? block : null;
   }
 
+  /**
+   * The caret is attached to the glyphs, so the structural displacement is
+   * presented on the caret too. `frame.caret` stays the Host's untransformed
+   * truth; this adds back only the offset the presentation is drawing.
+   */
+  function presentedFrame(source: EditorFrame, offset: { x: number; y: number } | null): EditorFrame {
+    if (!offset || !source.caret) return source;
+    return { ...source, caret: { ...source.caret, x: source.caret.x + offset.x, y: source.caret.y + offset.y } };
+  }
+
   function blockKeyForStructuralIntent(editable: HTMLElement, editor: HTMLElement): string | null | undefined {
     if (selectionMode === "range") {
       return selectionHandoff?.editable === editable && selectionHandoff.editor === editor
         ? selectionHandoff.blockKey : null;
     }
     return undefined;
-  }
-
-  /**
-   * The live collapsed Selection's semantic block when it belongs to the observed
-   * editor. `null` means "unknown", never "no focus".
-   */
-  function focusedSelectionKey(): string | null {
-    const handoff = captureCollapsedSelection();
-    return handoff && handoff.editor === observedEditor ? handoff.blockKey : null;
   }
 
   function noteSampledSelection(next: EditorFrame | null) {
@@ -148,7 +153,8 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     if (changes.kind !== "text") structureDirty = true;
     if (changes.kind === "text" || changes.kind === "representation") targetAuthorityPending = true;
     if (observedEditor && !blocked && !pointerDown) {
-      structure.mutation(observedEditor, performance.now(), changes.kind, changes.textOnly);
+      const now = performance.now();
+      structure.mutation(observedEditor, now, changes.kind, changes.textOnly);
       if (changes.kind === "representation" || changes.kind === "structural") {
         // A structural topology change can replace the destination element under
         // the same semantic key while its Ripple role changes from dim neighbour
@@ -156,10 +162,17 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         // the final block by the time this microtask runs, so its semantic key is
         // the evidence for that role change. Only the key crosses the boundary;
         // Ripple decides that the old non-focused presentation role is stale.
-        const focusedKey = changes.kind === "structural" ? focusedSelectionKey() : null;
+        const focused = changes.kind === "structural" ? captureCollapsedSelection() : null;
+        const focusedKey = focused && focused.editor === observedEditor ? focused.blockKey : null;
         const carry = ripple.rebind(changes.added, focusedKey);
         ripple.freeze();
         carry();
+        // A list reparent moves Host DOM. Attaching here, inside the mutation
+        // delivery, is what keeps the displacement in place before the first
+        // frame can paint the Host's new layout.
+        if (changes.kind === "structural") {
+          presentation.attach(structuralMoveRoot(focused?.block ?? null), now, reducedMotion.matches);
+        }
       }
     }
     for (const node of changes.added) {
@@ -231,6 +244,9 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     if (immediate || document.hidden) ripple.clear();
     else if (frame) releaseRipple();
     else if (!wasBlocked) ripple.clear();
+    // A blocked Session stops advancing frames, so a displacement nobody will
+    // finish must give the Host element back immediately.
+    presentation.cancel();
     frame = null;
     observe(null);
   }
@@ -253,6 +269,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     // snapping every owner to neutral in one frame.
     if (document.hidden) ripple.clear();
     else releaseRipple();
+    presentation.cancel();
     cleanClones();
     frame = null;
     observe(null);
@@ -285,6 +302,9 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
       }
       let sampled = false;
       let authoritativeTarget = false;
+      // The one structural displacement is advanced once per Session frame,
+      // before any path below consumes the caret it carries.
+      const offset = presentation.step(now, reducedMotion.matches);
       // A typewriter frame only moves the container: the frame already transports
       // the caret and the cursor by that displacement, so re-reading host geometry
       // every frame of a comfort scroll is redundant work.
@@ -292,6 +312,12 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         sampled = true;
         const next = readEditorFrame(reducedMotion.matches, composingEditor, frame?.editor);
         geometryDirty = false;
+        // The caret rect includes the transform on screen. Remove it here so the
+        // Structural Contract and every stored frame keep consuming untransformed
+        // Host truth.
+        if (offset && next?.caret) {
+          next.caret = { ...next.caret, x: next.caret.x - offset.x, y: next.caret.y - offset.y };
+        }
         noteSampledSelection(next);
         if (next && frame && next.editor !== frame.editor) structure.cancel("editor-switch");
         const decision = structure.sample(next, now);
@@ -325,14 +351,14 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           const intent = cursorTargetIntentFor(now, handoff?.topologyChanged === true);
           structuralGeometryGeneration = handoff?.generation ?? structuralGeometryGeneration;
           targetAuthorityPending = false;
-          const cursorMoving = cursor.render(frame, now, intent,
+          const cursorMoving = cursor.render(presentedFrame(frame, offset), now, intent,
             pointerDown || now - lastInteraction < MOTION.interactionHoldMs,
-            { authoritativeTarget: true });
+            { authoritativeTarget: true, carried: offset !== null });
           const settling = cursor.isSettling();
           if (intent === "structural" && cursor.isTargetSettled() && !settling) cursorTargetIntent = "navigation";
           geometryDirty = true;
           cleanClones();
-          if (cursorMoving || settling || structure.needsFrameSampling()) queue();
+          if (cursorMoving || settling || structure.needsFrameSampling() || offset) queue();
           return;
         }
         if (decision === "wait") {
@@ -355,7 +381,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
             // all presentation and await fresh activity instead of animating a guess.
             targetAuthorityPending = false;
             cursor.hide(); cursorTargetIntent = "navigation";
-            ripple.clear(); stopWriting(); cleanClones();
+            ripple.clear(); stopWriting(); cleanClones(); presentation.abandon();
             frame = next;
             observe(next);
             ZENTYPE_DEBUG: debug?.record("session", "structure-release", { now, reason: decision });
@@ -399,6 +425,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           const fading = cursor.release(now, reducedMotion.matches);
           cursorTargetIntent = "navigation";
           ripple.clear();
+          presentation.abandon();
           typewriter.cancel();
           frame = null;
           observe(null);
@@ -411,6 +438,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           cursorTargetIntent = "navigation";
           targetAuthorityPending = true;
           ripple.clear();
+          presentation.cancel();
           typewriter.cancel();
           if (writingEditor !== next.editor) writingEditor = null;
           if (composingEditor !== next.editor) composingEditor = null;
@@ -465,9 +493,9 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
       // recalc of its own invalidation (that recalc measured ~150ms on a long
       // document, once per focus-mode entry and exit).
       const intent = cursorTargetIntentFor(now);
-      const cursorMoving = cursor.render(frame, now, intent,
+      const cursorMoving = cursor.render(presentedFrame(frame, offset), now, intent,
         pointerDown || now - lastInteraction < MOTION.interactionHoldMs,
-        { authoritativeTarget });
+        { authoritativeTarget, carried: offset !== null });
       const settling = cursor.isSettling();
       if (intent === "structural" && cursor.isTargetSettled() && !settling) cursorTargetIntent = "navigation";
       if (settling) geometryDirty = true;
@@ -492,7 +520,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         typewriterMoving: typewriter.isMoving(),
         settling,
       });
-      if (cursorMoving || typewriter.isMoving() || rippleMoving || settling) queue();
+      if (cursorMoving || typewriter.isMoving() || rippleMoving || settling || offset) queue();
       else if ((wake === null || !frame.caret) && !composing) {
         // Recovery, typing pauses and cursor breathing share the idle wake.
         const cursorDelay = reducedMotion.matches ? Infinity : cursor.wakeDelay(now) ?? Infinity;
@@ -578,6 +606,12 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
             : key.key === "Tab" ? key.shiftKey ? "outdent" : "indent" : "other";
           const editor = editable.closest<HTMLElement>(".protyle-wysiwyg")!;
           structure.intent(editor, now, intent, blockKeyForStructuralIntent(editable, editor));
+          // A list indent reparents Host DOM, so the position the user is looking
+          // at has to be read before the mutation. This is the only geometry read
+          // the structural presentation adds, and it is bounded to one element.
+          if (intent === "indent" || intent === "outdent") {
+            presentation.capture(structuralMoveRoot(captureCollapsedSelection()?.block ?? null), now);
+          }
         }
         break;
       }
@@ -687,7 +721,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     configure(next) {
       features = { ...next };
       structure.cancel("configure");
-      if (!features.ripple) ripple.clear();
+      if (!features.ripple) { ripple.clear(); presentation.cancel(); }
       if (!features.typewriter) typewriter.cancel();
       refresh();
     },
@@ -702,6 +736,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
       clearWake();
       if (pending !== null) cancelAnimationFrame(pending);
       typewriter.cancel();
+      presentation.cancel();
       ripple.destroy();
       cursor.destroy();
     },

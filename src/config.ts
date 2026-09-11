@@ -1,4 +1,4 @@
-export const BUILD_LABEL = "v2.9.0-remake.2.7-product-closeout.1";
+export const BUILD_LABEL = "v2.9.0-remake.2.7-list-presentation.1";
 
 /** Larger responseMs values mean slower, softer motion. */
 export const MOTION = {
@@ -8,6 +8,7 @@ export const MOTION = {
   switchStableFrames: 8,
   structureQuietMs: 48,
   structureDeadlineMs: 160,
+  structuralMoveResponseMs: 150,
   cursorAppearResponseMs: 370,
   cursorDisappearResponseMs: 80,
   cursorSettlePx: 0.15,

@@ -5,6 +5,7 @@ import { MOTION, RIPPLE_LEVELS, SENTENCE_ALPHA } from "../src/config";
 import { createRipple } from "../src/modules/ripple";
 import { createBlockPainter } from "../src/modules/ripple/blockPainter";
 import { createWritingSession } from "../src/session";
+import { createStructurePresentation } from "../src/modules/structurePresentation";
 import { createTypewriter } from "../src/modules/typewriter";
 import { createCursor } from "../src/modules/cursor";
 import { initDebugHook } from "../src/modules/debugHook";
@@ -25,9 +26,124 @@ function frame(overrides: Partial<EditorFrame> = {}): EditorFrame {
     maxScroll: 2000, reducedMotion: false, zIndex: 1, ...overrides };
 }
 
+function paintRect(element: PaintElement, left: number, top: number) {
+  element.rect = { x: left, y: top, left, top, right: left + 100, bottom: top + 20, width: 100, height: 20 };
+}
+
+test("a structural displacement holds the visual position and hands the host back its transform", () => withPresentation(() => {
+  const element = new PaintElement();
+  element.dataset.nodeId = "item";
+  paintRect(element, 100, 50);
+  const presentation = createStructurePresentation();
+  presentation.capture(element as unknown as HTMLElement, 0);
+
+  // The Host reparents the item: same node, new committed position.
+  paintRect(element, 130, 50);
+  assert.deepEqual(presentation.attach(element as unknown as HTMLElement, 4, false), { x: -30, y: 0 });
+  assert.equal(element.style.transform, "translate(-30px, 0px)");
+
+  let offset: { x: number; y: number } | null = { x: -30, y: 0 };
+  for (let now = 20; now <= 2000 && offset; now += 16) offset = presentation.step(now, false);
+  assert.equal(offset, null);
+  assert.equal(element.style.transform, "");
+}));
+
+test("a structural displacement refuses a mismatched key, a host transform and reduced motion", () => withPresentation(() => {
+  const element = new PaintElement();
+  element.dataset.nodeId = "item";
+  paintRect(element, 100, 50);
+  const presentation = createStructurePresentation();
+
+  // The Host replaced the node under a different key: DOM identity is not
+  // continuity, and the live fallback has to agree on the semantic key.
+  presentation.capture(element as unknown as HTMLElement, 0);
+  element.isConnected = false;
+  const replacement = new PaintElement();
+  replacement.dataset.nodeId = "other";
+  paintRect(replacement, 130, 50);
+  assert.equal(presentation.attach(replacement as unknown as HTMLElement, 4, false), null);
+  assert.equal(element.style.transform, "");
+  element.isConnected = true;
+
+  // Nothing may animate through a capture the Host never acted on.
+  presentation.capture(element as unknown as HTMLElement, 0);
+  paintRect(element, 130, 50);
+  assert.equal(presentation.attach(element as unknown as HTMLElement, MOTION.structureDeadlineMs + 1, false), null);
+  assert.equal(element.style.transform, "");
+
+  presentation.capture(element as unknown as HTMLElement, 0);
+  assert.equal(presentation.attach(element as unknown as HTMLElement, 4, true), null);
+  assert.equal(element.style.transform, "");
+
+  // A Host that owns its own inline transform keeps it.
+  element.style.transform = "translateX(2px)";
+  presentation.capture(element as unknown as HTMLElement, 0);
+  assert.equal(presentation.attach(element as unknown as HTMLElement, 4, false), null);
+  assert.equal(element.style.transform, "translateX(2px)");
+}));
+
+test("a superseding capture continues from the current visual position with one transform", () => withPresentation(() => {
+  const element = new PaintElement();
+  element.dataset.nodeId = "item";
+  paintRect(element, 100, 50);
+  const presentation = createStructurePresentation();
+  presentation.capture(element as unknown as HTMLElement, 0);
+  paintRect(element, 130, 50);
+  assert.deepEqual(presentation.attach(element as unknown as HTMLElement, 4, false), { x: -30, y: 0 });
+
+  // Part way through, the Host layout is where it is and the element draws the
+  // offset on top of it.
+  const running = presentation.step(36, false)!;
+  paintRect(element, 130 + running.x, 50);
+  presentation.capture(element as unknown as HTMLElement, 40);
+
+  // A second reparent: the new handoff has to keep the visual position.
+  paintRect(element, 160 + running.x, 50);
+  const second = presentation.attach(element as unknown as HTMLElement, 44, false)!;
+  assert.ok(Math.abs(second.x - (running.x - 30)) < 0.001, String(second.x));
+  // One owner, one transform value: no accumulation across handoffs.
+  assert.equal(element.style.transform, `translate(${second.x}px, 0px)`);
+  presentation.cancel();
+  assert.equal(element.style.transform, "");
+}));
+
+test("a carried caret is placed instead of approached", () => withPresentation(body => {
+  const renders: Array<Record<string, unknown>> = [];
+  const cursor = createCursor({
+    record: (_source: string, name: string, payload: Record<string, unknown>) => {
+      if (name === "render") renders.push(payload);
+    },
+  } as never);
+  const input = frame({ editable: new PaintElement() as unknown as HTMLElement, reducedMotion: false,
+    caret: { x: 100, y: 400, height: 20 } });
+  cursor.render(input, 1000, "structural", false, { authoritativeTarget: true });
+  const moved = { ...input, caret: { x: 140, y: 400, height: 20 } };
+
+  // The structural presentation owns this displacement, so the cursor must be
+  // exactly where the glyphs are rather than chasing them a second time.
+  cursor.render(moved, 1016, "structural", false, { carried: true });
+  const overlay = body.children[0];
+  const carriedX = Number(overlay.style.transform.match(/translate3d\(([^p]+)/)![1]);
+  assert.equal(carriedX, 140);
+  assert.equal(Number(renders.at(-1)!.currentX), 140);
+
+  cursor.destroy();
+}));
+
+test("without a carried displacement the cursor still approaches its target", () => withPresentation(body => {
+  const cursor = createCursor();
+  const input = frame({ editable: new PaintElement() as unknown as HTMLElement, reducedMotion: false,
+    caret: { x: 100, y: 400, height: 20 } });
+  cursor.render(input, 1000, "structural", false, { authoritativeTarget: true });
+  cursor.render({ ...input, caret: { x: 140, y: 400, height: 20 } }, 1016, "structural");
+  const overlay = body.children[0];
+  const x = Number(overlay.style.transform.match(/translate3d\(([^p]+)/)![1]);
+  assert.ok(x > 100 && x < 140, String(x));
+  cursor.destroy();
+}));
+
 test("critical motion keeps value and velocity continuous across retarget", () => {
-  const state: CriticalState = { value: 0, velocity: 0 };
-  stepCritical(state, 100, 16, 100);
+  const state: CriticalState = { value: 0, velocity: 0 };  stepCritical(state, 100, 16, 100);
   const before = { ...state };
   stepCritical(state, -100, 0, 100);
   assert.deepEqual(state, before);

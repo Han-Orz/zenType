@@ -14,6 +14,14 @@ type BreathPhase = "normal" | "down" | "hold" | "up";
 type SwitchRevealPhase = "none" | "pending" | "active";
 interface CursorRenderOptions {
   authoritativeTarget?: boolean;
+  /**
+   * This frame's caret already carries an externally owned presentation
+   * displacement. The position is placed rather than approached so the
+   * structural presentation stays the single owner of that displacement: a
+   * second critical motion toward the same offset would only make the cursor
+   * trail the glyphs it is attached to.
+   */
+  carried?: boolean;
 }
 
 export function createCursor(debug?: DebugRecorder) {
@@ -116,10 +124,18 @@ export function createCursor(debug?: DebugRecorder) {
     element.hidden = true;
   }
 
+  /** Place a carried position exactly; nothing in this module owns its motion. */
+  function place(state: CriticalState, value: number) {
+    state.value = value;
+    state.velocity = 0;
+    return true;
+  }
+
   function render(frame: EditorFrame, now: number, intent: CursorIntent, interacting = false,
     options: CursorRenderOptions = {}): boolean {
     const isTyping = intent === "typing";
     const authoritativeTarget = options.authoritativeTarget === true && frame.caret !== null;
+    const carried = options.carried === true && frame.caret !== null;
     if (editor !== frame.editor) {
       hide();
       editor = frame.editor;
@@ -227,8 +243,8 @@ export function createCursor(debug?: DebugRecorder) {
     else if (intent === "typing") response = MOTION.caretTypingResponseMs;
     else if (intent === "structural") response = navigationResponse;
     else response = navigationResponse;
-    const xSettled = stepCritical(motion.x, target.x, elapsed, response, MOTION.cursorSettlePx);
-    const ySettled = stepCritical(motion.y, target.y, elapsed, response, MOTION.cursorSettlePx);
+    const xSettled = carried ? place(motion.x, target.x) : stepCritical(motion.x, target.x, elapsed, response, MOTION.cursorSettlePx);
+    const ySettled = carried ? place(motion.y, target.y) : stepCritical(motion.y, target.y, elapsed, response, MOTION.cursorSettlePx);
     const heightSettled = stepCritical(motion.height, target.height, elapsed, response, MOTION.cursorSettlePx);
     const moving = !(xSettled && ySettled && heightSettled);
     targetMoving = moving;
