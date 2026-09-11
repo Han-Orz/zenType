@@ -262,8 +262,9 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         const decision = structure.sample(next, now);
         const handoff = structure.handoff();
         if (decision === "geometry") {
-          // Geometry-ready is a Cursor-only handoff. Keep structural dirty state
-          // and all semantic owners held until the shared gate reaches commit.
+          // Geometry-ready gives Cursor its caret and may promote only the newly
+          // authoritative focused block owner. The rest of Ripple stays held
+          // until semantic commit.
           ripple.freeze();
           typewriter.cancel();
           if (!next) {
@@ -274,6 +275,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           acceptSelectionAuthority(next);
           frame = next;
           observe(frame);
+          ripple.handoffFocusedBlock(frame, handoff);
           const writing = writingEditor === frame.editor;
           const composing = composingEditor === frame.editor;
           const intent = cursorTargetIntentFor(now, handoff?.topologyChanged === true);

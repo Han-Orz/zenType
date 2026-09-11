@@ -93,6 +93,20 @@ export function createBlockPainter(debug?: DebugRecorder) {
       }
       ZENTYPE_DEBUG: debug?.record("ripple", "presentation-hold", { blockCount: paints.size });
     },
+    /** Promote only an existing focused owner while the surrounding plan stays frozen. */
+    promoteFocused(element: HTMLElement, reducedMotion: boolean) {
+      const paint = paints.get(element);
+      if (!paint) return { hadOwner: false, previousValue: null, previousTarget: null, newTarget: 1 };
+      const previousValue = sample(paint);
+      const previousTarget = paint.target;
+      if (previousTarget === 1) {
+        if (reducedMotion) paint.animation.finish();
+        else if (paint.animation.playState === "paused") paint.animation.play();
+      } else {
+        write(element, { value: previousValue, target: 1 }, paint.base, reducedMotion);
+      }
+      return { hadOwner: true, previousValue, previousTarget, newTarget: 1 };
+    },
     /** Rebind only existing semantic owners; never plan against intermediate DOM. */
     rebind(added: readonly HTMLElement[], seed?: CarrySeed) {
       const previous = new Map<string, Pick<Paint, "value" | "target">>();

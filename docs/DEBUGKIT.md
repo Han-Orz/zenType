@@ -62,7 +62,7 @@ const json = debug.exportRecording();
 
 ## 诊断限制
 
-### v2.9.0-remake.2.6 Delete Admission + Ownership Forensics
+### v2.9.0-remake.2.6 Ripple Focused Handoff
 
 Session 的 `structure-*` 事件来自共享 gate，不增加 snapshot、observer 或 scheduler：
 
@@ -77,7 +77,7 @@ Session 的 `structure-*` 事件来自共享 gate，不增加 snapshot、observe
 - `structure-timeout` / `structure-release`：没有证明稳定，释放效果；不能把它当成成功提交。
 - `structure-cancel`：ordinary 已经通过 strict fast admission 或 quiet confirmation，或用户抢占、生命周期取消。
 
-Cursor 的 `render` 事件记录 `intent`（`typing` / `navigation` / `structural`）以及 `currentX/currentY`、`targetX/targetY`、`xVelocity/yVelocity/heightVelocity`，用于区分错误的 typing response、陈旧 target 和 velocity carry。`targetAuthority` 为 `fresh` 或 `carry`：fresh 表示 Session 已授予新的 Host caret target，此帧会先重置 transport baseline；carry 表示仍在承载旧 target，此帧保留现有 origin/scroll/nested-scroll transport。`transportDx/transportDy` 与 `transportApplied` 只描述该次 presentation transport。这里的 `intent` 是当前 authoritative target 的 provenance，不是长期 Session mode；同一 structural target 到 semantic commit 仍保持 `structural`。开发构建激活时的提示包含 build label 与 short SHA；production 不保留该提示或 DebugKit。Ripple 的 `presentation-hold`、`replacement-carry`、`ownership-commit`、`stale-recovery` 与 `ownership-limit` 解释暂停、旧 owner 接管、最终计划、低频异常生命周期回收和有界退让；`ownership-commit` 额外提供 changed-only 的 `changes`，包含 `key`、`previousValue`、`startValue`、`target` 和 `hadPreviousKey`，最多保留 16 条，并用 `changedCount` / `truncated` 表示截断。`blockCount` 表示内存中持有的 WAAPI effects；正常 block 绘制不再生成 `.zentype-ripple-block` 或 inline opacity。动画 id 为 `zentype-ripple`，仅用于精确识别插件所有权，不是 DOM 属性或持久 registry。
+Cursor 的 `render` 事件记录 `intent`（`typing` / `navigation` / `structural`）以及 `currentX/currentY`、`targetX/targetY`、`xVelocity/yVelocity/heightVelocity`，用于区分错误的 typing response、陈旧 target 和 velocity carry。`targetAuthority` 为 `fresh` 或 `carry`：fresh 表示 Session 已授予新的 Host caret target，此帧会先重置 transport baseline；carry 表示仍在承载旧 target，此帧保留现有 origin/scroll/nested-scroll transport。`transportDx/transportDy` 与 `transportApplied` 只描述该次 presentation transport。这里的 `intent` 是当前 authoritative target 的 provenance，不是长期 Session mode；同一 structural target 到 semantic commit 仍保持 `structural`。开发构建激活时的提示包含 build label 与 short SHA；production 不保留该提示或 DebugKit。Ripple 的 `presentation-hold`、`focused-handoff`、`replacement-carry`、`ownership-commit`、`stale-recovery` 与 `ownership-limit` 解释暂停、geometry-ready 的单 owner 提升、旧 owner 接管、最终计划、低频异常生命周期回收和有界退让；`focused-handoff` 记录 `fromBlockKey`、`toBlockKey`、`hadOwner`、`previousValue`、`previousTarget` 与 `newTarget`。`ownership-commit` 额外提供 changed-only 的 `changes`，包含 `key`、`previousValue`、`startValue`、`target` 和 `hadPreviousKey`，最多保留 16 条，并用 `changedCount` / `truncated` 表示截断。`blockCount` 表示内存中持有的 WAAPI effects；正常 block 绘制不再生成 `.zentype-ripple-block` 或 inline opacity。动画 id 为 `zentype-ripple`，仅用于精确识别插件所有权，不是 DOM 属性或持久 registry。
 
 仓库未包含此次用户提到的原始 DebugKit JSON；不能把人工序列或代码推断标成 trace-derived evidence。deterministic ordering 已自动测试；当前环境没有 Docker、本地思源进程或 Chromium binary，因此没有把 marker/布局连续性标成真实宿主观测。
 

@@ -1,6 +1,6 @@
 import { MOTION, SENTENCE_ALPHA } from "../config";
 import { clamp, stepCritical } from "../motion";
-import { visualKey } from "../structure";
+import { semanticBlockKey, visualKey, type StructuralHandoff } from "../structure";
 import type { EditorFrame } from "../types";
 import type { DebugRecorder } from "../debug/types";
 import { resolveRangeTextPoint } from "../utils/rangeTextPoint";
@@ -231,7 +231,19 @@ export function createRipple(debug?: DebugRecorder) {
     block = null;
     lastTime = null;
   }
-  return { sample, prepare(frame: EditorFrame, contentDirty: boolean, structureDirty: boolean, enabled: boolean) {
+  function handoffFocusedBlock(frame: EditorFrame, handoff: StructuralHandoff | null) {
+    if (!handoff || !handoff.geometryReady || handoff.semanticReady || !handoff.topologyChanged ||
+        handoff.fromBlockKey === null || handoff.toBlockKey === null ||
+        handoff.fromBlockKey === handoff.toBlockKey || !frame.block ||
+        semanticBlockKey(frame.block) !== handoff.toBlockKey) return;
+    const promotion = painter.promoteFocused(frame.block, frame.reducedMotion);
+    ZENTYPE_DEBUG: debug?.record("ripple", "focused-handoff", {
+      fromBlockKey: handoff.fromBlockKey,
+      toBlockKey: handoff.toBlockKey,
+      ...promotion,
+    });
+  }
+  return { sample, handoffFocusedBlock, prepare(frame: EditorFrame, contentDirty: boolean, structureDirty: boolean, enabled: boolean) {
       sample(frame, contentDirty, structureDirty, enabled)();
     }, render, clear, invalidateColors: clearColors, freeze: painter.freeze,
     rebind(added: readonly HTMLElement[]) {

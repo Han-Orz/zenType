@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.9.0-remake.2.6-ripple.1 (2026-09-11) — Focused Ripple merge handoff
+
+- Geometry-ready may promote the already-owned focused destination block across a verified cross-key structural handoff, shortening the frozen dim window after a merge; full Ripple neighborhood and sentence ownership still wait for semantic-ready.
+- Added DEV-only `focused-handoff` evidence for the source/destination semantic keys and the promoted owner values. No fragment owner, overlay, FLIP or second animation scheduler was introduced.
+
 ## v2.9.0-remake.2.6-caret.1 (2026-09-11) — Caret truth and transport handoff
 
 - Empty semantic blocks now use their own content-host caret geometry before adjacent placeholder-text recovery; zero-width, BOM and non-breaking-space-only text are not meaningful glyph evidence.

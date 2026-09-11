@@ -1250,6 +1250,52 @@ test("Session withholds native text evidence until delayed host structure settle
   assert.ok(harness.events.filter(event => event.name === "prepare").length > prepared);
 }, { typewriter: true, ripple: true }));
 
+test("geometry-ready hands off only the focused Ripple destination owner", () => withSessionHarness(harness => {
+  const source = harness.editable;
+  const destination = new PaintElement();
+  source.dataset.nodeId = "source-block";
+  destination.dataset.nodeId = "destination-block";
+  destination.parentElement = source.parentElement = harness.editor;
+  destination.nextElementSibling = source;
+  source.previousElementSibling = destination;
+  harness.editor.children = [destination, source];
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range,
+    editable: source as unknown as HTMLElement, block: source as unknown as HTMLElement });
+  harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
+  harness.tick(0);
+  const dim = destination.animations.at(-1)!;
+  dim.currentTime = MOTION.blockFadeMs;
+
+  harness.dispatch(4, "keydown", { key: "Backspace", defaultPrevented: false });
+  source.isConnected = false;
+  source.parentElement = null;
+  source.previousElementSibling = null;
+  destination.nextElementSibling = null;
+  harness.editor.children = [destination];
+  harness.mutate(6, [{ type: "childList", target: harness.editor,
+    addedNodes: [], removedNodes: [source] } as unknown as MutationRecord]);
+  harness.setFrame({ ...harness.getFrame(), editable: destination as unknown as HTMLElement,
+    block: destination as unknown as HTMLElement, range: {} as Range,
+    caret: { x: 220, y: 420, height: 20 } });
+  harness.tick(16);
+  harness.tick(32);
+
+  const handoff = harness.events.find(event => event.name === "focused-handoff");
+  assert.ok(handoff);
+  assert.deepEqual(handoff.payload, {
+    fromBlockKey: "source-block", toBlockKey: "destination-block", hadOwner: true,
+    previousValue: RIPPLE_LEVELS[1], previousTarget: RIPPLE_LEVELS[1], newTarget: 1,
+  });
+  const earlyAnimation = destination.animations.at(-1)!;
+  assert.equal(earlyAnimation.frames[0].opacity, RIPPLE_LEVELS[1]);
+  assert.equal(earlyAnimation.frames[1].opacity, 1);
+  earlyAnimation.currentTime = MOTION.blockFadeMs / 2;
+
+  harness.tick(80);
+  assert.equal(destination.animations.at(-1), earlyAnimation);
+  assert.ok(harness.events.some(event => event.name === "structure-commit"));
+}, { typewriter: false, ripple: true }));
+
 test("Session routes typing, navigation and structural CursorIntent independently", () => withSessionHarness(harness => {
   harness.tick(0);
   harness.setFrame({ ...harness.getFrame(), reducedMotion: false, caret: { x: 150, y: 300, height: 20 } });
@@ -2163,6 +2209,124 @@ test("same-id replacement carries the visible sentence floor into block ownershi
   assert.equal(dim.frames[0].opacity, 0.6);
   assert.equal(dim.frames[1].opacity, RIPPLE_LEVELS[1]);
   assert.equal(dim.playState, "running");
+  painter.clear();
+}));
+
+test("focused Ripple handoff promotes one frozen owner and leaves neighbors paused", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const focused = new PaintElement();
+  const neighbor = new PaintElement();
+  focused.dataset.nodeId = "focused";
+  neighbor.dataset.nodeId = "neighbor";
+  focused.parentElement = neighbor.parentElement = editor;
+  const painter = createBlockPainter();
+  painter.prepare(new Map([
+    [focused as unknown as HTMLElement, RIPPLE_LEVELS[1]],
+    [neighbor as unknown as HTMLElement, RIPPLE_LEVELS[2]],
+  ]), editor as unknown as HTMLElement, false)();
+  const oldFocused = focused.animations.at(-1)!;
+  const oldNeighbor = neighbor.animations.at(-1)!;
+  oldFocused.currentTime = MOTION.blockFadeMs;
+  oldNeighbor.currentTime = MOTION.blockFadeMs;
+  painter.freeze();
+
+  const promotion = painter.promoteFocused(focused as unknown as HTMLElement, false);
+  assert.deepEqual(promotion, {
+    hadOwner: true, previousValue: RIPPLE_LEVELS[1], previousTarget: RIPPLE_LEVELS[1], newTarget: 1,
+  });
+  const focusedHandoff = focused.animations.at(-1)!;
+  assert.notEqual(focusedHandoff, oldFocused);
+  assert.equal(focusedHandoff.frames[0].opacity, RIPPLE_LEVELS[1]);
+  assert.equal(focusedHandoff.frames[1].opacity, 1);
+  assert.equal(focusedHandoff.playState, "running");
+  assert.equal(oldNeighbor.playState, "paused");
+
+  const absent = painter.promoteFocused(new PaintElement() as unknown as HTMLElement, false);
+  assert.deepEqual(absent, { hadOwner: false, previousValue: null, previousTarget: null, newTarget: 1 });
+  painter.clear();
+}));
+
+test("focused Ripple handoff requires a cross-key geometry authority", () => withPresentation(() => {
+  const records: Array<{ name: string; payload: Record<string, unknown> }> = [];
+  const debug = {
+    record: (_source: string, name: string, payload: Record<string, unknown>) => records.push({ name, payload }),
+  } as never;
+  function setup() {
+    const editor = new PaintElement();
+    const destination = new PaintElement();
+    const source = new PaintElement();
+    destination.dataset.nodeId = "destination";
+    source.dataset.nodeId = "source";
+    destination.parentElement = source.parentElement = editor;
+    destination.nextElementSibling = source;
+    source.previousElementSibling = destination;
+    const ripple = createRipple(debug);
+    ripple.prepare(frame({ editor: editor as unknown as HTMLElement, block: source as unknown as HTMLElement,
+      editable: source as unknown as HTMLElement, range: {} as Range, reducedMotion: false }), false, true, true);
+    destination.animations.at(-1)!.currentTime = MOTION.blockFadeMs;
+    ripple.freeze();
+    return { editor, destination, source, ripple };
+  }
+  const valid = { generation: 1, topologyChanged: true, fromBlockKey: "source", toBlockKey: "destination",
+    geometryReady: true, semanticReady: false };
+  const { editor, destination, source, ripple } = setup();
+  const before = destination.animations.length;
+  ripple.handoffFocusedBlock(frame({ editor: editor as unknown as HTMLElement, block: destination as unknown as HTMLElement,
+    editable: destination as unknown as HTMLElement, range: {} as Range, reducedMotion: false }), valid);
+  assert.equal(destination.animations.length, before + 1);
+  const event = records.at(-1)!;
+  assert.equal(event.name, "focused-handoff");
+  assert.deepEqual(event.payload, {
+    fromBlockKey: "source", toBlockKey: "destination", hadOwner: true,
+    previousValue: RIPPLE_LEVELS[1], previousTarget: RIPPLE_LEVELS[1], newTarget: 1,
+  });
+  ripple.destroy();
+
+  for (const handoff of [
+    { ...valid, fromBlockKey: "destination" },
+    { ...valid, topologyChanged: false },
+  ]) {
+    const invalid = setup();
+    const count = invalid.destination.animations.length;
+    invalid.ripple.handoffFocusedBlock(frame({ editor: invalid.editor as unknown as HTMLElement,
+      block: invalid.destination as unknown as HTMLElement, editable: invalid.destination as unknown as HTMLElement,
+      range: {} as Range, reducedMotion: false }), handoff);
+    assert.equal(invalid.destination.animations.length, count);
+    invalid.ripple.destroy();
+  }
+  const wrong = setup();
+  const wrongCount = wrong.destination.animations.length;
+  wrong.ripple.handoffFocusedBlock(frame({ editor: wrong.editor as unknown as HTMLElement,
+    block: wrong.source as unknown as HTMLElement, editable: wrong.source as unknown as HTMLElement,
+    range: {} as Range, reducedMotion: false }), valid);
+  assert.equal(wrong.destination.animations.length, wrongCount);
+  wrong.ripple.destroy();
+}));
+
+test("focused Ripple handoff continues into semantic commit without a stale restart", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const destination = new PaintElement();
+  destination.dataset.nodeId = "destination";
+  destination.parentElement = editor;
+  const painter = createBlockPainter();
+  painter.prepare(new Map([[destination as unknown as HTMLElement, RIPPLE_LEVELS[1]]]),
+    editor as unknown as HTMLElement, false)();
+  const initial = destination.animations.at(-1)!;
+  initial.currentTime = MOTION.blockFadeMs;
+  painter.freeze();
+  painter.promoteFocused(destination as unknown as HTMLElement, false);
+  const handoff = destination.animations.at(-1)!;
+  handoff.currentTime = MOTION.blockFadeMs / 2;
+
+  painter.prepare(new Map([[destination as unknown as HTMLElement, 1]]), editor as unknown as HTMLElement, false)();
+  assert.equal(destination.animations.at(-1), handoff);
+  assert.equal(handoff.frames[0].opacity, RIPPLE_LEVELS[1]);
+  assert.equal(handoff.frames[1].opacity, 1);
+
+  handoff.finish();
+  const animationCount = destination.animations.length;
+  painter.prepare(new Map([[destination as unknown as HTMLElement, 1]]), editor as unknown as HTMLElement, false)();
+  assert.equal(destination.animations.length, animationCount);
   painter.clear();
 }));
 
