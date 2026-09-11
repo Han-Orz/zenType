@@ -74,7 +74,7 @@ Session 的 `structure-*` 事件来自共享 gate，不增加 snapshot、observe
 - `ordinary-delete-admitted`：严格的 characterData-only、折叠且位于文本节点内部的 Backspace/Delete 直接通过 ordinary admission。
 - `structure-stable` / `structure-commit`：安静窗口和连续几何采样通过，允许统一提交。
 - `structure-timeout` / `structure-release`：没有证明稳定，释放效果；不能把它当成成功提交。
-- `structure-cancel`：ordinary 已经通过 quiet confirmation，或用户抢占、生命周期取消。
+- `structure-cancel`：ordinary 已经通过 strict fast admission 或 quiet confirmation，或用户抢占、生命周期取消。
 
 Ripple 的 `presentation-hold`、`replacement-carry`、`ownership-commit`、`stale-recovery` 与 `ownership-limit` 解释暂停、旧 owner 接管、最终计划、低频异常生命周期回收和有界退让。`blockCount` 表示内存中持有的 WAAPI effects；正常 block 绘制不再生成 `.zentype-ripple-block` 或 inline opacity。动画 id 为 `zentype-ripple`，仅用于精确识别插件所有权，不是 DOM 属性或持久 registry。
 
