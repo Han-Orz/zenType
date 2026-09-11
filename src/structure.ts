@@ -12,6 +12,7 @@ export interface StructuralHandoff {
   topologyChanged: boolean;
   fromBlockKey: string | null;
   toBlockKey: string | null;
+  identityReady: boolean;
   geometryReady: boolean;
   semanticReady: boolean;
 }
@@ -28,6 +29,7 @@ interface PendingStructure {
   textObserved: boolean;
   replacementObserved: boolean;
   stable: number;
+  identityPublished: boolean;
   geometryPublished: boolean;
   caret: CursorRect | null;
   handoff: StructuralHandoff;
@@ -138,10 +140,10 @@ export function createStructureGate(debug?: DebugRecorder) {
     const generation = ++nextGeneration;
     return { generation, editor, start: now, activity: now, evidence, intent,
       inputObserved: false, nonStructuralObserved: false, textObserved: false, replacementObserved: false,
-      stable: 0, geometryPublished: false, caret: null,
+      stable: 0, identityPublished: false, geometryPublished: false, caret: null,
       handoff: { generation, topologyChanged: evidence === "structural",
         fromBlockKey: fromBlockKey === undefined ? lastTrustedEditor === editor ? lastTrustedBlockKey : null : fromBlockKey,
-        toBlockKey: null, geometryReady: false, semanticReady: false } };
+        toBlockKey: null, identityReady: false, geometryReady: false, semanticReady: false } };
   }
   function begin(editor: HTMLElement, now: number, evidence: "structural" | "overflow" | null) {
     if (pending?.editor !== editor) {
@@ -172,8 +174,10 @@ export function createStructureGate(debug?: DebugRecorder) {
     if (!pending) return;
     pending.activity = now;
     pending.stable = 0;
+    pending.identityPublished = false;
     pending.geometryPublished = false;
     pending.caret = null;
+    pending.handoff.identityReady = false;
     pending.handoff.geometryReady = false;
     pending.handoff.semanticReady = false;
     pending.handoff.toBlockKey = null;
@@ -266,12 +270,29 @@ export function createStructureGate(debug?: DebugRecorder) {
       pending.caret = caret && { ...caret };
       pending.handoff.toBlockKey = blockKey;
       const quiet = now - pending.activity;
+      // Semantic identity is a Host fact, not a geometry fact: the first
+      // authoritative caret frame that resolves a block is enough to say the
+      // focused owner moved. Caret x/y stability and full topology quiet are
+      // separate readiness levels and are not required here.
+      const identityReady = !!frame && frame.selection === "caret" && frame.caretless !== true && blockKey !== null;
       const geometryReady = !!frame && frame.selection === "caret" && frame.caretless !== true && pending.stable >= 2;
       const semanticReady = geometryReady && quiet >= MOTION.structureQuietMs;
+      pending.handoff.identityReady = identityReady;
       pending.handoff.geometryReady = geometryReady;
       pending.handoff.semanticReady = semanticReady;
+      if (!identityReady) pending.identityPublished = false;
       if (!geometryReady) pending.geometryPublished = false;
       if (geometryReady) rememberTrusted(frame);
+      if (identityReady && !pending.identityPublished) {
+        pending.identityPublished = true;
+        publishedHandoff = pending.handoff;
+        ZENTYPE_DEBUG: debug?.record("session", "structure-identity-ready", {
+          now, generation: pending.generation,
+          topologyChanged: pending.handoff.topologyChanged,
+          fromBlockKey: pending.handoff.fromBlockKey,
+          toBlockKey: blockKey,
+        });
+      }
       if (geometryReady && !pending.geometryPublished) {
         pending.geometryPublished = true;
         publishedHandoff = pending.handoff;

@@ -1,4 +1,4 @@
-export const BUILD_LABEL = "v2.9.0-remake.2.6-ripple.2";
+export const BUILD_LABEL = "v2.9.0-remake.2.6-structure-identity.1";
 
 /** Larger responseMs values mean slower, softer motion. */
 export const MOTION = {

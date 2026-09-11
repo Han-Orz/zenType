@@ -1073,7 +1073,7 @@ test("structural handoff binds geometry stability to semantic block identity", (
   assert.equal(gate.sample(replaced, 32), "geometry");
   assert.deepEqual(gate.handoff(), {
     generation: 1, topologyChanged: true, fromBlockKey: "same-block", toBlockKey: "same-block",
-    geometryReady: true, semanticReady: false,
+    identityReady: true, geometryReady: true, semanticReady: false,
   });
   assert.equal(gate.sample(replaced, 56), "commit");
   assert.equal(gate.handoff()?.semanticReady, true);
@@ -1089,6 +1089,102 @@ test("structural handoff binds geometry stability to semantic block identity", (
   assert.equal(nextGate.sample({ ...initial, block: different as unknown as HTMLElement }, 48), "geometry");
   assert.equal(nextGate.handoff()?.toBlockKey, "different-block");
 }));
+
+test("structural identity becomes ready before caret geometry and topology quiet", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const destination = new PaintElement();
+  destination.dataset.nodeId = "destination-block";
+  const records: Array<{ name: string; payload: Record<string, unknown> }> = [];
+  const gate = createStructureGate({
+    record: (_source: string, name: string, payload: Record<string, unknown>) => records.push({ name, payload }),
+  } as never);
+  const base = frame({ editor: editor as unknown as HTMLElement, block: destination as unknown as HTMLElement,
+    caret: { x: 320, y: 360, height: 20 } });
+
+  gate.intent(editor as unknown as HTMLElement, 0);
+  gate.mutation(editor as unknown as HTMLElement, 4, "structural");
+  assert.equal(gate.sample(base, 16), "wait");
+  assert.deepEqual(gate.handoff(), {
+    generation: 1, topologyChanged: true, fromBlockKey: null, toBlockKey: "destination-block",
+    identityReady: true, geometryReady: false, semanticReady: false,
+  });
+  assert.deepEqual(records.find(record => record.name === "structure-identity-ready")?.payload, {
+    now: 16, generation: 1, topologyChanged: true, fromBlockKey: null, toBlockKey: "destination-block",
+  });
+
+  assert.equal(gate.sample(base, 32), "geometry");
+  assert.deepEqual(gate.handoff(), {
+    generation: 1, topologyChanged: true, fromBlockKey: null, toBlockKey: "destination-block",
+    identityReady: true, geometryReady: true, semanticReady: false,
+  });
+
+  assert.equal(gate.sample(base, 52), "commit");
+  assert.deepEqual(gate.handoff(), {
+    generation: 1, topologyChanged: true, fromBlockKey: null, toBlockKey: "destination-block",
+    identityReady: true, geometryReady: true, semanticReady: true,
+  });
+  assert.equal(records.filter(record => record.name === "structure-identity-ready").length, 1);
+  assert.equal(records.filter(record => record.name === "structure-geometry-ready").length, 1);
+}));
+
+test("structural identity fails closed without an authoritative block, caret or editor", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const destination = new PaintElement();
+  const caretless = new PaintElement();
+  destination.dataset.nodeId = "destination-block";
+  caretless.dataset.nodeId = "caretless-block";
+  const cases: Array<[string, EditorFrame | null]> = [
+    ["missing frame", null],
+    ["missing selection", frame({ editor: editor as unknown as HTMLElement, block: destination as unknown as HTMLElement,
+      selection: "missing", caret: null })],
+    ["caretless block", frame({ editor: editor as unknown as HTMLElement, block: caretless as unknown as HTMLElement,
+      caretless: true, caret: null })],
+    ["missing block", frame({ editor: editor as unknown as HTMLElement, block: null, caret: null })],
+    ["block without a semantic key", frame({ editor: editor as unknown as HTMLElement,
+      block: new PaintElement() as unknown as HTMLElement, caret: null })],
+  ];
+  for (const [name, sample] of cases) {
+    const gate = createStructureGate();
+    gate.intent(editor as unknown as HTMLElement, 0);
+    gate.mutation(editor as unknown as HTMLElement, 4, "structural");
+    assert.equal(gate.sample(sample, 16), "wait", name);
+    assert.equal(gate.handoff(), null, name);
+  }
+  // A range selection cancels the transaction outright; native ownership wins.
+  const ranged = createStructureGate();
+  ranged.intent(editor as unknown as HTMLElement, 0);
+  ranged.mutation(editor as unknown as HTMLElement, 4, "structural");
+  assert.equal(ranged.sample(frame({ editor: editor as unknown as HTMLElement,
+    block: destination as unknown as HTMLElement, selection: "range", caret: null }), 16), "ordinary");
+  assert.equal(ranged.handoff(), null);
+  const foreign = createStructureGate();
+  const other = new PaintElement();
+  foreign.intent(editor as unknown as HTMLElement, 0);
+  foreign.mutation(editor as unknown as HTMLElement, 4, "structural");
+  assert.equal(foreign.sample(frame({ editor: other as unknown as HTMLElement,
+    block: destination as unknown as HTMLElement }), 16), "ordinary");
+  assert.equal(foreign.handoff(), null);
+}));
+
+test("non-structural evidence never publishes structural identity", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const block = new PaintElement();
+  block.dataset.nodeId = "block";
+  const records: Array<{ name: string; payload: Record<string, unknown> }> = [];
+  const gate = createStructureGate({
+    record: (_source: string, name: string, payload: Record<string, unknown>) => records.push({ name, payload }),
+  } as never);
+  const base = frame({ editor: editor as unknown as HTMLElement, block: block as unknown as HTMLElement });
+
+  gate.intent(editor as unknown as HTMLElement, 0, "backspace");
+  gate.mutation(editor as unknown as HTMLElement, 4, "text", true);
+  gate.input();
+  assert.equal(gate.sample(base, 16), "wait");
+  gate.mutation(editor as unknown as HTMLElement, 52, "text", true);
+  assert.equal(gate.sample(base, 104), "ordinary");
+  assert.equal(records.some(record => record.name === "structure-identity-ready"), false);
+}));
+
 
 test("unknown structural origin remains null instead of being backfilled from the destination", () => withPresentation(() => {
   const editor = new PaintElement();
@@ -1250,7 +1346,7 @@ test("Session withholds native text evidence until delayed host structure settle
   assert.ok(harness.events.filter(event => event.name === "prepare").length > prepared);
 }, { typewriter: true, ripple: true }));
 
-test("geometry-ready hands off only the focused Ripple destination owner", () => withSessionHarness(harness => {
+test("structural identity hands off the focused Ripple owner before geometry commit", () => withSessionHarness(harness => {
   const source = harness.editable;
   const destination = new PaintElement();
   source.dataset.nodeId = "source-block";
@@ -1265,6 +1361,8 @@ test("geometry-ready hands off only the focused Ripple destination owner", () =>
   harness.tick(0);
   const dim = destination.animations.at(-1)!;
   dim.currentTime = MOTION.blockFadeMs;
+  const overlay = harness.body.children[0];
+  const origin = overlay.style.transform;
 
   harness.dispatch(4, "keydown", { key: "Backspace", defaultPrevented: false });
   source.isConnected = false;
@@ -1277,24 +1375,56 @@ test("geometry-ready hands off only the focused Ripple destination owner", () =>
   harness.setFrame({ ...harness.getFrame(), editable: destination as unknown as HTMLElement,
     block: destination as unknown as HTMLElement, range: {} as Range,
     caret: { x: 220, y: 420, height: 20 } });
+
+  // The first authoritative post-mutation frame is still a structural wait:
+  // identity transfers the owner here, before any presentation commit, while
+  // Cursor authority has not moved.
   harness.tick(16);
-  harness.tick(32);
-
-  const handoff = harness.events.find(event => event.name === "focused-handoff");
-  assert.ok(handoff);
-  assert.deepEqual(handoff.payload, {
-    fromBlockKey: "source-block", toBlockKey: "destination-block", hadOwner: true,
-    previousValue: RIPPLE_LEVELS[1], previousTarget: RIPPLE_LEVELS[1], newTarget: 1,
-    playStateBefore: "paused", playStateAfter: "running",
+  const identityIndex = harness.events.findIndex(event => event.name === "structure-identity-ready");
+  const handoffIndex = harness.events.findIndex(event => event.name === "focused-identity-handoff");
+  assert.ok(identityIndex >= 0);
+  assert.ok(handoffIndex > identityIndex);
+  assert.deepEqual(harness.events[handoffIndex].payload, {
+    fromBlockKey: "source-block", toBlockKey: "destination-block", hadDestinationOwner: true,
   });
-  const earlyAnimation = destination.animations.at(-1)!;
-  assert.equal(earlyAnimation.frames[0].opacity, RIPPLE_LEVELS[1]);
-  assert.equal(earlyAnimation.frames[1].opacity, 1);
-  earlyAnimation.currentTime = MOTION.blockFadeMs / 2;
+  // The transferred owner is released, never restarted: the destination simply
+  // stops carrying dim ownership and presents at its host opacity.
+  assert.equal(dim.playState, "idle");
+  assert.equal(destination.animations.length, 1);
+  assert.equal(overlay.style.transform, origin);
+  assert.equal(harness.events.some(event => event.name === "structure-geometry-ready"), false);
 
+  harness.tick(32);
+  const geometryIndex = harness.events.findIndex(event => event.name === "structure-geometry-ready");
+  assert.ok(geometryIndex > handoffIndex);
+  assert.notEqual(overlay.style.transform, origin);
+  assert.equal(destination.animations.length, 1);
+
+  // Semantic commit re-plans the neighborhood but must not re-dim the already
+  // focused destination owner.
   harness.tick(80);
-  assert.equal(destination.animations.at(-1), earlyAnimation);
-  assert.ok(harness.events.some(event => event.name === "structure-commit"));
+  const commitIndex = harness.events.findIndex(event => event.name === "structure-commit");
+  assert.ok(commitIndex > geometryIndex);
+  assert.equal(destination.animations.length, 1);
+  assert.equal(dim.playState, "idle");
+  assert.equal(harness.events.filter(event => event.name === "focused-identity-handoff").length, 1);
+}, { typewriter: false, ripple: true }));
+
+test("Session never publishes structural identity for ordinary or range evidence", () => withSessionHarness(harness => {
+  harness.tick(0);
+  setTextCaret(harness);
+  harness.dispatch(0, "keydown", { key: "Backspace", defaultPrevented: false });
+  harness.dispatch(4, "input", { inputType: "deleteContentBackward", isComposing: false });
+  harness.mutate(6, [{ type: "characterData", target: harness.editable,
+    addedNodes: [], removedNodes: [] } as unknown as MutationRecord]);
+  harness.tick(16);
+  assert.equal(harness.events.some(event => event.name === "structure-identity-ready"), false);
+
+  harness.dispatch(20, "keydown", { key: "Tab", defaultPrevented: false });
+  harness.setSelection("range");
+  harness.setFrame({ ...harness.getFrame(), selection: "range", range: null, caret: null });
+  harness.tick(36);
+  assert.equal(harness.events.some(event => event.name === "structure-identity-ready"), false);
 }, { typewriter: false, ripple: true }));
 
 test("Session routes typing, navigation and structural CursorIntent independently", () => withSessionHarness(harness => {
@@ -2213,7 +2343,7 @@ test("same-id replacement carries the visible sentence floor into block ownershi
   painter.clear();
 }));
 
-test("focused Ripple handoff promotes one frozen owner and leaves neighbors paused", () => withPresentation(() => {
+test("focused ownership handoff releases one frozen dim owner and leaves neighbors paused", () => withPresentation(() => {
   const editor = new PaintElement();
   const focused = new PaintElement();
   const neighbor = new PaintElement();
@@ -2231,40 +2361,21 @@ test("focused Ripple handoff promotes one frozen owner and leaves neighbors paus
   oldNeighbor.currentTime = MOTION.blockFadeMs;
   painter.freeze();
 
-  const promotion = painter.promoteFocused(focused as unknown as HTMLElement, false);
-  assert.deepEqual(promotion, {
-    hadOwner: true, previousValue: RIPPLE_LEVELS[1], previousTarget: RIPPLE_LEVELS[1], newTarget: 1,
-    playStateBefore: "paused", playStateAfter: "running",
-  });
-  const focusedHandoff = focused.animations.at(-1)!;
-  assert.notEqual(focusedHandoff, oldFocused);
-  assert.equal(focusedHandoff.frames[0].opacity, RIPPLE_LEVELS[1]);
-  assert.equal(focusedHandoff.frames[1].opacity, 1);
-  assert.equal(focusedHandoff.playState, "running");
+  assert.equal(painter.handoffFocused(focused as unknown as HTMLElement), true);
+  // Ownership truth moved; no replacement motion was authored.
+  assert.equal(focused.animations.length, 1);
+  assert.equal(oldFocused.playState, "idle");
   assert.equal(oldNeighbor.playState, "paused");
+  assert.equal(painter.size(), 1);
 
-  focusedHandoff.currentTime = 48;
-  const progressed = painter.promoteFocused(focused as unknown as HTMLElement, false);
-  assert.ok(progressed.previousValue! > RIPPLE_LEVELS[1] + 0.02);
-  assert.ok(progressed.previousValue! < 1);
-  assert.equal(progressed.playStateBefore, "running");
-  assert.equal(oldNeighbor.playState, "paused");
-
-  focusedHandoff.pause();
-  const resumed = painter.promoteFocused(focused as unknown as HTMLElement, false);
-  assert.equal(resumed.previousTarget, 1);
-  assert.equal(resumed.playStateBefore, "paused");
-  assert.equal(resumed.playStateAfter, "running");
-  assert.equal(focused.animations.at(-1), focusedHandoff);
-  assert.equal(oldNeighbor.playState, "paused");
-
-  const absent = painter.promoteFocused(new PaintElement() as unknown as HTMLElement, false);
-  assert.deepEqual(absent, { hadOwner: false, previousValue: null, previousTarget: null, newTarget: 1,
-    playStateBefore: null, playStateAfter: null });
+  // Re-exposing the same authority is a no-op, not a second transition.
+  assert.equal(painter.handoffFocused(focused as unknown as HTMLElement), false);
+  assert.equal(painter.handoffFocused(new PaintElement() as unknown as HTMLElement), false);
+  assert.equal(focused.animations.length, 1);
   painter.clear();
 }));
 
-test("focused Ripple handoff requires a cross-key geometry authority", () => withPresentation(() => {
+test("focused Ripple identity handoff requires a cross-key identity authority", () => withPresentation(() => {
   const records: Array<{ name: string; payload: Record<string, unknown> }> = [];
   const debug = {
     record: (_source: string, name: string, payload: Record<string, unknown>) => records.push({ name, payload }),
@@ -2285,44 +2396,60 @@ test("focused Ripple handoff requires a cross-key geometry authority", () => wit
     ripple.freeze();
     return { editor, destination, source, ripple };
   }
-  const valid = { generation: 1, topologyChanged: true, fromBlockKey: "source", toBlockKey: "destination",
-    geometryReady: true, semanticReady: false };
-  const { editor, destination, source, ripple } = setup();
-  const before = destination.animations.length;
-  ripple.handoffFocusedBlock(frame({ editor: editor as unknown as HTMLElement, block: destination as unknown as HTMLElement,
-    editable: destination as unknown as HTMLElement, range: {} as Range, reducedMotion: false }), valid);
-  assert.equal(destination.animations.length, before + 1);
-  const event = records.at(-1)!;
-  assert.equal(event.name, "focused-handoff");
-  assert.deepEqual(event.payload, {
-    fromBlockKey: "source", toBlockKey: "destination", hadOwner: true,
-    previousValue: RIPPLE_LEVELS[1], previousTarget: RIPPLE_LEVELS[1], newTarget: 1,
-    playStateBefore: "paused", playStateAfter: "running",
-  });
-  ripple.destroy();
+  const identity = { generation: 1, topologyChanged: true, fromBlockKey: "source", toBlockKey: "destination",
+    identityReady: true, geometryReady: false, semanticReady: false };
+  const destinationFrame = (fixture: ReturnType<typeof setup>) => frame({
+    editor: fixture.editor as unknown as HTMLElement, block: fixture.destination as unknown as HTMLElement,
+    editable: fixture.destination as unknown as HTMLElement, range: {} as Range, reducedMotion: false });
 
-  for (const handoff of [
-    { ...valid, fromBlockKey: "destination" },
-    { ...valid, topologyChanged: false },
+  const first = setup();
+  const before = first.destination.animations.length;
+  first.ripple.handoffFocusedBlock(destinationFrame(first), identity);
+  // Identity alone transfers ownership; no replacement motion is authored.
+  assert.equal(first.destination.animations.length, before);
+  assert.equal(first.destination.animations.at(-1)!.playState, "idle");
+  assert.deepEqual(records.at(-1), { name: "focused-identity-handoff", payload: {
+    fromBlockKey: "source", toBlockKey: "destination", hadDestinationOwner: true } });
+  // Re-exposing the same authority after geometry is a no-op, not a restart.
+  first.ripple.handoffFocusedBlock(destinationFrame(first), { ...identity, geometryReady: true, semanticReady: true });
+  assert.equal(first.destination.animations.length, before);
+  assert.equal(records.at(-1)!.payload.hadDestinationOwner, false);
+  first.ripple.destroy();
+
+  for (const rejected of [
+    { ...identity, identityReady: false },
+    { ...identity, topologyChanged: false },
+    { ...identity, fromBlockKey: "destination" },
+    { ...identity, fromBlockKey: null },
+    { ...identity, toBlockKey: null },
   ]) {
     const invalid = setup();
-    const count = invalid.destination.animations.length;
-    invalid.ripple.handoffFocusedBlock(frame({ editor: invalid.editor as unknown as HTMLElement,
-      block: invalid.destination as unknown as HTMLElement, editable: invalid.destination as unknown as HTMLElement,
-      range: {} as Range, reducedMotion: false }), handoff);
-    assert.equal(invalid.destination.animations.length, count);
+    const logged = records.length;
+    invalid.ripple.handoffFocusedBlock(destinationFrame(invalid), rejected);
+    assert.equal(records.length, logged);
+    assert.notEqual(invalid.destination.animations.at(-1)!.playState, "idle");
     invalid.ripple.destroy();
   }
+
   const wrong = setup();
-  const wrongCount = wrong.destination.animations.length;
+  const wrongLogged = records.length;
   wrong.ripple.handoffFocusedBlock(frame({ editor: wrong.editor as unknown as HTMLElement,
     block: wrong.source as unknown as HTMLElement, editable: wrong.source as unknown as HTMLElement,
-    range: {} as Range, reducedMotion: false }), valid);
-  assert.equal(wrong.destination.animations.length, wrongCount);
+    range: {} as Range, reducedMotion: false }), identity);
+  assert.equal(records.length, wrongLogged);
+  assert.notEqual(wrong.destination.animations.at(-1)!.playState, "idle");
   wrong.ripple.destroy();
+
+  // A same-key frame stays with replacement carry; it is never a cross-key handoff.
+  const same = setup();
+  const sameLogged = records.length;
+  same.ripple.handoffFocusedBlock(destinationFrame(same), { ...identity, fromBlockKey: "destination" });
+  assert.equal(records.length, sameLogged);
+  assert.notEqual(same.destination.animations.at(-1)!.playState, "idle");
+  same.ripple.destroy();
 }));
 
-test("focused Ripple handoff continues into semantic commit without a stale restart", () => withPresentation(() => {
+test("semantic commit never re-dims an already transferred focused owner", () => withPresentation(() => {
   const editor = new PaintElement();
   const destination = new PaintElement();
   destination.dataset.nodeId = "destination";
@@ -2333,22 +2460,13 @@ test("focused Ripple handoff continues into semantic commit without a stale rest
   const initial = destination.animations.at(-1)!;
   initial.currentTime = MOTION.blockFadeMs;
   painter.freeze();
-  painter.promoteFocused(destination as unknown as HTMLElement, false);
-  const handoff = destination.animations.at(-1)!;
-  handoff.currentTime = 48;
-  const progressed = painter.promoteFocused(destination as unknown as HTMLElement, false);
-  assert.ok(progressed.previousValue! > RIPPLE_LEVELS[1] + 0.02);
-  assert.ok(progressed.previousValue! < 1);
+
+  assert.equal(painter.handoffFocused(destination as unknown as HTMLElement), true);
+  assert.equal(initial.playState, "idle");
 
   painter.prepare(new Map([[destination as unknown as HTMLElement, 1]]), editor as unknown as HTMLElement, false)();
-  assert.equal(destination.animations.at(-1), handoff);
-  assert.equal(handoff.frames[0].opacity, RIPPLE_LEVELS[1]);
-  assert.equal(handoff.frames[1].opacity, 1);
-
-  handoff.finish();
-  const animationCount = destination.animations.length;
-  painter.prepare(new Map([[destination as unknown as HTMLElement, 1]]), editor as unknown as HTMLElement, false)();
-  assert.equal(destination.animations.length, animationCount);
+  assert.equal(destination.animations.length, 1);
+  assert.equal(destination.animations.at(-1)!.playState, "idle");
   painter.clear();
 }));
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.9.0-remake.2.6-structure-identity.1 (2026-09-11) — Structural identity handoff
+
+- The Structural Contract now publishes a third, independent readiness level: `identityReady`. The first authoritative structural frame that resolves a semantic block identity already proves that focused ownership moved `fromBlockKey → toBlockKey`; it no longer waits for two stable caret samples. `geometryReady` and `semanticReady` keep their existing meaning and thresholds.
+- Session routes identity authority ahead of the frame's Ripple presentation commit, so the first authoritative merged topology is presented with the correct focused owner instead of the previous dim one. Cursor still consumes only geometry-ready; the full Ripple neighborhood and sentences still consume only semantic-ready.
+- Removed the previous two rounds' geometry-ready focused promotion: `promoteFocused()`, its `0.4 → 1` WAAPI path, the per-owner thaw and the `playStateBefore`/`playStateAfter` telemetry. Identity transfers ownership by releasing the destination dim owner; it authors no replacement motion.
+- DebugKit replaces `focused-handoff` with `structure-identity-ready` and `ripple focused-identity-handoff` (`fromBlockKey`, `toBlockKey`, `hadDestinationOwner`). Expected order: evidence → identity-ready → focused-identity-handoff → geometry-ready → stable.
+- No manager, registry, observer, scheduler, rAF or second alpha owner was introduced; 48ms/160ms, the ordinary delete fast path and same-key replacement carry are unchanged.
+
 ## v2.9.0-remake.2.6-ripple.2 (2026-09-11) — Focused owner playback
 
 - Focused geometry handoff now explicitly starts the single destination WAAPI owner while the surrounding Ripple painter remains frozen; no planner, sentence ownership or freeze architecture changes.

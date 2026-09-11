@@ -232,15 +232,15 @@ export function createRipple(debug?: DebugRecorder) {
     lastTime = null;
   }
   function handoffFocusedBlock(frame: EditorFrame, handoff: StructuralHandoff | null) {
-    if (!handoff || !handoff.geometryReady || handoff.semanticReady || !handoff.topologyChanged ||
+    if (!handoff || !handoff.identityReady || !handoff.topologyChanged ||
         handoff.fromBlockKey === null || handoff.toBlockKey === null ||
         handoff.fromBlockKey === handoff.toBlockKey || !frame.block ||
         semanticBlockKey(frame.block) !== handoff.toBlockKey) return;
-    const promotion = painter.promoteFocused(frame.block, frame.reducedMotion);
-    ZENTYPE_DEBUG: debug?.record("ripple", "focused-handoff", {
+    const hadDestinationOwner = painter.handoffFocused(frame.block);
+    ZENTYPE_DEBUG: debug?.record("ripple", "focused-identity-handoff", {
       fromBlockKey: handoff.fromBlockKey,
       toBlockKey: handoff.toBlockKey,
-      ...promotion,
+      hadDestinationOwner,
     });
   }
   return { sample, handoffFocusedBlock, prepare(frame: EditorFrame, contentDirty: boolean, structureDirty: boolean, enabled: boolean) {

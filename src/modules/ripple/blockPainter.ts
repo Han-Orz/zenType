@@ -93,28 +93,15 @@ export function createBlockPainter(debug?: DebugRecorder) {
       }
       ZENTYPE_DEBUG: debug?.record("ripple", "presentation-hold", { blockCount: paints.size });
     },
-    /** Promote only an existing focused owner while the surrounding plan stays frozen. */
-    promoteFocused(element: HTMLElement, reducedMotion: boolean) {
-      const paint = paints.get(element);
-      if (!paint) return {
-        hadOwner: false, previousValue: null, previousTarget: null, newTarget: 1,
-        playStateBefore: null, playStateAfter: null,
-      };
-      const previousValue = sample(paint);
-      const previousTarget = paint.target;
-      const playStateBefore = paint.animation.playState;
-      if (previousTarget === 1) {
-        if (reducedMotion) paint.animation.finish();
-        else if (paint.animation.playState !== "running") paint.animation.play();
-      } else {
-        write(element, { value: previousValue, target: 1 }, paint.base, reducedMotion);
-        const promoted = paints.get(element);
-        if (!reducedMotion && promoted && promoted.animation.playState !== "running") promoted.animation.play();
-      }
-      return {
-        hadOwner: true, previousValue, previousTarget, newTarget: 1,
-        playStateBefore, playStateAfter: paints.get(element)?.animation.playState ?? null,
-      };
+    /**
+     * Release a committed dim owner so the first presentation of a new topology
+     * already shows the authoritative focused block. This transfers ownership
+     * truth; it deliberately starts no replacement motion.
+     */
+    handoffFocused(element: HTMLElement) {
+      if (!paints.has(element)) return false;
+      release(element);
+      return true;
     },
     /** Rebind only existing semantic owners; never plan against intermediate DOM. */
     rebind(added: readonly HTMLElement[], seed?: CarrySeed) {
