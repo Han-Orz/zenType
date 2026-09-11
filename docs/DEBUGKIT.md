@@ -62,7 +62,7 @@ const json = debug.exportRecording();
 
 ## 诊断限制
 
-### v2.9.0-remake.2.6 Caret Truth + Transport Handoff
+### v2.9.0-remake.2.6 Delete Admission + Ownership Forensics
 
 Session 的 `structure-*` 事件来自共享 gate，不增加 snapshot、observer 或 scheduler：
 
@@ -72,12 +72,12 @@ Session 的 `structure-*` 事件来自共享 gate，不增加 snapshot、observe
 - `structure-activity`：input、Selection 或 mutation 打断了安静窗口。
 - `structure-sample`：intent 阶段记录 input/non-structural observation 与等待/ordinary 原因；evidence 阶段记录 caret、quiet、stableFrames、`geometryReady`、`semanticReady` 与等待/geometry/commit 原因。
 - `structure-geometry-ready`：同一 generation 的连续可信 caret geometry 首次达到两次稳定采样；只授权 Cursor，不代表 Ripple/Typewriter 已获得 semantic commit。结构样本带有 `topologyChanged`、`fromBlockKey`、`toBlockKey`、`geometryReady` 和 `semanticReady`。
-- `ordinary-delete-admitted`：严格的 characterData-only、折叠且位于文本节点内部的 Backspace/Delete 直接通过 ordinary admission。
+- `ordinary-delete-admitted`：严格的 characterData-only、折叠且位于文本节点安全删除方向的 Backspace/Delete 直接通过 ordinary admission；Backspace 要求左侧有字符，Delete 要求右侧有字符。
 - `structure-stable` / `structure-commit`：安静窗口和连续几何采样通过，允许统一提交。
 - `structure-timeout` / `structure-release`：没有证明稳定，释放效果；不能把它当成成功提交。
 - `structure-cancel`：ordinary 已经通过 strict fast admission 或 quiet confirmation，或用户抢占、生命周期取消。
 
-Cursor 的 `render` 事件记录 `intent`（`typing` / `navigation` / `structural`）以及 `currentX/currentY`、`targetX/targetY`、`xVelocity/yVelocity/heightVelocity`，用于区分错误的 typing response、陈旧 target 和 velocity carry。`targetAuthority` 为 `fresh` 或 `carry`：fresh 表示 Session 已授予新的 Host caret target，此帧会先重置 transport baseline；carry 表示仍在承载旧 target，此帧保留现有 origin/scroll/nested-scroll transport。`transportDx/transportDy` 与 `transportApplied` 只描述该次 presentation transport。这里的 `intent` 是当前 authoritative target 的 provenance，不是长期 Session mode；同一 structural target 到 semantic commit 仍保持 `structural`。开发构建激活时的提示包含 build label 与 short SHA；production 不保留该提示或 DebugKit。Ripple 的 `presentation-hold`、`replacement-carry`、`ownership-commit`、`stale-recovery` 与 `ownership-limit` 解释暂停、旧 owner 接管、最终计划、低频异常生命周期回收和有界退让。`blockCount` 表示内存中持有的 WAAPI effects；正常 block 绘制不再生成 `.zentype-ripple-block` 或 inline opacity。动画 id 为 `zentype-ripple`，仅用于精确识别插件所有权，不是 DOM 属性或持久 registry。
+Cursor 的 `render` 事件记录 `intent`（`typing` / `navigation` / `structural`）以及 `currentX/currentY`、`targetX/targetY`、`xVelocity/yVelocity/heightVelocity`，用于区分错误的 typing response、陈旧 target 和 velocity carry。`targetAuthority` 为 `fresh` 或 `carry`：fresh 表示 Session 已授予新的 Host caret target，此帧会先重置 transport baseline；carry 表示仍在承载旧 target，此帧保留现有 origin/scroll/nested-scroll transport。`transportDx/transportDy` 与 `transportApplied` 只描述该次 presentation transport。这里的 `intent` 是当前 authoritative target 的 provenance，不是长期 Session mode；同一 structural target 到 semantic commit 仍保持 `structural`。开发构建激活时的提示包含 build label 与 short SHA；production 不保留该提示或 DebugKit。Ripple 的 `presentation-hold`、`replacement-carry`、`ownership-commit`、`stale-recovery` 与 `ownership-limit` 解释暂停、旧 owner 接管、最终计划、低频异常生命周期回收和有界退让；`ownership-commit` 额外提供 changed-only 的 `changes`，包含 `key`、`previousValue`、`startValue`、`target` 和 `hadPreviousKey`，最多保留 16 条，并用 `changedCount` / `truncated` 表示截断。`blockCount` 表示内存中持有的 WAAPI effects；正常 block 绘制不再生成 `.zentype-ripple-block` 或 inline opacity。动画 id 为 `zentype-ripple`，仅用于精确识别插件所有权，不是 DOM 属性或持久 registry。
 
 仓库未包含此次用户提到的原始 DebugKit JSON；不能把人工序列或代码推断标成 trace-derived evidence。deterministic ordering 已自动测试；当前环境没有 Docker、本地思源进程或 Chromium binary，因此没有把 marker/布局连续性标成真实宿主观测。
 

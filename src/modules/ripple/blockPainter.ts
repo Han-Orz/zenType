@@ -1,7 +1,9 @@
 import { MOTION } from "../../config";
 import { visualKey, STRUCTURE_LIMITS } from "../../structure";
 import { planHandoff, type BlockStep } from "./blockPlan";
-import type { DebugRecorder } from "../../debug/types";
+import type { DebugRecord, DebugRecorder } from "../../debug/types";
+
+const OWNERSHIP_TELEMETRY_LIMIT = 16;
 
 interface Paint { value: number; from: number; target: number; base: number; animation: Animation; key: string | undefined }
 interface CarrySeed { key: string; value: number }
@@ -137,10 +139,48 @@ export function createBlockPainter(debug?: DebugRecorder) {
       const bases = new Map([...steps].map(([element]) => [element, paints.get(element)?.base ?? Number(getComputedStyle(element).opacity)]));
       return () => {
         frozen = false;
+        let ownershipTelemetry: DebugRecord | null = null;
+        ZENTYPE_DEBUG: if (debug) {
+          const previousTargets = new Map<string, number>();
+          for (const paint of paints.values()) if (paint.key) previousTargets.set(paint.key, paint.target);
+          const changes: DebugRecord[] = [];
+          let changedCount = 0;
+          const recordChange = (key: string | null, previousValue: number | null,
+            startValue: number, target: number, hadPreviousKey: boolean) => {
+            changedCount++;
+            if (changes.length >= OWNERSHIP_TELEMETRY_LIMIT) return;
+            changes.push({ key, previousValue, startValue, target, hadPreviousKey });
+          };
+          for (const [element, step] of steps) {
+            const key = visualKey(element) ?? null;
+            const previousValue = old.get(element) ?? (key === null ? undefined : byKey.get(key));
+            const previousTarget = key === null ? paints.get(element)?.target : previousTargets.get(key);
+            const hadPreviousKey = key === null ? old.has(element) : previousTargets.has(key);
+            if (previousValue === undefined && step.value === 1 && step.target === 1) continue;
+            if (previousValue !== undefined && Math.abs(previousValue - step.value) < 0.002 && previousTarget === step.target) continue;
+            recordChange(key, previousValue ?? null, step.value, step.target, hadPreviousKey);
+          }
+          for (const [element, value] of old) {
+            if (steps.has(element)) continue;
+            const key = visualKey(element) ?? null;
+            const previousTarget = key === null ? paints.get(element)?.target : previousTargets.get(key);
+            if (value === 1 && previousTarget === 1) continue;
+            recordChange(key, value, value, 1, key === null || previousTargets.has(key));
+          }
+          ownershipTelemetry = {
+            targetCount: targets.size,
+            previousCount: old.size,
+            stepCount: steps.size,
+            changedCount,
+            truncated: changedCount > changes.length,
+            changes,
+          };
+        }
         for (const [element, step] of steps) write(element, step, bases.get(element)!, reducedMotion);
         for (const element of paints.keys()) if (!steps.has(element)) release(element);
-        ZENTYPE_DEBUG: debug?.record("ripple", "ownership-commit", { targetCount: targets.size, previousCount: old.size,
-          stepCount: steps.size, blockCount: paints.size });
+        ZENTYPE_DEBUG: if (ownershipTelemetry) debug?.record("ripple", "ownership-commit", {
+          ...ownershipTelemetry, blockCount: paints.size,
+        });
       };
     },
     clear,

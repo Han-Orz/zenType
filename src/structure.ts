@@ -99,8 +99,10 @@ function hasSafeOrdinaryTextPosition(frame: EditorFrame | null, intent: IntentKi
       !frame.editable || !frame.block || !frame.range?.collapsed) return false;
   const node = frame.range.startContainer;
   const value = node.nodeValue;
-  if (node.nodeType !== 3 || typeof value !== "string" ||
-      frame.range.startOffset <= 0 || frame.range.startOffset >= value.length) return false;
+  if (node.nodeType !== 3 || typeof value !== "string") return false;
+  const offset = frame.range.startOffset;
+  if (intent === "backspace" && offset <= 0) return false;
+  if (intent === "delete" && offset >= value.length) return false;
   if (!frame.editable.contains(node) || !frame.block.contains(node)) return false;
   for (let ancestor: HTMLElement | null = frame.block;
        ancestor && ancestor !== frame.editor; ancestor = ancestor.parentElement) {

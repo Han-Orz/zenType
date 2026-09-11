@@ -1,4 +1,4 @@
-# v2.9.0-remake.2.6-caret.1
+# v2.9.0-remake.2.6-delete.1
 
 ## Canonical five-layer architecture
 
@@ -82,7 +82,7 @@ The gate has one optional pending record:
 
 1. Enter/Backspace/Delete/Tab or structural beforeinput expresses intent. It does not establish semantic evidence or authorize a target. A new explicit structural intent replaces the same-editor pending generation with a fresh bounded start/deadline; it retains the last presentation instead of releasing it.
 2. Structural mutations establish the shared transaction, including operations with no key event. Input, Selection and mutation activity reset the quiet/stable run while it is pending.
-3. Input is editing activity, not negative structural evidence. SiYuan schedules ordinary input normalization with `setTimeout`, and that later task can still replace or restructure DOM. A narrowly admitted Backspace/Delete with a collapsed caret strictly inside a non-boundary text node may become ordinary on the first characterData-only sample; all other text/representation candidates still require both input and classifier-confirmed evidence plus 48ms without further classified host activity. Intent without such evidence remains withheld until the existing 160ms deadline, then releases presentation without committing guessed geometry.
+3. Input is editing activity, not negative structural evidence. SiYuan schedules ordinary input normalization with `setTimeout`, and that later task can still replace or restructure DOM. A narrowly admitted Backspace/Delete with a collapsed caret requires a safe text position on the deletion side—Backspace must have text to the left, Delete text to the right—and may become ordinary on the first characterData-only sample; all other text/representation candidates still require both input and classifier-confirmed evidence plus 48ms without further classified host activity. Intent without such evidence remains withheld until the existing 160ms deadline, then releases presentation without committing guessed geometry.
 4. With evidence, two matching caret samples (position/height within 0.15px and the same block binding) establish `geometry-ready`; missing geometry, a non-caret selection or a caretless block breaks the stable run. Geometry-ready only authorizes Cursor to consume the sampled caret. Full semantic commit still additionally requires at least 48ms without relevant activity. These are provisional readiness heuristics, not a SiYuan completion signal.
 5. The original 160ms deadline never extends indefinitely. Expiry without readiness releases all three effects and writing intent, leaving native presentation. It is logged as release, not authoritative commit. Fresh activity can resume observation. Observation overflow uses the safe release path immediately.
 

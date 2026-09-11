@@ -1372,40 +1372,64 @@ test("ordinary Backspace commits after one bounded post-input quiet window", () 
 }));
 
 test("ordinary deletion fast path fails closed at boundaries and replacements", () => {
-  const cases: Array<{ name: string; key: string; setup: (harness: SessionHarness) => void;
+  const cases: Array<{ name: string; key: string; admitted: boolean; setup: (harness: SessionHarness) => void;
     mutation: (harness: SessionHarness) => MutationRecord[] }> = [
     {
-      name: "block-start Backspace", key: "Backspace",
-      setup: harness => setTextCaret(harness, 0),
+      name: "interior Backspace", key: "Backspace", admitted: true,
+      setup: harness => setTextCaret(harness, 3),
       mutation: harness => [{ type: "characterData", target: harness.editable,
         addedNodes: [], removedNodes: [] } as unknown as MutationRecord],
     },
     {
-      name: "block-end Delete", key: "Delete",
+      name: "text-node end Backspace", key: "Backspace", admitted: true,
       setup: harness => setTextCaret(harness, 6),
       mutation: harness => [{ type: "characterData", target: harness.editable,
         addedNodes: [], removedNodes: [] } as unknown as MutationRecord],
     },
     {
-      name: "empty block", key: "Backspace",
+      name: "text-node start Backspace", key: "Backspace", admitted: false,
+      setup: harness => setTextCaret(harness, 0),
+      mutation: harness => [{ type: "characterData", target: harness.editable,
+        addedNodes: [], removedNodes: [] } as unknown as MutationRecord],
+    },
+    {
+      name: "interior Delete", key: "Delete", admitted: true,
+      setup: harness => setTextCaret(harness, 3),
+      mutation: harness => [{ type: "characterData", target: harness.editable,
+        addedNodes: [], removedNodes: [] } as unknown as MutationRecord],
+    },
+    {
+      name: "text-node start Delete", key: "Delete", admitted: true,
+      setup: harness => setTextCaret(harness, 0),
+      mutation: harness => [{ type: "characterData", target: harness.editable,
+        addedNodes: [], removedNodes: [] } as unknown as MutationRecord],
+    },
+    {
+      name: "text-node end Delete", key: "Delete", admitted: false,
+      setup: harness => setTextCaret(harness, 6),
+      mutation: harness => [{ type: "characterData", target: harness.editable,
+        addedNodes: [], removedNodes: [] } as unknown as MutationRecord],
+    },
+    {
+      name: "empty block", key: "Backspace", admitted: false,
       setup: harness => harness.setFrame({ ...harness.getFrame(), range: null, caretless: true }),
       mutation: harness => [{ type: "characterData", target: harness.editable,
         addedNodes: [], removedNodes: [] } as unknown as MutationRecord],
     },
     {
-      name: "list boundary", key: "Backspace",
+      name: "list boundary", key: "Backspace", admitted: false,
       setup: harness => { harness.editable.dataset.type = "NodeListItem"; setTextCaret(harness); },
       mutation: harness => [{ type: "characterData", target: harness.editable,
         addedNodes: [], removedNodes: [] } as unknown as MutationRecord],
     },
     {
-      name: "selection deletion", key: "Backspace",
+      name: "selection deletion", key: "Backspace", admitted: false,
       setup: harness => harness.setFrame({ ...harness.getFrame(), selection: "range", range: null, caret: null }),
       mutation: harness => [{ type: "characterData", target: harness.editable,
         addedNodes: [], removedNodes: [] } as unknown as MutationRecord],
     },
     {
-      name: "replacement mutation", key: "Backspace",
+      name: "replacement mutation", key: "Backspace", admitted: false,
       setup: harness => setTextCaret(harness),
       mutation: harness => {
         const removed = new PaintElement();
@@ -1423,9 +1447,26 @@ test("ordinary deletion fast path fails closed at boundaries and replacements", 
     harness.dispatch(4, "input", { inputType: scenario.key === "Delete" ? "deleteContentForward" : "deleteContentBackward", isComposing: false });
     harness.mutate(6, scenario.mutation(harness));
     harness.tick(16);
-    assert.equal(harness.events.some(event => event.name === "ordinary-delete-admitted"), false, scenario.name);
+    assert.equal(harness.events.some(event => event.name === "ordinary-delete-admitted"), scenario.admitted, scenario.name);
   }, { typewriter: false, ripple: false });
 });
+
+test("repeated ordinary Backspace generations admit at text-node end without quiet waits", () => withSessionHarness(harness => {
+  harness.tick(0);
+  for (const at of [0, 40, 80]) {
+    setTextCaret(harness, 6);
+    harness.dispatch(at, "keydown", { key: "Backspace", defaultPrevented: false });
+    harness.dispatch(at + 4, "input", { inputType: "deleteContentBackward", isComposing: false });
+    harness.mutate(at + 6, [{ type: "characterData", target: harness.editable,
+      addedNodes: [], removedNodes: [] } as unknown as MutationRecord]);
+    harness.tick(at + 16);
+  }
+
+  const admissions = harness.events.filter(event => event.name === "ordinary-delete-admitted");
+  assert.deepEqual(admissions.map(event => event.payload.generation), [1, 2, 3]);
+  assert.equal(harness.events.filter(event => event.name === "structure-sample" &&
+    event.payload.reason === "awaiting-post-input-quiet").length, 0);
+}, { typewriter: false, ripple: false }));
 
 test("skewed rAF time never publishes transient ordinary Backspace geometry", () => withSessionHarness(harness => {
   harness.tick(0);
@@ -2122,6 +2163,62 @@ test("same-id replacement carries the visible sentence floor into block ownershi
   assert.equal(dim.frames[0].opacity, 0.6);
   assert.equal(dim.frames[1].opacity, RIPPLE_LEVELS[1]);
   assert.equal(dim.playState, "running");
+  painter.clear();
+}));
+
+test("ownership telemetry reports only changed owner values and targets", () => withPresentation(() => {
+  const records: Array<{ name: string; payload: Record<string, unknown> }> = [];
+  const debug = {
+    record: (_source: string, name: string, payload: Record<string, unknown>) => records.push({ name, payload }),
+  } as never;
+  const editor = new PaintElement();
+  const target = new PaintElement();
+  target.dataset.nodeId = "target";
+  target.parentElement = editor;
+  const painter = createBlockPainter(debug);
+  const dim = RIPPLE_LEVELS[1];
+  const targets = new Map([[target as unknown as HTMLElement, dim]]);
+
+  painter.prepare(targets, editor as unknown as HTMLElement, false)();
+  const initial = records.at(-1)!;
+  assert.equal(initial.name, "ownership-commit");
+  assert.deepEqual(initial.payload.changes, [{ key: "target", previousValue: null,
+    startValue: 1, target: dim, hadPreviousKey: false }]);
+
+  target.animations.at(-1)!.finish();
+  painter.prepare(targets, editor as unknown as HTMLElement, false)();
+  assert.equal(records.at(-1)!.payload.changedCount, 0);
+  assert.deepEqual(records.at(-1)!.payload.changes, []);
+
+  painter.prepare(new Map([[target as unknown as HTMLElement, 1]]), editor as unknown as HTMLElement, false)();
+  const bright = records.at(-1)!;
+  assert.deepEqual(bright.payload.changes, [{ key: "target", previousValue: dim,
+    startValue: dim, target: 1, hadPreviousKey: true }]);
+  painter.clear();
+}));
+
+test("ownership telemetry caps changed owner detail", () => withPresentation(() => {
+  const records: Array<{ name: string; payload: Record<string, unknown> }> = [];
+  const debug = {
+    record: (_source: string, name: string, payload: Record<string, unknown>) => records.push({ name, payload }),
+  } as never;
+  const editor = new PaintElement();
+  const targets = new Map<HTMLElement, number>();
+  for (let index = 0; index < 20; index++) {
+    const target = new PaintElement();
+    target.dataset.nodeId = `target-${index}`;
+    target.parentElement = editor;
+    targets.set(target as unknown as HTMLElement, RIPPLE_LEVELS[1]);
+  }
+  const painter = createBlockPainter(debug);
+  painter.prepare(targets, editor as unknown as HTMLElement, false)();
+
+  const payload = records.at(-1)!.payload;
+  assert.equal(payload.targetCount, 20);
+  assert.equal(payload.previousCount, 0);
+  assert.equal(payload.changedCount, 20);
+  assert.equal(payload.truncated, true);
+  assert.equal((payload.changes as unknown[]).length, 16);
   painter.clear();
 }));
 
