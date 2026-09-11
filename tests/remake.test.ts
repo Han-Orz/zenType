@@ -1250,6 +1250,163 @@ test("Session withholds native text evidence until delayed host structure settle
   assert.ok(harness.events.filter(event => event.name === "prepare").length > prepared);
 }, { typewriter: true, ripple: true }));
 
+/** Presentation fixture with a working sentence model (CSS Highlight + TreeWalker). */
+interface SentenceCtx {
+  editor: PaintElement;
+  blockA: PaintElement;
+  blockB: PaintElement;
+  editableA: PaintElement;
+  editableB: PaintElement;
+  textA: { value: string };
+  textB: { value: string };
+  textNodeA: Text;
+  textNodeB: Text;
+}
+
+function withSentencePresentation(run: (ctx: SentenceCtx) => void) {
+  const body = new PaintElement();
+  const highlights = new Map<string, unknown>();
+  const editor = new PaintElement();
+  editor.classes.add("protyle-wysiwyg");
+  const make = (key: string) => {
+    const block = new PaintElement();
+    block.dataset.nodeId = key;
+    block.parentElement = editor;
+    const editable = new PaintElement();
+    editable.parentElement = block;
+    Object.assign(editable, { closest: (selector: string) =>
+      selector === ".protyle-wysiwyg" ? editor : selector === "[data-node-id]" ? block : null });
+    const text = { value: "" };
+    const textNode = { nodeType: 3,
+      get nodeValue() { return text.value; }, get data() { return text.value; },
+      parentElement: editable } as unknown as Text;
+    return { block, editable, text, textNode };
+  };
+  const a = make("A");
+  const b = make("B");
+  a.block.nextElementSibling = b.block;
+  b.block.previousElementSibling = a.block;
+  editor.children = [a.block, b.block];
+  const nodes = new Map<unknown, Text>([[a.editable, a.textNode], [b.editable, b.textNode]]);
+  const values: Record<string, unknown> = {
+    document: { body, head: new PaintElement(), createElement: () => new PaintElement(),
+      createTreeWalker: (root: unknown) => {
+        const node = nodes.get(root) ?? null;
+        let done = false;
+        return { nextNode: () => (done || !node ? null : (done = true, node)) };
+      },
+      createRange: () => ({ setStart() {}, setEnd() {} }) },
+    HTMLElement: PaintElement, Element: PaintElement,
+    Node: { TEXT_NODE: 3, DOCUMENT_POSITION_FOLLOWING: 4 },
+    NodeFilter: { SHOW_ELEMENT: 1, SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3 },
+    CSS: { supports: () => true, highlights },
+    Highlight: class { constructor(...ranges: unknown[]) { void ranges; } },
+    getComputedStyle: (element: PaintElement) => ({ opacity: element.style.opacity || "1", color: "rgb(200, 210, 220)" }),
+  };
+  const saved = Object.fromEntries(Object.keys(values).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  for (const [key, value] of Object.entries(values)) Object.defineProperty(globalThis, key, { configurable: true, value });
+  try {
+    run({ editor, blockA: a.block, blockB: b.block, editableA: a.editable, editableB: b.editable,
+      textA: a.text, textB: b.text, textNodeA: a.textNode, textNodeB: b.textNode });
+  } finally {
+    for (const [key, descriptor] of Object.entries(saved)) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+}
+
+function sentenceFrame(ctx: SentenceCtx, block: PaintElement, editable: PaintElement, node: Text, offset: number): EditorFrame {
+  return frame({ editor: ctx.editor as unknown as HTMLElement, block: block as unknown as HTMLElement,
+    editable: editable as unknown as HTMLElement,
+    range: { startContainer: node, startOffset: offset } as unknown as Range });
+}
+
+test("the painter reports a role invalidation only when the replacement carried a committed role", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const old = new PaintElement();
+  old.dataset.nodeId = "A";
+  old.parentElement = editor;
+  const painter = createBlockPainter();
+  const reported: string[] = [];
+  const report = (key: string) => reported.push(key);
+
+  const fresh = new PaintElement();
+  fresh.dataset.nodeId = "A";
+  fresh.parentElement = editor;
+  painter.rebind([fresh as unknown as HTMLElement], undefined, "A", report);
+  assert.deepEqual(reported, []);
+
+  painter.prepare(new Map([[old as unknown as HTMLElement, RIPPLE_LEVELS[1]]]), editor as unknown as HTMLElement, false)();
+  old.animations.at(-1)!.currentTime = MOTION.blockFadeMs;
+  old.isConnected = false;
+  const replaced = new PaintElement();
+  replaced.dataset.nodeId = "A";
+  replaced.parentElement = editor;
+  painter.rebind([replaced as unknown as HTMLElement], undefined, "A", report);
+  assert.deepEqual(reported, ["A"]);
+  painter.clear();
+}));
+
+test("an ordinary sentence rebuild keeps its full-brightness entrance", () => withSentencePresentation(ctx => {
+  ctx.textB.value = "Bravo one. Bravo two. Bravo three.";
+  ctx.textA.value = "Alpha one. Alpha two. Alpha three.";
+  const ripple = createRipple();
+  ripple.prepare(sentenceFrame(ctx, ctx.blockB, ctx.editableB, ctx.textNodeB, ctx.textB.value.length), false, true, true);
+
+  // Focus moves to A without any structural replacement authority.
+  ripple.prepare(sentenceFrame(ctx, ctx.blockA, ctx.editableA, ctx.textNodeA, ctx.textA.value.length), true, true, true);
+  assert.equal(ripple.render(1000, false), true);
+  ripple.destroy();
+}));
+
+test("a focused structural replacement starts fresh non-active sentences at their new role", () => withSentencePresentation(ctx => {
+  ctx.textB.value = "Bravo one. Bravo two.";
+  ctx.textA.value = "Alpha one. Alpha two. Alpha three. Alpha four.";
+  const ripple = createRipple();
+
+  // B is focused; A is its dim neighbour and therefore holds a committed owner.
+  ripple.prepare(sentenceFrame(ctx, ctx.blockB, ctx.editableB, ctx.textNodeB, ctx.textB.value.length), false, true, true);
+
+  // Host merge: A is replaced by a fresh same-key element, B is removed, and the
+  // live collapsed Selection made the replacement the focused block.
+  const replacement = new PaintElement();
+  replacement.dataset.nodeId = "A";
+  replacement.parentElement = ctx.editor;
+  ctx.blockA.isConnected = false;
+  ctx.blockB.isConnected = false;
+  ctx.editor.children = [replacement];
+  ripple.rebind([replacement as unknown as HTMLElement], "A");
+
+  const caret = ctx.textA.value.indexOf("Alpha three") + 2;
+  ripple.prepare(sentenceFrame(ctx, replacement, ctx.editableA, ctx.textNodeA, caret), true, true, true);
+  // The active sentence stays at 1 and every fresh non-active sentence starts at
+  // SENTENCE_ALPHA, so nothing is still travelling on the first rendered frame.
+  assert.equal(ripple.render(1000, false), false);
+  ripple.destroy();
+}));
+
+test("a rebuilt sentence without the structural role seed still travels from full brightness", () => withSentencePresentation(ctx => {
+  ctx.textB.value = "Bravo one. Bravo two.";
+  ctx.textA.value = "Alpha one. Alpha two. Alpha three. Alpha four.";
+  const ripple = createRipple();
+  ripple.prepare(sentenceFrame(ctx, ctx.blockB, ctx.editableB, ctx.textNodeB, ctx.textB.value.length), false, true, true);
+
+  // Same block switch as above, but the live Selection never made a replacement
+  // the focused block, so no role seed exists.
+  const replacement = new PaintElement();
+  replacement.dataset.nodeId = "A";
+  replacement.parentElement = ctx.editor;
+  ctx.blockA.isConnected = false;
+  ctx.blockB.isConnected = false;
+  ctx.editor.children = [replacement];
+
+  const caret = ctx.textA.value.indexOf("Alpha three") + 2;
+  ripple.prepare(sentenceFrame(ctx, replacement, ctx.editableA, ctx.textNodeA, caret), true, true, true);
+  assert.equal(ripple.render(1000, false), true);
+  ripple.destroy();
+}));
+
 /** Ad-hoc harness blocks need their own closest() for the live-Selection probe. */
 function linkBlock(element: PaintElement, nodeId: string, editor: PaintElement): PaintElement {
   element.dataset.nodeId = nodeId;

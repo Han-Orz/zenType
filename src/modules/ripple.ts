@@ -1,6 +1,6 @@
 import { MOTION, SENTENCE_ALPHA } from "../config";
 import { clamp, stepCritical } from "../motion";
-import { visualKey } from "../structure";
+import { semanticBlockKey, visualKey } from "../structure";
 import type { EditorFrame } from "../types";
 import type { DebugRecorder } from "../debug/types";
 import { resolveRangeTextPoint } from "../utils/rangeTextPoint";
@@ -10,7 +10,7 @@ import { projectText, sentenceRange, mapUnchangedBoundaries, type TextEntry } fr
 import { collectTargets } from "./ripple/blockPlan";
 import { createBlockPainter } from "./ripple/blockPainter";
 
-type SentencePaint = SentenceRange & { range: Range; value: number; velocity: number; target: number };
+type SentencePaint = SentenceRange & { range: Range; value: number; velocity: number; target: number; fresh: boolean };
 
 export function createRipple(debug?: DebugRecorder) {
   const style = document.createElement("style");
@@ -34,6 +34,10 @@ export function createRipple(debug?: DebugRecorder) {
   let lastTime: number | null = null;
   let registered: Range[][] = Array.from({ length: names.length }, () => []);
   let scratch: Range[][] = Array.from({ length: names.length }, () => []);
+  // One-shot: the focused replacement whose stale dim role blockPainter just
+  // invalidated. The next sentence rebuild for that semantic block seeds fresh
+  // non-active sentences at their new role instead of overshooting.
+  let pendingSentenceRoleKey: string | null = null;
 
   function sentenceFloor() {
     return sentences.reduce((value, paint) => Math.min(value, paint.value), 1);
@@ -93,11 +97,16 @@ export function createRipple(debug?: DebugRecorder) {
     // resolved before any presentation write, so this frame never forces a style
     // recalc of the invalidation it is about to make.
     let sentenceReady = false;
+    let roleSeeded = false;
     if (!supported) {
       // Block focus only.
     } else if (editable !== frame.editable || contentDirty) {
       const sameContent = editable === frame.editable || !!editable && !editable.isConnected &&
         editable.closest<HTMLElement>("[data-node-id]")?.dataset.nodeId === frame.block.dataset.nodeId;
+      // Consumed by whichever rebuild runs next; a rebuild of another block or an
+      // ordinary content change simply discards it.
+      roleSeeded = pendingSentenceRoleKey === semanticBlockKey(frame.block);
+      pendingSentenceRoleKey = null;
       const clones: HTMLElement[] = [];
       const projection = projectText(frame.editable, colors, clones);
       writes.push(() => { for (const element of clones) element.style.removeProperty("--zentype-text-color"); });
@@ -116,7 +125,7 @@ export function createRipple(debug?: DebugRecorder) {
             if (!range) return [];
             const index = reusable.findIndex(old => old?.start === boundary.start && (old.end === boundary.end || deleting));
             const old = index < 0 ? undefined : previous[index];
-            return [{ ...boundary, range, value: old?.value ?? 1, velocity: old?.velocity ?? 0, target: 1 }];
+            return [{ ...boundary, range, value: old?.value ?? 1, velocity: old?.velocity ?? 0, target: 1, fresh: !old }];
           });
           entries = projection.entries;
           text = projection.text;
@@ -173,7 +182,17 @@ export function createRipple(debug?: DebugRecorder) {
     }
     if (offset < 0) { writes.push(clearSentences); return commit; }
     const active = resolveActiveSentenceRanges(sentences, offset, text.length);
-    for (const paint of sentences) paint.target = active.includes(paint) ? 1 : SENTENCE_ALPHA;
+    for (const paint of sentences) {
+      const isActive = active.includes(paint);
+      paint.target = isActive ? 1 : SENTENCE_ALPHA;
+      // A focused structural replacement continues text that was already on
+      // screen as a dim neighbour. A fresh non-active sentence starts at the role
+      // it is about to hold instead of overshooting through full brightness.
+      if (roleSeeded && paint.fresh && !isActive) {
+        paint.value = SENTENCE_ALPHA;
+        paint.velocity = 0;
+      }
+    }
     return commit;
   }
 
@@ -228,6 +247,7 @@ export function createRipple(debug?: DebugRecorder) {
     ZENTYPE_DEBUG: debug?.record("ripple", "clear", { blockCount: painter.size(), sentenceCount: sentences.length });
     painter.clear();
     clearSentences();
+    pendingSentenceRoleKey = null;
     block = null;
     lastTime = null;
   }
@@ -237,7 +257,11 @@ export function createRipple(debug?: DebugRecorder) {
     rebind(added: readonly HTMLElement[], focusedKey: string | null = null) {
       const floor = sentenceFloor();
       const key = block && !block.isConnected && floor < 1 ? visualKey(block) : undefined;
-      return painter.rebind(added, key ? { key, value: floor } : undefined, focusedKey);
+      // The painter reports back the key whose stale dim role it actually
+      // dropped, so only a replacement that previously presented as a dim
+      // neighbour seeds the sentence layer.
+      return painter.rebind(added, key ? { key, value: floor } : undefined, focusedKey,
+        focusedKey ? invalidated => { pendingSentenceRoleKey = invalidated; } : undefined);
     },
     destroy() { clear(); style.remove(); } };
 }

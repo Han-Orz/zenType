@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.9.0-remake.2.6-sentence-role.1 (2026-09-11) — Sentence role through focused replacement
+
+- Fixed the residual `dim → 1 → dim` on the merged destination's existing sentences. After a block-start merge the destination becomes focused immediately (block A+), but its sentence model was rebuilt from scratch: SiYuan replaces the destination element, so `sameContent` is false, every boundary is fresh and `value` defaulted to `1` before being retargeted to `SENTENCE_ALPHA`. The block went straight to full brightness while the sentences were still at full brightness, giving a combined overshoot before both settled.
+- A fresh **non-active** sentence now takes `SENTENCE_ALPHA` when the focused block was previously on screen as a dim neighbour. That authority is the same mutation-time semantic key as block A+: `blockPainter.rebind()` reports back the key whose stale dim role it actually dropped, and only a replacement that carried a committed role qualifies.
+- The seed is one-shot and narrow. A reusable boundary still keeps its old `value`/`velocity`; a fresh active sentence is still `1`; ordinary navigation, click, editor switch, ordinary content rebuild and Enter split keep their existing full-brightness entrance. `clear()` drops the seed with the rest of the presentation state.
+- Active-sentence resolution, `SENTENCE_ALPHA`, bucket count, highlight registration, Critical Motion and the block layer are unchanged. The block layer never compensates sentence alpha; `0.4 → 0.6` is accepted as a real role change.
+- No new motion, easing, WAAPI, timer, rAF, observer, manager or registry. Runtime change is initial `value`/`velocity` provenance plus one one-shot semantic key.
+
 ## v2.9.0-remake.2.6-replacement-role.1 (2026-09-11) — Replacement presentation authority
 
 - Narrowed the replacement-carry contract. `same visualKey` proves semantic object continuity, not presentation-role continuity: SiYuan's paragraph merge removes the focused source and re-renders the destination as a fresh element with the same `data-node-id`, so the surviving key previously described a dim neighbour while the new element is the focused block.

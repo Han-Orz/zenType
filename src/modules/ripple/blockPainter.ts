@@ -94,7 +94,8 @@ export function createBlockPainter(debug?: DebugRecorder) {
       ZENTYPE_DEBUG: debug?.record("ripple", "presentation-hold", { blockCount: paints.size });
     },
     /** Rebind only existing semantic owners; never plan against intermediate DOM. */
-    rebind(added: readonly HTMLElement[], seed?: CarrySeed, focusedKey?: string | null) {
+    rebind(added: readonly HTMLElement[], seed?: CarrySeed, focusedKey?: string | null,
+      onRoleInvalidated?: (key: string) => void) {
       const previous = new Map<string, Pick<Paint, "value" | "target">>();
       for (const paint of paints.values()) if (paint.key) { sample(paint); previous.set(paint.key, paint); }
       if (seed && !previous.has(seed.key)) previous.set(seed.key, { value: seed.value, target: seed.value });
@@ -104,7 +105,12 @@ export function createBlockPainter(debug?: DebugRecorder) {
         // does not inherit the previous dim role: the key proves semantic object
         // continuity, not presentation-role continuity. The focused block is
         // represented by having no block opacity owner at all.
-        if (key && key === focusedKey) return [];
+        if (key && key === focusedKey) {
+          // Only a replacement that previously presented a committed role has a
+          // stale role to invalidate; a focused predecessor carried no owner.
+          if (previous.has(key)) onRoleInvalidated?.(key);
+          return [];
+        }
         const old = key && previous.get(key);
         return old && !paints.has(element) && element.isConnected ? [{ element, old, base: Number(getComputedStyle(element).opacity) }] : [];
       });
