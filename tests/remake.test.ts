@@ -411,6 +411,16 @@ function withSessionHarness(run: (harness: SessionHarness) => void, features = {
   });
 }
 
+function textRange(editable: PaintElement, value = "abcdef", offset = 3): Range {
+  const node = { nodeType: 3, nodeValue: value, parentElement: editable } as unknown as Node;
+  return { collapsed: true, startContainer: node, startOffset: offset } as unknown as Range;
+}
+
+function setTextCaret(harness: SessionHarness, offset = 3, value = "abcdef") {
+  harness.setFrame({ ...harness.getFrame(), range: textRange(harness.editable, value, offset),
+    selection: "caret", caretless: false, caret: { x: 120, y: 540, height: 20 } });
+}
+
 test("motion configuration exposes explicit responseMs semantics", () => {
   assert.equal(MOTION.caretTypingResponseMs, 55);
   assert.equal(MOTION.caretNavigationResponseMs, 110);
@@ -798,6 +808,23 @@ test("Session withholds native text evidence until delayed host structure settle
   assert.ok(harness.events.filter(event => event.name === "prepare").length > prepared);
 }, { typewriter: true, ripple: true }));
 
+test("ordinary character deletion admits at the first safe text sample", () => withSessionHarness(harness => {
+  harness.tick(0);
+  const overlay = harness.body.children[0];
+  const original = overlay.style.transform;
+  setTextCaret(harness);
+  harness.dispatch(0, "keydown", { key: "Backspace", defaultPrevented: false });
+  harness.dispatch(4, "input", { inputType: "deleteContentBackward", isComposing: false });
+  harness.mutate(6, [{ type: "characterData", target: harness.editable,
+    addedNodes: [], removedNodes: [] } as unknown as MutationRecord]);
+  harness.tick(16);
+
+  assert.notEqual(overlay.style.transform, original);
+  assert.ok(harness.events.some(event => event.name === "ordinary-delete-admitted"));
+  assert.equal(harness.events.some(event => event.name === "structure-sample" &&
+    event.payload.reason === "awaiting-post-input-quiet"), false);
+}));
+
 test("ordinary Backspace commits after one bounded post-input quiet window", () => withSessionHarness(harness => {
   harness.tick(0);
   const overlay = harness.body.children[0];
@@ -821,6 +848,62 @@ test("ordinary Backspace commits after one bounded post-input quiet window", () 
     event.payload.decision === "ordinary" && event.payload.reason === "non-structural-quiet"));
   assert.equal(harness.events.some(event => event.name === "structure-evidence"), false);
 }));
+
+test("ordinary deletion fast path fails closed at boundaries and replacements", () => {
+  const cases: Array<{ name: string; key: string; setup: (harness: SessionHarness) => void;
+    mutation: (harness: SessionHarness) => MutationRecord[] }> = [
+    {
+      name: "block-start Backspace", key: "Backspace",
+      setup: harness => setTextCaret(harness, 0),
+      mutation: harness => [{ type: "characterData", target: harness.editable,
+        addedNodes: [], removedNodes: [] } as unknown as MutationRecord],
+    },
+    {
+      name: "block-end Delete", key: "Delete",
+      setup: harness => setTextCaret(harness, 6),
+      mutation: harness => [{ type: "characterData", target: harness.editable,
+        addedNodes: [], removedNodes: [] } as unknown as MutationRecord],
+    },
+    {
+      name: "empty block", key: "Backspace",
+      setup: harness => harness.setFrame({ ...harness.getFrame(), range: null, caretless: true }),
+      mutation: harness => [{ type: "characterData", target: harness.editable,
+        addedNodes: [], removedNodes: [] } as unknown as MutationRecord],
+    },
+    {
+      name: "list boundary", key: "Backspace",
+      setup: harness => { harness.editable.dataset.type = "NodeListItem"; setTextCaret(harness); },
+      mutation: harness => [{ type: "characterData", target: harness.editable,
+        addedNodes: [], removedNodes: [] } as unknown as MutationRecord],
+    },
+    {
+      name: "selection deletion", key: "Backspace",
+      setup: harness => harness.setFrame({ ...harness.getFrame(), selection: "range", range: null, caret: null }),
+      mutation: harness => [{ type: "characterData", target: harness.editable,
+        addedNodes: [], removedNodes: [] } as unknown as MutationRecord],
+    },
+    {
+      name: "replacement mutation", key: "Backspace",
+      setup: harness => setTextCaret(harness),
+      mutation: harness => {
+        const removed = new PaintElement();
+        const replacement = new PaintElement();
+        removed.dataset.nodeId = replacement.dataset.nodeId = "normalized";
+        return [{ type: "childList", target: harness.editor,
+          addedNodes: [replacement], removedNodes: [removed] } as unknown as MutationRecord];
+      },
+    },
+  ];
+  for (const scenario of cases) withSessionHarness(harness => {
+    harness.tick(0);
+    scenario.setup(harness);
+    harness.dispatch(0, "keydown", { key: scenario.key, defaultPrevented: false });
+    harness.dispatch(4, "input", { inputType: scenario.key === "Delete" ? "deleteContentForward" : "deleteContentBackward", isComposing: false });
+    harness.mutate(6, scenario.mutation(harness));
+    harness.tick(16);
+    assert.equal(harness.events.some(event => event.name === "ordinary-delete-admitted"), false, scenario.name);
+  }, { typewriter: false, ripple: false });
+});
 
 test("skewed rAF time never publishes transient ordinary Backspace geometry", () => withSessionHarness(harness => {
   harness.tick(0);
@@ -881,6 +964,33 @@ test("structure deadline uses the execution clock under rAF skew", () => withSes
   harness.tick(MOTION.structureDeadlineMs, MOTION.structureDeadlineMs + 134);
   assert.ok(harness.events.some(event => event.name === "structure-release" && event.payload.reason === "timeout"));
 }));
+
+test("repeated structural intent supersedes the old deadline without releasing presentation", () => withSessionHarness(harness => {
+  harness.tick(0);
+  const overlay = harness.body.children[0];
+  const prepared = harness.events.filter(event => event.name === "prepare").length;
+  harness.dispatch(0, "keydown", { key: "Backspace", defaultPrevented: false });
+  const firstRemoved = new PaintElement();
+  firstRemoved.dataset.nodeId = "first-removed";
+  harness.mutate(4, [{ type: "childList", target: harness.editor,
+    addedNodes: [], removedNodes: [firstRemoved] } as unknown as MutationRecord]);
+  harness.tick(16);
+
+  harness.dispatch(140, "keydown", { key: "Backspace", defaultPrevented: false });
+  const secondRemoved = new PaintElement();
+  secondRemoved.dataset.nodeId = "second-removed";
+  harness.mutate(144, [{ type: "childList", target: harness.editor,
+    addedNodes: [], removedNodes: [secondRemoved] } as unknown as MutationRecord]);
+  harness.tick(160);
+
+  assert.equal(harness.events.some(event => event.name === "structure-generation-superseded"), true);
+  assert.equal(harness.events.some(event => event.name === "structure-release" && event.payload.reason === "timeout"), false);
+  assert.equal(overlay.hidden, false);
+  assert.equal(harness.events.filter(event => event.name === "prepare").length, prepared);
+
+  harness.tick(192);
+  assert.equal(harness.events.some(event => event.name === "structure-commit"), true);
+}, { typewriter: false, ripple: true }));
 
 test("ordinary quiet window uses 48ms of execution time under rAF skew", () => withSessionHarness(harness => {
   harness.tick(0);

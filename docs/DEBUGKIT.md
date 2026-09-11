@@ -67,9 +67,11 @@ const json = debug.exportRecording();
 Session 的 `structure-*` 事件来自共享 gate，不增加 snapshot、observer 或 scheduler：
 
 - `structure-intent`：输入可能编辑结构，尚无宿主证据。
+- `structure-generation-superseded`：新的明确结构输入替换同一 editor 的旧 pending generation；presentation 保持不变。
 - `structure-begin` / `structure-evidence`：mutation classifier 发现结构变化或观察预算溢出。
 - `structure-activity`：input、Selection 或 mutation 打断了安静窗口。
 - `structure-sample`：intent 阶段记录 input/non-structural observation 与等待/ordinary 原因；evidence 阶段记录 caret、quiet、stableFrames 与等待/commit 原因。
+- `ordinary-delete-admitted`：严格的 characterData-only、折叠且位于文本节点内部的 Backspace/Delete 直接通过 ordinary admission。
 - `structure-stable` / `structure-commit`：安静窗口和连续几何采样通过，允许统一提交。
 - `structure-timeout` / `structure-release`：没有证明稳定，释放效果；不能把它当成成功提交。
 - `structure-cancel`：ordinary 已经通过 quiet confirmation，或用户抢占、生命周期取消。

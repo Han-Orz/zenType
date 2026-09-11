@@ -4,14 +4,19 @@ import type { DebugRecorder } from "./debug/types";
 
 export type MutationKind = "text" | "representation" | "structural" | "overflow";
 export const STRUCTURE_LIMITS = { records: 256, nodes: 2048, depth: 64 } as const;
+type IntentKind = "backspace" | "delete" | "other";
 
 interface PendingStructure {
+  generation: number;
   editor: HTMLElement;
   start: number;
   activity: number;
   evidence: "structural" | "overflow" | null;
+  intent: IntentKind;
   inputObserved: boolean;
   nonStructuralObserved: boolean;
+  textObserved: boolean;
+  replacementObserved: boolean;
   stable: number;
   caret: CursorRect | null;
   block: HTMLElement | null;
@@ -68,21 +73,58 @@ export function classifyMutations(records: readonly MutationRecord[]) {
   const moved = [...inserted].some(node => removed.has(node));
   const kind: MutationKind = overflow ? "overflow" : moved || [...counts.values()].some(value => value !== 0)
     ? "structural" : semantic || marker ? "representation" : "text";
-  return { kind, added };
+  const textOnly = records.length > 0 && records.every(record => record.type === "characterData");
+  return { kind, added, textOnly };
+}
+
+function hasSafeOrdinaryTextPosition(frame: EditorFrame | null, intent: IntentKind): boolean {
+  if (intent !== "backspace" && intent !== "delete") return false;
+  if (!frame || frame.selection !== "caret" || frame.caretless || !frame.caret ||
+      !frame.editable || !frame.block || !frame.range?.collapsed) return false;
+  const node = frame.range.startContainer;
+  const value = node.nodeValue;
+  if (node.nodeType !== 3 || typeof value !== "string" ||
+      frame.range.startOffset <= 0 || frame.range.startOffset >= value.length) return false;
+  if (!frame.editable.contains(node) || !frame.block.contains(node)) return false;
+  for (let ancestor: HTMLElement | null = frame.block;
+       ancestor && ancestor !== frame.editor; ancestor = ancestor.parentElement) {
+    if (ancestor.dataset.type === "NodeListItem" || ancestor.dataset.type === "NodeList") return false;
+  }
+  return true;
 }
 
 /** Clock-free policy: Session owns observation, sampling, rAF and the deadline wake. */
 export function createStructureGate(debug?: DebugRecorder) {
   let pending: PendingStructure | null = null;
+  let nextGeneration = 0;
   function cancel(reason: string) {
     ZENTYPE_DEBUG: if (pending) debug?.record("session", "structure-cancel", { reason });
     pending = null;
   }
+  function createPending(editor: HTMLElement, now: number, evidence: "structural" | "overflow" | null,
+    intent: IntentKind): PendingStructure {
+    return { generation: ++nextGeneration, editor, start: now, activity: now, evidence, intent,
+      inputObserved: false, nonStructuralObserved: false, textObserved: false, replacementObserved: false,
+      stable: 0, caret: null, block: null };
+  }
   function begin(editor: HTMLElement, now: number, evidence: "structural" | "overflow" | null) {
     if (pending?.editor !== editor) {
-      pending = { editor, start: now, activity: now, evidence, inputObserved: false,
-        nonStructuralObserved: false, stable: 0, caret: null, block: null };
-      ZENTYPE_DEBUG: debug?.record("session", evidence ? "structure-begin" : "structure-intent", { now });
+      pending = createPending(editor, now, evidence, "other");
+      ZENTYPE_DEBUG: debug?.record("session", evidence ? "structure-begin" : "structure-intent",
+        { now, generation: pending.generation, intent: pending.intent });
+    }
+  }
+  function intent(editor: HTMLElement, now: number, kind: IntentKind = "other") {
+    const previous = pending?.editor === editor ? pending : null;
+    pending = createPending(editor, now, null, kind);
+    ZENTYPE_DEBUG: if (previous) {
+      debug?.record("session", "structure-generation-superseded", {
+        now, from: previous.generation, to: pending.generation, intent: kind,
+      });
+    } else {
+      debug?.record("session", "structure-intent", {
+        now, generation: pending.generation, intent: kind,
+      });
     }
   }
   function activity(now: number, reason: string) {
@@ -93,13 +135,17 @@ export function createStructureGate(debug?: DebugRecorder) {
     ZENTYPE_DEBUG: debug?.record("session", "structure-activity", { now, reason });
   }
   return {
-    intent(editor: HTMLElement, now: number) { begin(editor, now, null); },
-    mutation(editor: HTMLElement, now: number, kind: MutationKind) {
+    intent,
+    mutation(editor: HTMLElement, now: number, kind: MutationKind, textOnly = false) {
       if (kind === "structural" || kind === "overflow") {
         begin(editor, now, kind);
         pending!.evidence = kind;
         ZENTYPE_DEBUG: debug?.record("session", "structure-evidence", { now, kind });
-      } else if (pending) pending.nonStructuralObserved = true;
+      } else if (pending) {
+        pending.nonStructuralObserved = true;
+        if (kind === "text" && textOnly) pending.textObserved = true;
+        else pending.replacementObserved = true;
+      }
       activity(now, kind);
     },
     activity,
@@ -127,22 +173,32 @@ export function createStructureGate(debug?: DebugRecorder) {
         const candidate = pending.inputObserved && pending.nonStructuralObserved;
         // SiYuan schedules post-input normalization in a later task. Text evidence
         // therefore becomes ordinary only after a bounded quiet interval, not at
-        // the first sample that happens to precede that task.
-        const confirmed = candidate && quiet >= MOTION.structureQuietMs;
+        // the first sample that happens to precede that task, unless a strict
+        // characterData-only interior text position has already ruled out a
+        // structural boundary for this Backspace/Delete intent.
+        const fastPath = candidate && pending.textObserved && !pending.replacementObserved &&
+          hasSafeOrdinaryTextPosition(frame, pending.intent);
+        const confirmed = fastPath || candidate && quiet >= MOTION.structureQuietMs;
         const expired = elapsed >= MOTION.structureDeadlineMs;
         const decision = confirmed ? "ordinary" : expired ? "timeout" : "wait";
-        const reason = confirmed ? "non-structural-quiet"
+        const reason = fastPath ? "ordinary-delete-admitted" : confirmed ? "non-structural-quiet"
           : expired ? "intent-deadline-expired"
             : candidate ? "awaiting-post-input-quiet" : "awaiting-structural-evidence";
         ZENTYPE_DEBUG: debug?.record("session", "structure-sample", { now, elapsed, quiet, state: "intent",
           inputObserved: pending.inputObserved, nonStructuralObserved: pending.nonStructuralObserved,
-          decision, reason });
+          generation: pending.generation, intent: pending.intent, textObserved: pending.textObserved,
+          replacementObserved: pending.replacementObserved, decision, reason });
         if (confirmed) {
+          ZENTYPE_DEBUG: if (fastPath) debug?.record("session", "ordinary-delete-admitted", {
+            now, generation: pending.generation, intent: pending.intent,
+          });
           cancel(reason);
           return "ordinary";
         }
         if (expired) {
-          ZENTYPE_DEBUG: debug?.record("session", "structure-timeout", { now, elapsed, state: "intent" });
+          ZENTYPE_DEBUG: debug?.record("session", "structure-timeout", {
+            now, elapsed, state: "intent", generation: pending.generation,
+          });
           pending = null;
           return "timeout";
         }
@@ -158,11 +214,14 @@ export function createStructureGate(debug?: DebugRecorder) {
       const quiet = now - pending.activity;
       const stable = pending.stable >= 2 && quiet >= MOTION.structureQuietMs;
       ZENTYPE_DEBUG: debug?.record("session", "structure-sample", { now, quiet, stableFrames: pending.stable,
-        state: "structural", evidence: pending.evidence, caret: caret ? { ...caret } : null,
+        state: "structural", evidence: pending.evidence, generation: pending.generation,
+        caret: caret ? { ...caret } : null,
         decision: stable ? "commit" : "wait", reason: stable ? "quiet-and-stable" : "awaiting-stable-geometry" });
       if (stable || elapsed >= MOTION.structureDeadlineMs) {
         const result = stable ? "commit" : "timeout";
-        ZENTYPE_DEBUG: debug?.record("session", stable ? "structure-stable" : "structure-timeout", { now, elapsed });
+        ZENTYPE_DEBUG: debug?.record("session", stable ? "structure-stable" : "structure-timeout", {
+          now, elapsed, generation: pending.generation,
+        });
         pending = null;
         return result;
       }

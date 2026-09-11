@@ -64,7 +64,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     const changes = classifyMutations(records);
     if (changes.kind !== "text") structureDirty = true;
     if (observedEditor && !blocked && !pointerDown) {
-      structure.mutation(observedEditor, performance.now(), changes.kind);
+      structure.mutation(observedEditor, performance.now(), changes.kind, changes.textOnly);
       if (changes.kind === "representation" || changes.kind === "structural") {
         // Replacement DOM is already live when the observer runs. Rebind only
         // committed semantic owners now, before a throttled rAF can expose an
@@ -363,7 +363,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         activate(editable);
         contentDirty = true;
         if (event.type === "beforeinput" && /^(insertParagraph|insertLineBreak|formatIndent|formatOutdent|historyUndo|historyRedo|deleteByCut|deleteByDrag)$/.test((event as InputEvent).inputType)) {
-          structure.intent(editable.closest<HTMLElement>(".protyle-wysiwyg")!, performance.now());
+          structure.intent(editable.closest<HTMLElement>(".protyle-wysiwyg")!, performance.now(), "other");
         }
         if (event.type === "input") structure.input();
         structure.activity(performance.now(), event.type);
@@ -384,7 +384,8 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           activate(editable);
           const now = performance.now();
           retryUntil = now + MOTION.recoveryMs;
-          structure.intent(editable.closest<HTMLElement>(".protyle-wysiwyg")!, now);
+          const intent = key.key === "Backspace" ? "backspace" : key.key === "Delete" ? "delete" : "other";
+          structure.intent(editable.closest<HTMLElement>(".protyle-wysiwyg")!, now, intent);
         }
         break;
       }
