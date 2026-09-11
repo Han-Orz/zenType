@@ -12,6 +12,8 @@ import { mapUnchangedBoundaries, projectText } from "../src/modules/ripple/textP
 import { splitSentences, resolveActiveSentenceRanges } from "../src/modules/ripple/sentenceModel";
 import type { EditorFrame } from "../src/types";
 import { createStructureGate } from "../src/structure";
+import { getCursorRect } from "../src/utils/getCursorRect";
+import { resolveRangeTextPoint } from "../src/utils/rangeTextPoint";
 
 function frame(overrides: Partial<EditorFrame> = {}): EditorFrame {
   return { root: {} as HTMLElement, editor: {} as HTMLElement, scroll: {} as HTMLElement,
@@ -174,6 +176,113 @@ test("cursor transports scroll, transfers editable ownership, and survives a sho
   }
 });
 
+test("fresh authoritative caret rebases transport without moving the displayed origin first", () => withPresentation(body => {
+  const renders: Array<Record<string, unknown>> = [];
+  const cursor = createCursor({
+    record: (_source: string, name: string, payload: Record<string, unknown>) => {
+      if (name === "render") renders.push(payload);
+    },
+  } as never);
+  const nested = new PaintElement();
+  const input = frame({ editable: new PaintElement() as unknown as HTMLElement, reducedMotion: false,
+    scrollTop: 0, nestedScroll: [{ element: nested as unknown as HTMLElement, left: 0, top: 0 }],
+    caret: { x: 100, y: 400, height: 20 } });
+  cursor.render(input, 1000, "structural", false, { authoritativeTarget: true });
+  const moved = { ...input, scrollTop: 40,
+    nestedScroll: [{ element: nested as unknown as HTMLElement, left: 0, top: 30 }],
+    caret: { x: 300, y: 200, height: 20 } };
+  cursor.render(moved, 1016, "structural", false, { authoritativeTarget: true });
+
+  const sample = renders.at(-1)!;
+  assert.equal(sample.targetAuthority, "fresh");
+  assert.equal(sample.transportApplied, false);
+  assert.equal(sample.transportDx, 0);
+  assert.equal(sample.transportDy, 0);
+  const expectedY: CriticalState = { value: 400 - MOTION.caretLiftPx, velocity: 0 };
+  const distance = Math.hypot(100 - 300, 400 - MOTION.caretLiftPx - (200 - MOTION.caretLiftPx));
+  stepCritical(expectedY, 200 - MOTION.caretLiftPx, 16,
+    MOTION.caretNavigationResponseMs + Math.min(120, distance * 0.3), MOTION.cursorSettlePx);
+  assert.equal(sample.currentY, expectedY.value);
+  assert.ok(Number(sample.yVelocity) < 0);
+  cursor.destroy();
+}));
+
+test("carry targets preserve outer and nested scroll transport", () => withPresentation(body => {
+  const nested = new PaintElement();
+  const renders: Array<Record<string, unknown>> = [];
+  const cursor = createCursor({
+    record: (_source: string, name: string, payload: Record<string, unknown>) => {
+      if (name === "render") renders.push(payload);
+    },
+  } as never);
+  const input = frame({ editable: new PaintElement() as unknown as HTMLElement, reducedMotion: true,
+    scrollTop: 0, caret: { x: 100, y: 400, height: 20 },
+    nestedScroll: [{ element: nested as unknown as HTMLElement, left: 0, top: 0 }] });
+  cursor.render(input, 1000, "navigation", false, { authoritativeTarget: true });
+  cursor.render({ ...input, scrollTop: 40, caret: { x: 100, y: 360, height: 20 },
+    nestedScroll: [{ element: nested as unknown as HTMLElement, left: 0, top: 30 }] }, 1016, "navigation");
+
+  const sample = renders.at(-1)!;
+  assert.equal(sample.targetAuthority, "carry");
+  assert.equal(sample.transportApplied, true);
+  assert.equal(sample.transportDx, 0);
+  assert.equal(sample.transportDy, -70);
+  assert.equal(sample.currentY, 359);
+  assert.equal(sample.targetY, 359);
+  cursor.destroy();
+}));
+
+test("repeated fresh structural targets continue Critical Motion through scroll changes", () => withPresentation(body => {
+  const renders: Array<Record<string, unknown>> = [];
+  const cursor = createCursor({
+    record: (_source: string, name: string, payload: Record<string, unknown>) => {
+      if (name === "render") renders.push(payload);
+    },
+  } as never);
+  const input = frame({ editable: new PaintElement() as unknown as HTMLElement, reducedMotion: false,
+    scrollTop: 0, caret: { x: 100, y: 400, height: 20 } });
+  cursor.render(input, 1000, "structural", false, { authoritativeTarget: true });
+  cursor.render({ ...input, scrollTop: 40, caret: { x: 100, y: 200, height: 20 } }, 1016, "structural", false, { authoritativeTarget: true });
+  cursor.render({ ...input, scrollTop: 80, caret: { x: 100, y: 100, height: 20 } }, 1032, "structural", false, { authoritativeTarget: true });
+
+  const samples = renders.slice(-2);
+  assert.deepEqual(samples.map(sample => sample.targetY), [199, 99]);
+  assert.ok(samples.every(sample => sample.targetAuthority === "fresh" && sample.transportApplied === false));
+  assert.ok(Number(samples[0].currentY) > Number(samples[1].currentY));
+  assert.ok(Number(samples[1].yVelocity) < 0);
+  cursor.destroy();
+}));
+
+test("semantic commit with the same caret carries motion provenance without a restart", () => withPresentation(body => {
+  const renders: Array<Record<string, unknown>> = [];
+  const cursor = createCursor({
+    record: (_source: string, name: string, payload: Record<string, unknown>) => {
+      if (name === "render") renders.push(payload);
+    },
+  } as never);
+  const input = frame({ editable: new PaintElement() as unknown as HTMLElement, reducedMotion: false,
+    caret: { x: 100, y: 400, height: 20 } });
+  cursor.render(input, 1000, "navigation", false, { authoritativeTarget: true });
+  const structural = { ...input, caret: { x: 400, y: 200, height: 20 } };
+  cursor.render(structural, 1016, "structural", false, { authoritativeTarget: true });
+  const before = renders.at(-1)!;
+  const expectedY: CriticalState = { value: Number(before.currentY), velocity: Number(before.yVelocity) };
+  const distance = Math.hypot(Number(before.currentX) - Number(before.targetX),
+    Number(before.currentY) - Number(before.targetY));
+  stepCritical(expectedY, Number(before.targetY), 16,
+    MOTION.caretNavigationResponseMs + Math.min(120, distance * 0.3), MOTION.cursorSettlePx);
+  cursor.render(structural, 1032, "structural");
+  const after = renders.at(-1)!;
+
+  assert.equal(after.targetAuthority, "carry");
+  assert.equal(after.targetX, before.targetX);
+  assert.equal(after.targetY, before.targetY);
+  assert.equal(after.currentY, expectedY.value);
+  assert.equal(after.yVelocity, expectedY.velocity);
+  assert.equal(after.intent, "structural");
+  cursor.destroy();
+}));
+
 test("cursor advances x, y and height on the same retarget frame", () => withPresentation(body => {
   const cursor = createCursor();
   const input = frame({ editable: new PaintElement() as unknown as HTMLElement,
@@ -292,6 +401,164 @@ class PaintElement extends ElementStub {
       : [...this.animations];
   }
 }
+
+interface CursorRectFixture {
+  block: PaintElement;
+  editable: PaintElement;
+  point: Text;
+  range: Range;
+  style: Record<string, string>;
+  setProbeRect(node: Node, rect: DOMRect): void;
+  setWalkerNodes(nodes: Text[]): void;
+  probeCount(): number;
+}
+
+function withCursorRectFixture(blockText: string, pointValue: string, run: (fixture: CursorRectFixture) => void) {
+  withPresentation(() => {
+    const block = new PaintElement();
+    const editable = new PaintElement();
+    const editor = new PaintElement();
+    block.parentElement = editor;
+    editable.parentElement = block;
+    editor.children = [block];
+    block.children = [editable];
+    block.dataset.nodeId = "empty-block";
+    const closest = (selector: string) => selector === "[data-node-id]" ? block : selector === ".protyle-wysiwyg" ? editor : null;
+    Object.assign(block, {
+      textContent: blockText,
+      closest,
+      querySelector: () => null,
+      getBoundingClientRect: () => ({ left: 50, right: 900, top: 10, bottom: 50 }),
+    });
+    Object.assign(editable, {
+      closest,
+      getBoundingClientRect: () => ({ left: 100, right: 500, top: 20, bottom: 40 }),
+    });
+    const point = { nodeType: 3, nodeValue: pointValue, data: pointValue,
+      parentElement: editable, isConnected: true } as unknown as Text;
+    let probeCount = 0;
+    let probeNode: Node | null = null;
+    let probeRectNode: Node | null = null;
+    let probeRect: DOMRect | null = null;
+    let walkerNodes: Text[] = [];
+    const documentObject = document as unknown as Record<string, unknown>;
+    documentObject.createRange = () => {
+      probeCount += 1;
+      return {
+        setStart(node: Node) { probeNode = node; },
+        setEnd() {},
+        collapse() {},
+        getClientRects: () => probeNode === probeRectNode && probeRect ? [probeRect] : [],
+      };
+    };
+    documentObject.createTreeWalker = (_root: Node, _whatToShow: number,
+      filter: { acceptNode(node: Node): number }) => {
+      const accepted = walkerNodes.filter(node => filter.acceptNode(node) === NodeFilter.FILTER_ACCEPT);
+      return {
+        currentNode: null as Node | null,
+        previousNode: () => accepted[0] ?? null,
+        nextNode: () => accepted[1] ?? null,
+      };
+    };
+    const style = {
+      lineHeight: "20px", fontSize: "16px", direction: "ltr", textAlign: "left",
+      borderLeftWidth: "0px", borderRightWidth: "0px", borderTopWidth: "0px",
+      paddingLeft: "10px", paddingRight: "20px", paddingTop: "0px",
+    };
+    const previousStyle = Object.getOwnPropertyDescriptor(globalThis, "getComputedStyle");
+    const previousFilter = Object.getOwnPropertyDescriptor(globalThis, "NodeFilter");
+    const previousRect = Object.getOwnPropertyDescriptor(globalThis, "DOMRect");
+    Object.defineProperty(globalThis, "getComputedStyle", { configurable: true, value: () => style });
+    Object.defineProperty(globalThis, "NodeFilter", { configurable: true, value: { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_SKIP: 2 } });
+    Object.defineProperty(globalThis, "DOMRect", { configurable: true, value: class TestDOMRect {
+      x: number; y: number; width: number; height: number; top: number; right: number; bottom: number; left: number;
+      constructor(x: number, y: number, width: number, height: number) {
+        this.x = this.left = x; this.y = this.top = y; this.width = width; this.height = height;
+        this.right = x + width; this.bottom = y + height;
+      }
+    } });
+    const range = { collapsed: true, startContainer: point, startOffset: pointValue.length,
+      getClientRects: () => [] } as unknown as Range;
+    try {
+      run({ block, editable, point, range, style,
+        setProbeRect(node, rect) { probeRectNode = node; probeRect = rect; },
+        setWalkerNodes(nodes) { walkerNodes = nodes; },
+        probeCount: () => probeCount });
+    } finally {
+      if (previousStyle) Object.defineProperty(globalThis, "getComputedStyle", previousStyle);
+      else Reflect.deleteProperty(globalThis, "getComputedStyle");
+      if (previousFilter) Object.defineProperty(globalThis, "NodeFilter", previousFilter);
+      else Reflect.deleteProperty(globalThis, "NodeFilter");
+      if (previousRect) Object.defineProperty(globalThis, "DOMRect", previousRect);
+      else Reflect.deleteProperty(globalThis, "DOMRect");
+    }
+  });
+}
+
+function testRect(left: number, top: number, right: number, height: number): DOMRect {
+  return { x: left, y: top, left, top, right, bottom: top + height, width: right - left, height } as DOMRect;
+}
+
+test("range deletion prefers the empty block content-host caret start", () => {
+  withCursorRectFixture("\u200B", "\u200B", fixture => {
+    const caret = getCursorRect(fixture.range, fixture.editable as unknown as HTMLElement);
+    assert.deepEqual(caret, { x: 110, y: 19.5, height: 21 });
+    assert.equal(fixture.probeCount(), 0);
+  });
+});
+
+test("placeholder-only text is not glyph evidence for caret recovery", () => {
+  for (const value of ["\u200B", "\uFEFF", "\u00A0"]) withCursorRectFixture("real", value, fixture => {
+    const placeholder = { nodeType: 3, nodeValue: value, data: value } as unknown as Text;
+    const real = { nodeType: 3, nodeValue: "real", data: "real" } as unknown as Text;
+    fixture.setWalkerNodes([placeholder, real]);
+    fixture.setProbeRect(placeholder, testRect(700, 20, 720, 20));
+    assert.equal(getCursorRect(fixture.range, fixture.editable as unknown as HTMLElement), null, value);
+  });
+});
+
+test("element range resolution retains ordinary whitespace for Ripple offsets", () => {
+  const space = { nodeType: 3, nodeValue: " ", data: " " } as unknown as Text;
+  const real = { nodeType: 3, nodeValue: "real", data: "real" } as unknown as Text;
+  const container = { childNodes: [space, real] } as unknown as Node;
+  assert.equal(resolveRangeTextPoint(container, 0)?.textNode, space);
+});
+
+test("a non-empty block still recovers from a meaningful sibling around an empty text node", () => {
+  withCursorRectFixture("real", "", fixture => {
+    const real = { nodeType: 3, nodeValue: "real", data: "real", parentElement: fixture.editable } as unknown as Text;
+    fixture.setWalkerNodes([real]);
+    fixture.setProbeRect(real, testRect(240, 20, 260, 20));
+    const caret = getCursorRect(fixture.range, fixture.editable as unknown as HTMLElement);
+    assert.equal(caret?.x, 260);
+    assert.ok(fixture.probeCount() > 0);
+  });
+});
+
+test("structural blocks still do not manufacture a text caret", () => {
+  withCursorRectFixture("", "", fixture => {
+    fixture.block.dataset.type = "NodeImage";
+    Object.assign(fixture.range, { getClientRects: () => [testRect(700, 20, 720, 20)] });
+    assert.equal(getCursorRect(fixture.range, fixture.editable as unknown as HTMLElement), null);
+    Object.assign(fixture.range, { getClientRects: () => [] });
+    assert.equal(getCursorRect(fixture.range, fixture.editable as unknown as HTMLElement), null);
+  });
+});
+
+test("empty block caret follows text alignment and logical inline start", () => {
+  const cases: Array<[string, string, number]> = [
+    ["ltr", "left", 110], ["ltr", "right", 480], ["ltr", "center", 295],
+    ["ltr", "start", 110], ["ltr", "end", 480], ["ltr", "justify", 110],
+    ["rtl", "left", 110], ["rtl", "right", 480], ["rtl", "center", 295],
+    ["rtl", "start", 480], ["rtl", "end", 110], ["rtl", "justify", 480],
+  ];
+  for (const [direction, textAlign, expectedX] of cases) withCursorRectFixture("\u200B", "\u200B", fixture => {
+    fixture.style.direction = direction;
+    fixture.style.textAlign = textAlign;
+    assert.equal(getCursorRect(fixture.range, fixture.editable as unknown as HTMLElement)?.x, expectedX,
+      `${direction}/${textAlign}`);
+  });
+});
 
 interface SessionHarness {
   body: PaintElement;
@@ -965,6 +1232,9 @@ test("Session withholds native text evidence until delayed host structure settle
   const typewriterBeforeGeometry = harness.events.filter(event => event.name === "frame" && "requestedScroll" in event.payload).length;
   harness.tick(64);
   assert.equal(overlay.style.transform, `translate3d(200px,${300 - MOTION.caretLiftPx}px,0)`);
+  const geometryRender = harness.events.filter(event => event.name === "render" && "targetAuthority" in event.payload).at(-1);
+  assert.equal(geometryRender?.payload.targetAuthority, "fresh");
+  assert.equal(geometryRender?.payload.transportApplied, false);
   assert.equal(harness.events.filter(event => event.name === "frame-commit").length, commitsBeforeGeometry);
   assert.equal(harness.events.filter(event => event.name === "prepare").length, preparedBeforeGeometry);
   assert.equal(harness.events.filter(event => event.name === "frame" && "requestedScroll" in event.payload).length, typewriterBeforeGeometry);
@@ -974,6 +1244,8 @@ test("Session withholds native text evidence until delayed host structure settle
   harness.tick(80);
 
   assert.equal(overlay.style.transform, `translate3d(200px,${300 - MOTION.caretLiftPx}px,0)`);
+  const semanticRender = harness.events.filter(event => event.name === "render" && "targetAuthority" in event.payload).at(-1);
+  assert.equal(semanticRender?.payload.targetAuthority, "carry");
   assert.ok(harness.events.some(event => event.name === "structure-commit"));
   assert.ok(harness.events.filter(event => event.name === "prepare").length > prepared);
 }, { typewriter: true, ripple: true }));
@@ -984,11 +1256,13 @@ test("Session routes typing, navigation and structural CursorIntent independentl
   harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
   harness.tick(16);
   assert.equal(harness.events.filter(event => event.name === "render" && "intent" in event.payload).at(-1)?.payload.intent, "typing");
+  assert.equal(harness.events.filter(event => event.name === "render" && "targetAuthority" in event.payload).at(-1)?.payload.targetAuthority, "fresh");
 
   harness.dispatch(20, "keydown", { key: "ArrowRight", defaultPrevented: false });
   harness.setFrame({ ...harness.getFrame(), caret: { x: 220, y: 300, height: 20 } });
   harness.tick(36);
   assert.equal(harness.events.filter(event => event.name === "render" && "intent" in event.payload).at(-1)?.payload.intent, "navigation");
+  assert.equal(harness.events.filter(event => event.name === "render" && "targetAuthority" in event.payload).at(-1)?.payload.targetAuthority, "fresh");
 
   const typewriterFrames = harness.events.filter(event => event.name === "frame" && "requestedScroll" in event.payload).length;
   const ripplePrepares = harness.events.filter(event => event.name === "prepare").length;
@@ -1007,6 +1281,19 @@ test("Session routes typing, navigation and structural CursorIntent independentl
   assert.ok(harness.events.some(event => event.name === "structure-geometry-ready" &&
     event.payload.topologyChanged === true && event.payload.fromBlockKey === "active" && event.payload.toBlockKey === "active"));
 }, { typewriter: true, ripple: true }));
+
+test("Session carries a logical caret through host-only scroll invalidation", () => withSessionHarness(harness => {
+  harness.tick(0);
+  harness.scroll.scrollTop = 330;
+  harness.setFrame({ ...harness.getFrame(), scrollTop: 330, caret: { x: 100, y: 520, height: 20 } });
+  harness.dispatch(20, "scroll", { target: harness.scroll });
+  harness.tick(36);
+
+  const render = harness.events.filter(event => event.name === "render" && "targetAuthority" in event.payload).at(-1);
+  assert.equal(render?.payload.targetAuthority, "carry");
+  assert.equal(render?.payload.transportApplied, true);
+  assert.equal(render?.payload.transportDy, -30);
+}, { typewriter: false, ripple: false }));
 
 test("structural CursorIntent stays with its target through commit, then yields to new targets", () => withSessionHarness(harness => {
   harness.tick(0);

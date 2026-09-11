@@ -23,6 +23,8 @@
 
 **Runtime-observed (CDP-triggered lifecycle event).** 在真实渲染页触发 window blur 前，活动段落包含约 `0.6` 的 dim sentence Highlight、相邻块由 Ripple 持有 `0.4`；旧实现同步删除 Highlight 并取消 block effects。补丁路径改为把 sentence target 设为 neutral，并将 block effects 从当前值 retarget 到 `1`。这验证 renderer 内的交接，不替代操作系统窗口切换的人工观感验收。
 
+**Runtime-observed (2026-09-11, real DebugKit session).** 在 SiYuan 3.8.3 中，拖选整段内容后执行 range deletion，Selection 会 collapse 到一个空 Text node；该 Range 没有 client rect，而所属 paragraph 仍可能包含零宽或 presentation placeholder text。该观察只约束此真实宿主路径，不推广为所有 ContentEditable 或浏览器实现。
+
 ## Editing paths
 
 ### Tab / Shift+Tab

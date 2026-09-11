@@ -12,6 +12,9 @@ interface CursorMotion {
 export type CursorIntent = "typing" | "navigation" | "structural";
 type BreathPhase = "normal" | "down" | "hold" | "up";
 type SwitchRevealPhase = "none" | "pending" | "active";
+interface CursorRenderOptions {
+  authoritativeTarget?: boolean;
+}
 
 export function createCursor(debug?: DebugRecorder) {
   const element = document.createElement("div");
@@ -113,8 +116,10 @@ export function createCursor(debug?: DebugRecorder) {
     element.hidden = true;
   }
 
-  function render(frame: EditorFrame, now: number, intent: CursorIntent, interacting = false): boolean {
+  function render(frame: EditorFrame, now: number, intent: CursorIntent, interacting = false,
+    options: CursorRenderOptions = {}): boolean {
     const isTyping = intent === "typing";
+    const authoritativeTarget = options.authoritativeTarget === true && frame.caret !== null;
     if (editor !== frame.editor) {
       hide();
       editor = frame.editor;
@@ -123,13 +128,19 @@ export function createCursor(debug?: DebugRecorder) {
     const ownerChanged = bindOwner(frame.editable);
     // Transport the last displayed cursor before approaching the authoritative target.
     const offset = { top: frame.origin.y - frame.scrollTop, left: frame.origin.x - frame.scrollLeft };
-    if (motion && target) {
+    let transportDx = 0;
+    let transportDy = 0;
+    let transportApplied = false;
+    if (motion && target && !authoritativeTarget) {
       let dx = offset.left - transport.left;
       let dy = offset.top - transport.top;
       for (const next of frame.nestedScroll) {
         const previous = nestedScroll.find(item => item.element === next.element);
         if (previous) { dx -= next.left - previous.left; dy -= next.top - previous.top; }
       }
+      transportDx = dx;
+      transportDy = dy;
+      transportApplied = dx !== 0 || dy !== 0;
       motion.x.value += dx; motion.y.value += dy;
       target.x += dx; target.y += dy;
     }
@@ -288,6 +299,10 @@ export function createCursor(debug?: DebugRecorder) {
       visible,
       ownerChanged,
       edge,
+      targetAuthority: authoritativeTarget ? "fresh" : "carry",
+      transportDx,
+      transportDy,
+      transportApplied,
     });
     if (!moving && alphaSettled) lastTime = null;
     else lastTime = now;

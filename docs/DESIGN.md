@@ -1,4 +1,4 @@
-# v2.9.0-remake.2.5-structural.2
+# v2.9.0-remake.2.6-caret.1
 
 ## Canonical five-layer architecture
 
@@ -13,6 +13,8 @@ The product boundary is deliberately small:
 **May know:** which DOM nodes are connected, which Selection endpoints belong to the active editor, and the semantic key of the block containing the current caret. `HTMLElement` identity is a handle for one Host sample, not a long-lived semantic identity. Block relations use `data-node-id` (and the existing `visualKey()` convention for visual markers); no global identity registry is built.
 
 **Must not know:** whether a change is being animated, Cursor speed, Ripple alpha, Typewriter targets, `responseMs`, FLIP, or any other presentation policy. Host Truth reports facts; it does not choose effects.
+
+When a collapsed Range belongs to an empty semantic block, the block's own content-host caret geometry takes precedence over adjacent placeholder-text recovery.
 
 ### 2. Structural Contract (`src/structure.ts`)
 
@@ -108,7 +110,7 @@ Cursor owns current/target position and height, their CriticalState motion, logi
 
 Editor switching still uses eight stable samples or a 700ms ceiling; reduced motion skips this visual wait. Missing geometry retains presentation for the existing 160ms budget, then fades it. Caretless structural blocks fade immediately. Valid caretless/selected editables retain native suppression until host/lifecycle release. None of this is the shared structural gate.
 
-Cursor transports current and target by changes in scroll origin, outer scroll and common nested scrollers before applying the same fixed-zeta=1 analytic law to x, y and height. It retains the 1px visual lift, viewport edge fade, 370ms appear response and quicker 80ms disappear response. The shared `responseMs` parameter keeps the central Critical Motion calibration: from rest, a fixed target reaches approximately 90% displacement at the configured response time. The outer alpha is the sole visibility owner; breathing uses the explicit `normal → down → hold → up → normal` semantic phases on that same state. The first idle delay is 3000ms, down uses a 900ms response toward exact zero, the low hold is 0ms, up uses a 600ms response, and the recovered bright rest is 2000ms. Editor switch reveal retains the eight-stable-frame/700ms hidden geometry handoff and uses the same 370ms appear response. There is no CSS animation or inner recovery animation.
+Cursor transports current and target by changes in scroll origin, outer scroll and common nested scrollers before applying the same fixed-zeta=1 analytic law to x, y and height. Coordinate transport preserves a carried target; a newly granted authoritative target rebases transport instead of inheriting stale coordinate displacement. It retains the 1px visual lift, viewport edge fade, 370ms appear response and quicker 80ms disappear response. The shared `responseMs` parameter keeps the central Critical Motion calibration: from rest, a fixed target reaches approximately 90% displacement at the configured response time. The outer alpha is the sole visibility owner; breathing uses the explicit `normal → down → hold → up → normal` semantic phases on that same state. The first idle delay is 3000ms, down uses a 900ms response toward exact zero, the low hold is 0ms, up uses a 600ms response, and the recovered bright rest is 2000ms. Editor switch reveal retains the eight-stable-frame/700ms hidden geometry handoff and uses the same 370ms appear response. There is no CSS animation or inner recovery animation.
 
 Typewriter remains an independent numerical comfort-band controller with hysteresis and host-scroll takeover. Its virtual scroll position and velocity advance independently of realized browser scrollTop through the shared critical law; the actuator readback is used only for takeover, ownership and measured displacement. The final visual tail settles only when both position and velocity are within the configured bounds, with a 0.21px virtual position epsilon. During a withheld frame Session does not call `next()` and cancels an outstanding scroll target. After commit it computes from final geometry and actual scrollTop. Composition continues to suppress plugin scrolling. The host can still scroll independently; we do not cancel SiYuan's caretScroll rAF. Manual browsing disables following; a distant ordinary click can request one centering alignment without writing intent.
 

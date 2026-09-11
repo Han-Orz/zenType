@@ -12,6 +12,11 @@ export interface RangeTextPoint {
 }
 const TEXT_NODE = 3;
 
+/** Matches the Host's existing semantic empty-content normalization. */
+export function hasMeaningfulText(value: string | null | undefined): boolean {
+  return !!value && value.replace(/[\u200B\uFEFF\u00A0]/g, "").trim().length > 0;
+}
+
 function isTextNode(node: Node): node is Text {
   return node.nodeType === TEXT_NODE;
 }

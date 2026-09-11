@@ -50,6 +50,10 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
   let cursorTargetIntent: CursorIntent = "navigation";
   let selectionMode: SelectionMode = "unknown";
   let selectionHandoff: SelectionHandoff | null = null;
+  // Events that change the logical caret leave one pending authority bit until
+  // Session admits a frame. Viewport-only invalidations deliberately do not set it.
+  let targetAuthorityPending = false;
+  let structuralGeometryGeneration: number | null = null;
 
   function cursorTargetIntentFor(now: number, structural = false): CursorIntent {
     if (structural) {
@@ -123,6 +127,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     ZENTYPE_DEBUG: debug?.recordMutations(records, frame);
     const changes = classifyMutations(records);
     if (changes.kind !== "text") structureDirty = true;
+    if (changes.kind === "text" || changes.kind === "representation") targetAuthorityPending = true;
     if (observedEditor && !blocked && !pointerDown) {
       structure.mutation(observedEditor, performance.now(), changes.kind, changes.textOnly);
       if (changes.kind === "representation" || changes.kind === "structural") {
@@ -186,6 +191,8 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     cursorTargetIntent = "navigation";
     selectionMode = "unknown";
     selectionHandoff = null;
+    targetAuthorityPending = false;
+    structuralGeometryGeneration = null;
     stopWriting();
     cursor.hide();
     if (!immediate && frame) {
@@ -205,6 +212,8 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     cursorTargetIntent = "navigation";
     selectionMode = "unknown";
     selectionHandoff = null;
+    targetAuthorityPending = false;
+    structuralGeometryGeneration = null;
     stopWriting();
     if (pending !== null) cancelAnimationFrame(pending);
     pending = null;
@@ -240,6 +249,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         return;
       }
       let sampled = false;
+      let authoritativeTarget = false;
       // A typewriter frame only moves the container: the frame already transports
       // the caret and the cursor by that displacement, so re-reading host geometry
       // every frame of a comfort scroll is redundant work.
@@ -267,8 +277,11 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           const writing = writingEditor === frame.editor;
           const composing = composingEditor === frame.editor;
           const intent = cursorTargetIntentFor(now, handoff?.topologyChanged === true);
+          structuralGeometryGeneration = handoff?.generation ?? structuralGeometryGeneration;
+          targetAuthorityPending = false;
           const cursorMoving = cursor.render(frame, now, intent,
-            pointerDown || now - lastInteraction < MOTION.interactionHoldMs);
+            pointerDown || now - lastInteraction < MOTION.interactionHoldMs,
+            { authoritativeTarget: true });
           const settling = cursor.isSettling();
           if (intent === "structural" && cursor.isTargetSettled() && !settling) cursorTargetIntent = "navigation";
           geometryDirty = true;
@@ -294,6 +307,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           if (decision !== "commit") {
             // A deadline bounds work; it is not proof of stable geometry. Release
             // all presentation and await fresh activity instead of animating a guess.
+            targetAuthorityPending = false;
             cursor.hide(); cursorTargetIntent = "navigation";
             ripple.clear(); stopWriting(); cleanClones();
             frame = next;
@@ -301,12 +315,22 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
             ZENTYPE_DEBUG: debug?.record("session", "structure-release", { now, reason: decision });
             return;
           }
+          // A generation that already published geometry keeps that target's
+          // provenance through semantic commit. A direct geometry+semantic sample
+          // is the only commit that still admits a fresh target here.
+          authoritativeTarget = !!next?.caret && handoff?.generation !== structuralGeometryGeneration;
+          structuralGeometryGeneration = handoff?.generation ?? structuralGeometryGeneration;
+          targetAuthorityPending = false;
           if (handoff?.topologyChanged === true) cursorTargetIntent = "structural";
           ZENTYPE_DEBUG: debug?.record("session", "structure-commit", {
             now, authority: "quiet-and-stable", generation: handoff?.generation ?? null,
             topologyChanged: handoff?.topologyChanged ?? false,
             fromBlockKey: handoff?.fromBlockKey ?? null, toBlockKey: handoff?.toBlockKey ?? null,
           });
+        }
+        if (decision === "ordinary" && next?.caret && (targetAuthorityPending || frame === null)) {
+          authoritativeTarget = true;
+          targetAuthorityPending = false;
         }
         if (!next) {
           ZENTYPE_DEBUG: debug?.record("session", "frame-missing", {
@@ -339,6 +363,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         if (editorChanged) {
           cursor.switched(next.editor, now);
           cursorTargetIntent = "navigation";
+          targetAuthorityPending = true;
           ripple.clear();
           typewriter.cancel();
           if (writingEditor !== next.editor) writingEditor = null;
@@ -395,7 +420,8 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
       // document, once per focus-mode entry and exit).
       const intent = cursorTargetIntentFor(now);
       const cursorMoving = cursor.render(frame, now, intent,
-        pointerDown || now - lastInteraction < MOTION.interactionHoldMs);
+        pointerDown || now - lastInteraction < MOTION.interactionHoldMs,
+        { authoritativeTarget });
       const settling = cursor.isSettling();
       if (intent === "structural" && cursor.isTargetSettled() && !settling) cursorTargetIntent = "navigation";
       if (settling) geometryDirty = true;
@@ -452,10 +478,15 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
             !(event.target as Element).closest('[data-type="a"], a, button')) {
           clickEditor = editable.closest<HTMLElement>(".protyle-wysiwyg");
           cursorTargetIntent = "navigation";
+          targetAuthorityPending = true;
         }
         break;
       case "focusin":
-        if (editable) { blocked = false; retryUntil = performance.now() + MOTION.recoveryMs; }
+        if (editable) {
+          blocked = false;
+          targetAuthorityPending = true;
+          retryUntil = performance.now() + MOTION.recoveryMs;
+        }
         break;
       case "focusout":
         if ((event as FocusEvent).relatedTarget && !editableAt((event as FocusEvent).relatedTarget)) { suspend(); return; }
@@ -473,6 +504,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         }
         if (event.type === "input") {
           cursorTargetIntent = "typing";
+          targetAuthorityPending = true;
           structure.input();
         }
         structure.activity(performance.now(), event.type);
@@ -485,6 +517,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         if (key.isComposing) break;
         if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", "Escape"].includes(key.key)) {
           cursorTargetIntent = "navigation";
+          targetAuthorityPending = true;
           structure.cancel("navigation");
         }
         if (["ArrowUp", "ArrowDown", "PageUp", "PageDown"].includes(key.key)) {
@@ -492,6 +525,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         }
         if (!key.ctrlKey && !key.metaKey && !key.altKey && ["Enter", "Backspace", "Delete", "Tab"].includes(key.key)) {
           activate(editable);
+          targetAuthorityPending = false;
           const now = performance.now();
           retryUntil = now + MOTION.recoveryMs;
           const intent = key.key === "Backspace" ? "backspace" : key.key === "Delete" ? "delete" : "other";
@@ -511,13 +545,19 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         break;
       case "compositionend":
         composingEditor = null;
-        if (editable) { blocked = false; cursorTargetIntent = "typing"; activate(editable); }
+        if (editable) {
+          blocked = false;
+          cursorTargetIntent = "typing";
+          targetAuthorityPending = true;
+          activate(editable);
+        }
         contentDirty = true;
         retryUntil = performance.now() + MOTION.recoveryMs;
         break;
       case "pointerdown":
         pointerDown = true;
         cursorTargetIntent = "navigation";
+        targetAuthorityPending = false;
         structure.cancel("pointer");
         stopWriting();
         break;
@@ -549,6 +589,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         if (next === "range") {
           selectionMode = "range";
           selectionHandoff = null;
+          targetAuthorityPending = false;
           cursorTargetIntent = "navigation";
           structure.cancel("selection");
         } else if (next === "caret") {
@@ -556,10 +597,12 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           if (collapsedAfterRange) {
             selectionMode = "range";
             selectionHandoff = captureCollapsedSelection();
+            targetAuthorityPending = true;
             structure.cancel("selection-collapse");
           } else {
             selectionMode = "caret";
             selectionHandoff = null;
+            targetAuthorityPending = true;
           }
         }
         structure.activity(now, "selection");
@@ -572,6 +615,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
       case "visibilitychange":
         if (document.hidden) { pointerDown = false; suspend(); return; }
         blocked = false;
+        targetAuthorityPending = true;
         break;
     }
     geometryDirty = true;
@@ -583,7 +627,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     document.addEventListener(name, handle, { capture: true, passive: true, signal: listeners.signal });
   }
   window.addEventListener("blur", handle, { signal: listeners.signal });
-  window.addEventListener("focus", () => { blocked = false; refresh(); }, { signal: listeners.signal });
+  window.addEventListener("focus", () => { blocked = false; targetAuthorityPending = true; refresh(); }, { signal: listeners.signal });
   window.addEventListener("resize", refresh, { passive: true, signal: listeners.signal });
   window.visualViewport?.addEventListener("resize", refresh, { passive: true, signal: listeners.signal });
   window.visualViewport?.addEventListener("scroll", refresh, { passive: true, signal: listeners.signal });

@@ -2,6 +2,8 @@ import { showMessage, type Plugin } from "siyuan";
 import { initDebugHook } from "../debug";
 import { createDebugBundleFilename, downloadDebugBundle } from "../debug/download";
 import type { DebugHookController } from "../debug/types";
+import { BUILD_LABEL } from "../config";
+import { buildSha } from "../debug/buildIdentity";
 
 /** Development-only UI wiring; production tree-shaking removes this module. */
 export async function installDebugKit(plugin: Pick<Plugin, "addCommand">): Promise<DebugHookController> {
@@ -35,7 +37,8 @@ export async function installDebugKit(plugin: Pick<Plugin, "addCommand">): Promi
   };
 
   await debug.start("default", { profile: "full", includeText: true });
-  showMessage("zenType：DebugKit 已开始（全量记录）", 3000, "info");
+  const shortSha = String(buildSha).slice(0, 7);
+  showMessage(`zenType DEV ${BUILD_LABEL} · ${shortSha}：DebugKit 已开始（全量记录）`, 3500, "info");
   plugin.addCommand({
     langKey: "debugkit-toggle",
     langText: "zenType：切换 DebugKit",

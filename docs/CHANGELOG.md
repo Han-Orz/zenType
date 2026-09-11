@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.9.0-remake.2.6-caret.1 (2026-09-11) — Caret truth and transport handoff
+
+- Empty semantic blocks now use their own content-host caret geometry before adjacent placeholder-text recovery; zero-width, BOM and non-breaking-space-only text are not meaningful glyph evidence.
+- Cursor transport now carries only a carried target. A fresh authoritative Host caret rebases the transport baseline and continues the existing Critical Motion state without a snap or velocity reset.
+- DebugKit render records expose `targetAuthority`, `transportDx`, `transportDy` and `transportApplied`; the DEV activation notice includes the build label and short SHA. Structural Contract thresholds and feature motion remain unchanged.
+
 ## v2.9.0-remake.2.5-structural.2 (2026-09-11) — Structural semantic closeout
 
 - Trusted `fromBlockKey` provenance now comes only from an ordinary admitted caret, a prior geometry-ready structural caret, or an explicitly captured fresh collapsed Selection authority; unstable samples never update it and an unknown origin is never backfilled from `toBlockKey`.
