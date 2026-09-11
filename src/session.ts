@@ -54,10 +54,6 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
   // Session admits a frame. Viewport-only invalidations deliberately do not set it.
   let targetAuthorityPending = false;
   let structuralGeometryGeneration: number | null = null;
-  // Structural generations are monotonic and never reused, so one remembered
-  // generation is enough to consume identity authority exactly once per
-  // transaction without a registry.
-  let identityHandoffGeneration: number | null = null;
 
   function cursorTargetIntentFor(now: number, structural = false): CursorIntent {
     if (structural) {
@@ -197,7 +193,6 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     selectionHandoff = null;
     targetAuthorityPending = false;
     structuralGeometryGeneration = null;
-    identityHandoffGeneration = null;
     stopWriting();
     cursor.hide();
     if (!immediate && frame) {
@@ -219,7 +214,6 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     selectionHandoff = null;
     targetAuthorityPending = false;
     structuralGeometryGeneration = null;
-    identityHandoffGeneration = null;
     stopWriting();
     if (pending !== null) cancelAnimationFrame(pending);
     pending = null;
@@ -267,18 +261,10 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         if (next && frame && next.editor !== frame.editor) structure.cancel("editor-switch");
         const decision = structure.sample(next, now);
         const handoff = structure.handoff();
-        // The Structural Contract publishes semantic identity before caret
-        // geometry. Transfer only the focused block owner here, ahead of this
-        // frame's Ripple presentation commit, so the first authoritative merged
-        // topology is presented with the correct focused owner instead of the
-        // previous dim one. Neighbors, ancestors and sentences stay frozen.
-        if (next && handoff?.identityReady && handoff.generation !== identityHandoffGeneration) {
-          identityHandoffGeneration = handoff.generation;
-          ripple.handoffFocusedBlock(next, handoff);
-        }
         if (decision === "geometry") {
-          // Geometry-ready gives Cursor its caret. Ripple stays held apart from
-          // the focused owner already transferred above.
+          // Geometry-ready gives Cursor its caret. Ripple stays held until the
+          // semantic commit; the Structural Contract's identity readiness is
+          // evidence, not a destination opacity command.
           ripple.freeze();
           typewriter.cancel();
           if (!next) {

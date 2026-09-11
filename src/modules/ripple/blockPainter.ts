@@ -93,16 +93,6 @@ export function createBlockPainter(debug?: DebugRecorder) {
       }
       ZENTYPE_DEBUG: debug?.record("ripple", "presentation-hold", { blockCount: paints.size });
     },
-    /**
-     * Release a committed dim owner so the first presentation of a new topology
-     * already shows the authoritative focused block. This transfers ownership
-     * truth; it deliberately starts no replacement motion.
-     */
-    handoffFocused(element: HTMLElement) {
-      if (!paints.has(element)) return false;
-      release(element);
-      return true;
-    },
     /** Rebind only existing semantic owners; never plan against intermediate DOM. */
     rebind(added: readonly HTMLElement[], seed?: CarrySeed) {
       const previous = new Map<string, Pick<Paint, "value" | "target">>();

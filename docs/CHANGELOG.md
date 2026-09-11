@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.9.0-remake.2.6-local-bridge.1 (2026-09-11) — Local Presentation Bridge prototype rejected
+
+- Forensic-only round: no Local Presentation Bridge was implemented. The prototype was rejected on design grounds before writing runtime code, so no `src/modules/localContinuity.ts` or `structuralBridge.ts` exists.
+- **Reason — the bridge cannot reach its own product goal.** The visible dim phase belongs to the *destination's* inherited dim owner; identity-ready is forbidden to write destination ownership, so a source-side second surface would leave the dim phase in place while adding duplicate text.
+- **Reason — duplicate text is unavoidable.** Host source-proven merge path (`remove.ts`): `range.extractContents()` of the source editable, `range.insertNode()` into the destination, then `SpinBlockDOM(previousLastElement.outerHTML)` inserted beside the destination and both original elements removed. The source text is therefore rendered at the destination's position; a second surface at the source's old position renders the same text twice.
+- **Runtime-observed host facts** (SiYuan 3.8.3 / Chrome 152.0.7977.76, read-only CDP): a detached element and a detached clone both have a zero box; a clone mounted outside `.protyle-wysiwyg` loses host typography (`line-height 26px → normal`, `font-size 16px → 14px`), and only recovers it when the holder element carries the `protyle-wysiwyg` class.
+- Removed the rejected `v2.9.0-remake.2.6-structure-identity.1` destination release path: `blockPainter.handoffFocused()`, the `identityReady → release destination owner` routing, the `identityHandoffGeneration` latch and the `ripple focused-identity-handoff` / `hadDestinationOwner` telemetry.
+- `identityReady` is kept in `StructuralHandoff` as published evidence only; it grants no presentation write. `geometryReady` still authorizes Cursor only; `semanticReady` still owns the full Ripple plan.
+- Ordinary directional delete fast path, same-key replacement carry, 48ms/160ms, the single Session rAF and all feature motion are unchanged. No new observer, scheduler, rAF, registry or Host DOM modification.
+
 ## v2.9.0-remake.2.6-structure-identity.1 (2026-09-11) — Structural identity handoff
 
 - The Structural Contract now publishes a third, independent readiness level: `identityReady`. The first authoritative structural frame that resolves a semantic block identity already proves that focused ownership moved `fromBlockKey → toBlockKey`; it no longer waits for two stable caret samples. `geometryReady` and `semanticReady` keep their existing meaning and thresholds.

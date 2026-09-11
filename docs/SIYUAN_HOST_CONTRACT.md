@@ -57,6 +57,30 @@ The entry branch is [`keydown.ts`](https://github.com/siyuan-note/siyuan/blob/86
 
 This evidence distinguishes ordinary deletion from merge deletion by the host path and resulting mutations, not from the key name alone. zenType is therefore correct to classify observed DOM rather than add Backspace/Delete special cases.
 
+### Block-start Backspace merge (local presentation continuity)
+
+**Source-proven.** The paragraph merge branch of [`remove.ts`](https://github.com/siyuan-note/siyuan/blob/8641553a1f07374001902d3ce773285db1292b2d/app/src/protyle/wysiwyg/remove.ts#L1712-L1782) resolves `previousLastElement = getLastBlock(previousElement)` (the destination) and `removeElement` (the source), extends the live editor Range to the source editable's last child, then performs, in order:
+
+1. `const leftNodes = range.extractContents()` — the source content leaves the DOM;
+2. `range.selectNodeContents(previousLastEditElement); range.collapse(false); range.insertNode(leftNodes)` — that content is inserted at the **end of the destination's** contenteditable;
+3. `previousLastElement.insertAdjacentHTML("afterend", protyle.lute.SpinBlockDOM(previousLastElement.outerHTML))`, reassignment to the new sibling, and `previousLastElement.previousElementSibling.remove()` — the destination is destroyed and replaced by a fresh element that keeps the same `data-node-id`;
+4. `removeElement.remove()` — the source container is removed;
+5. `protyle.contentElement.scrollTop = scroll` and a follow-up `update` operation with `previousLastElement.outerHTML`.
+
+Two consequences bound any local-continuity feature:
+
+- after the merge the source text is rendered at the **destination's** position, so a second presentation surface drawn at the source's old position renders the same text twice;
+- the destination is a **new element** carrying the old semantic key, which is exactly why same-key replacement carry (not element identity) is the correct continuity primitive.
+
+**Runtime-observed (2026-09-11, read-only CDP probe).** SiYuan 3.8.3 / Electron 44.2.0 / Chrome 152.0.7977.76, live document, no editing performed:
+
+- `.protyle-wysiwyg` itself carries `contenteditable="true"`, and the focused block's own inner contenteditable is a child of it, so a presentation surface placed inside the editor subtree is both a Host-observable mutation and editable Host content;
+- a detached element and a `cloneNode(true)` of a live block both report `{x:0,y:0,w:0,h:0}` from `getBoundingClientRect()`, and `getComputedStyle()` on a fully detached node returns empty strings;
+- a clone mounted under `.protyle-content` (above the editor, outside any editor-rooted MutationObserver) loses host typography: `line-height 26px → normal`, `font-size 16px → 14px`, `margin 2px 0px → 0px`;
+- giving that holder the host `protyle-wysiwyg` class restores the block typography (`line-height 26px`, `font-size 16px`, `margin 2px 0px`, `padding 4px`), at the cost of depending on a host-internal class name.
+
+Scope: this constrains the audited revision and renderer only. The merge MutationObserver/rAF/Selection ordering itself was **not** triggered and remains on the Runtime-not-verified checklist.
+
 ### Enter
 
 [`keydown.ts`](https://github.com/siyuan-note/siyuan/blob/8641553a1f07374001902d3ce773285db1292b2d/app/src/protyle/wysiwyg/keydown.ts#L1685-L1700) awaits [`enter.ts`](https://github.com/siyuan-note/siyuan/blob/8641553a1f07374001902d3ce773285db1292b2d/app/src/protyle/wysiwyg/enter.ts#L48-L841).
