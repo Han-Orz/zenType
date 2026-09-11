@@ -4,7 +4,7 @@ import type { DebugRecorder } from "./debug/types";
 
 export type MutationKind = "text" | "representation" | "structural" | "overflow";
 export const STRUCTURE_LIMITS = { records: 256, nodes: 2048, depth: 64 } as const;
-type IntentKind = "backspace" | "delete" | "other";
+type IntentKind = "backspace" | "delete" | "indent" | "outdent" | "other";
 export type StructureDecision = "ordinary" | "wait" | "geometry" | "commit" | "timeout" | "overflow";
 
 export interface StructuralHandoff {

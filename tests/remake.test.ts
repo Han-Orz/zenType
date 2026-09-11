@@ -4,6 +4,7 @@ import { stepCritical, type CriticalState } from "../src/motion";
 import { MOTION, RIPPLE_LEVELS, SENTENCE_ALPHA } from "../src/config";
 import { createRipple } from "../src/modules/ripple";
 import { createBlockPainter } from "../src/modules/ripple/blockPainter";
+import { createStructuralMove } from "../src/modules/ripple/structuralMove";
 import { createWritingSession } from "../src/session";
 import { createTypewriter } from "../src/modules/typewriter";
 import { createCursor } from "../src/modules/cursor";
@@ -24,6 +25,100 @@ function frame(overrides: Partial<EditorFrame> = {}): EditorFrame {
     scrollTop: 300, scrollLeft: 0, origin: { x: 0, y: 0 }, nestedScroll: [],
     maxScroll: 2000, reducedMotion: false, zIndex: 1, ...overrides };
 }
+
+function paintRect(element: PaintElement, left: number, top: number) {
+  element.rect = { x: left, y: top, left, top, right: left + 100, bottom: top + 20, width: 100, height: 20 };
+}
+
+test("a structural slide presents the captured position and restores the host transform", () => withPresentation(() => {
+  const element = new PaintElement();
+  element.dataset.nodeId = "item";
+  element.style.transform = "translateX(2px)";
+  paintRect(element, 100, 50);
+  const move = createStructuralMove();
+  move.capture(element as unknown as HTMLElement);
+
+  // The Host reparents the item: same semantic key, new committed position.
+  paintRect(element, 130, 50);
+  const started = move.begin(element as unknown as HTMLElement, false);
+  assert.deepEqual(started, { x: -30, y: 0 });
+  assert.equal(element.style.transform, "translate(-30px, 0px)");
+
+  let offset: { x: number; y: number } | null = started;
+  for (let now = 0; now <= 2000 && offset; now += 16) offset = move.step(now, false);
+  assert.equal(offset, null);
+  // The Host owns the layout, so whatever inline transform it had comes back.
+  assert.equal(element.style.transform, "translateX(2px)");
+}));
+
+test("a structural slide refuses a mismatched key and snaps under reduced motion", () => withPresentation(() => {
+  const element = new PaintElement();
+  element.dataset.nodeId = "item";
+  paintRect(element, 100, 50);
+  const move = createStructuralMove();
+
+  move.capture(element as unknown as HTMLElement);
+  paintRect(element, 130, 50);
+  const other = new PaintElement();
+  other.dataset.nodeId = "other";
+  paintRect(other, 130, 50);
+  // The semantic key proves continuity; DOM identity alone does not.
+  assert.equal(move.begin(other as unknown as HTMLElement, false), null);
+  assert.equal(move.begin(element as unknown as HTMLElement, false), null);
+  assert.equal(element.style.transform, "");
+
+  move.capture(element as unknown as HTMLElement);
+  assert.equal(move.begin(element as unknown as HTMLElement, true), null);
+  assert.equal(element.style.transform, "");
+
+  // Below the settled-caret threshold there is no motion the eye can resolve.
+  paintRect(element, 100, 50);
+  move.capture(element as unknown as HTMLElement);
+  paintRect(element, 100.05, 50);
+  assert.equal(move.begin(element as unknown as HTMLElement, false), null);
+  assert.equal(element.style.transform, "");
+}));
+
+test("a list indent slides the moved item and carries the caret presentation with it", () => withSessionHarness(harness => {
+  harness.setReducedMotion(false);
+  const item = new PaintElement();
+  item.dataset.nodeId = "item";
+  paintRect(item, 100, 50);
+  harness.editable.dataset.nodeId = "active";
+  Object.assign(harness.editable, { closest: (selector: string) =>
+    selector === ".protyle-wysiwyg" ? harness.editor :
+    selector === "[data-node-id]" ? harness.editable :
+    selector === '[data-type="NodeListItem"]' ? item : null });
+  harness.tick(0);
+  const overlay = harness.body.children[0];
+
+  harness.dispatch(0, "keydown", { key: "Tab", defaultPrevented: false });
+  // The Host reparents the item 30px further right, and the caret rect the frame
+  // observes already includes that presentation transform.
+  paintRect(item, 130, 50);
+  const removed = new PaintElement();
+  removed.dataset.nodeId = "removed";
+  harness.mutate(4, [{ type: "childList", target: harness.editor,
+    addedNodes: [], removedNodes: [removed] } as unknown as MutationRecord]);
+  harness.setFrame({ ...harness.getFrame(), caret: { x: 220, y: 310, height: 20 } });
+  harness.tick(16);
+  harness.tick(32);
+  assert.equal(item.style.transform, "translate(-30px, 0px)");
+  const snapX = Number(overlay.style.transform.match(/translate3d\(([-\d.]+)px/)![1]);
+  assert.equal(snapX, 190);
+
+  // A later sample sees the transformed layout; the stored caret must stay the
+  // Host's untransformed truth so the Structural Contract still sees stability.
+  harness.setFrame({ ...harness.getFrame(), caret: { x: 190, y: 310, height: 20 } });
+  harness.tick(48);
+  const heldX = Number(overlay.style.transform.match(/translate3d\(([-\d.]+)px/)![1]);
+  assert.ok(Math.abs(heldX - 190) < 0.05, String(heldX));
+  assert.ok(harness.events.some(event => event.name === "structure-geometry-ready"));
+
+  for (let now = 64; now <= 1200; now += 16) harness.tick(now);
+  assert.equal(item.style.transform, "");
+  assert.equal(harness.rafCount(), 0);
+}));
 
 test("critical motion keeps value and velocity continuous across retarget", () => {
   const state: CriticalState = { value: 0, velocity: 0 };
@@ -373,9 +468,11 @@ class PaintElement extends ElementStub {
   dataset: Record<string, string> = {};
   isConnected = true;
   animations: AnimationStub[] = [];
+  rect = { x: 0, y: 0, left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
   constructor() {
     super();
     Object.assign(this.style, {
+      transform: "",
       getPropertyValue: (key: string) => this.style[key] ?? "",
       getPropertyPriority: () => "",
       setProperty: (key: string, value: string) => { this.style[key] = value; },
@@ -383,6 +480,9 @@ class PaintElement extends ElementStub {
     });
   }
   matches() { return !!this.dataset.nodeId || this.classes.has("protyle-action"); }
+  /** Fixtures that need ancestry assign their own `closest` over this default. */
+  closest(): PaintElement | null { return null; }
+  getBoundingClientRect(): DOMRect { return this.rect as DOMRect; }
   contains(element: PaintElement | null): boolean {
     return !!element && (element === this || this.contains(element.parentElement));
   }
@@ -575,6 +675,7 @@ interface SessionHarness {
   readCount(): number;
   rafCount(): number;
   timerCount(): number;
+  setReducedMotion(matches: boolean): void;
   session: ReturnType<typeof createWritingSession>;
 }
 
@@ -589,6 +690,7 @@ function withSessionHarness(run: (harness: SessionHarness) => void, features = {
     let now = 0;
     let reads = 0;
     let selectionMode: "caret" | "range" = "caret";
+    let reducedMotionMatches = true;
     const editor = new PaintElement();
     editor.classes.add("protyle-wysiwyg");
     const editable = new PaintElement();
@@ -627,7 +729,7 @@ function withSessionHarness(run: (harness: SessionHarness) => void, features = {
       },
       MutationObserver: Observer,
       ResizeObserver: Resize,
-      matchMedia: () => ({ matches: true, addEventListener() {} }),
+      matchMedia: () => ({ get matches() { return reducedMotionMatches; }, addEventListener() {} }),
       requestAnimationFrame: (callback: FrameRequestCallback) => { raf.set(++serial, callback); return serial; },
       cancelAnimationFrame: (id: number) => raf.delete(id),
       setTimeout: (callback: () => void, delay = 0) => { timers.set(++serial, { at: now + delay, callback }); return serial; },
@@ -675,6 +777,7 @@ function withSessionHarness(run: (harness: SessionHarness) => void, features = {
         readCount: () => reads,
         rafCount: () => raf.size,
         timerCount: () => timers.size,
+        setReducedMotion: matches => { reducedMotionMatches = matches; },
       };
       run(harness);
       session.destroy();
