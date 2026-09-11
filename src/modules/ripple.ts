@@ -9,7 +9,6 @@ import { projectText, sentenceRange, mapUnchangedBoundaries, type TextEntry } fr
 
 import { collectTargets } from "./ripple/blockPlan";
 import { createBlockPainter } from "./ripple/blockPainter";
-import { createStructuralMove } from "./ripple/structuralMove";
 
 type SentencePaint = SentenceRange & { range: Range; value: number; velocity: number; target: number; fresh: boolean };
 
@@ -26,9 +25,6 @@ export function createRipple(debug?: DebugRecorder) {
   style.textContent = supported ? names.map((name, i) =>
     "::highlight(" + name + ") { color: rgb(from var(--zentype-text-color) r g b / calc(alpha * " + (i / 64) + ")); }").join("\n") : "";
   const painter = createBlockPainter(debug);
-  // Block geometry travels separately from block alpha: the Host owns the final
-  // layout, and this only closes the visual gap a structural reparent opens.
-  const structural = createStructuralMove();
   const colors = new Map<HTMLElement, { original: string; written: string }>();
   let editable: HTMLElement | null = null;
   let block: HTMLElement | null = null;
@@ -280,7 +276,6 @@ export function createRipple(debug?: DebugRecorder) {
     ZENTYPE_DEBUG: debug?.record("ripple", "clear", { blockCount: painter.size(), sentenceCount: sentences.length });
     painter.clear();
     clearSentences();
-    structural.cancel();
     pendingSentencePresentation = null;
     block = null;
     lastTime = null;
@@ -294,10 +289,6 @@ export function createRipple(debug?: DebugRecorder) {
       return render(now, reducedMotion);
     },
     render, clear, invalidateColors: clearColors, freeze: painter.freeze,
-    captureStructuralMove: structural.capture,
-    beginStructuralMove: structural.begin,
-    stepStructuralMove: structural.step,
-    cancelStructuralMove: structural.cancel,
     rebind(added: readonly HTMLElement[], focusedKey: string | null = null) {
       const floor = sentenceFloor();
       const key = block && !block.isConnected && floor < 1 ? visualKey(block) : undefined;
