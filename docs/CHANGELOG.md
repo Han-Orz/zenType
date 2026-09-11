@@ -1,12 +1,34 @@
 # Changelog
 
+## v2.9.0-remake.2.7-product-closeout.1 (2026-09-12) — Window blur release, list reparent presentation, structural motion
+
+Three product closeout items, in order. Each is validated on the real SiYuan 3.8.3 host through CDP before the next one starts.
+
+### Window blur release
+
+- Restored the Ripple release that window blur lost. `suspendForWindowBlur()` was added to keep the Cursor presentation, but it also took over the Ripple teardown and called `ripple.clear()`, so every dim owner snapped to neutral in one frame while the renderer was still visible. The release primitive that ordinary lifecycle suspension already used is now shared: window blur retargets owners from their current value while preserving the Cursor policy.
+- A hidden document still tears the owners down synchronously — it cannot show the release, and it must not keep a background animation loop.
+
+### List reparent presentation
+
+- Removed the dark flash on Tab. Runtime CDP proved the plan gave the focused block's own paragraph and its marker `startValue 0.2 → target 1`: `planHandoff` folded the old dim value of an ancestor `<li>` that the same plan releases into targets that only became its descendants after the reparent. That dim never covered them, so the commit frame rendered them at 0.2. The ancestor fold now applies only to a target that inherits the released role; a neutralized target starts at its own previous presentation.
+- Removed the sentence flash on Tab. The Host replaces the paragraph's text nodes while keeping the contenteditable element, so the registered Highlight ranges are re-anchored to an element boundary and paint nothing. `presentSentences()` was passing `contentDirty = false`, so the projection was not invalidated until the semantic commit roughly 60ms later and the dim sentences rendered at full brightness in between. The frame's content evidence now travels with that call.
+- Runtime-observed: the commit's changed-owner count fell from 8 to 6, the focused paragraph carries no owner in any sampled frame, and Highlight coverage keeps `rects > 0` from the first post-mutation frame. A 20-step Tab/Shift+Tab sweep recorded zero frames where the caret block held a dim owner.
+
+### Structural motion
+
+- List indent and outdent now slide instead of jumping. `IntentKind` distinguishes `indent` from `outdent`; Session captures one bounded rect for the focused item before the Host mutation and starts the slide at the first `geometry-ready` frame of the existing Structural Contract — no second transaction, generation or coordinator.
+- `ripple/structuralMove.ts` owns the motion: one Host element, additive-free `translate()` in inline style, `stepCritical()` on the shared Session frame with the block layer's `blockFadeMs` response, the semantic key as the continuity proof, and the Host's own inline transform restored when it settles. Reduced motion and sub-pixel displacements snap.
+- The caret travels with the text. `frame.caret` stays the Host's untransformed truth (the current presentation offset is subtracted right after sampling), so the Structural Contract keeps seeing stable geometry, while the Cursor receives truth plus the offset that is actually on screen.
+- Runtime-observed: the moved item goes `translate(-34px, 0px)` and decays to nothing over roughly 450ms; the Cursor and the DOM caret agree at the start of the slide and the Cursor's own Critical Motion trails by at most ~6.6px before converging. Following siblings still snap — bounded expansion is deliberately not enabled without real-device evidence.
+
 ## v2.9.0-remake.2.6-sentence-continuity.1 (2026-09-11) — Sentence presentation value continuity
 
 - Restored motion across a structural merge. The previous round seeded every fresh non-active sentence directly at `SENTENCE_ALPHA`, which removed the flash but also made `value === target` with zero displacement, so `stepCritical()` had nothing to move.
 - `SENTENCE_ALPHA` is now a semantic target, not a motion floor. The sentence state is only clamped to the physical alpha domain `[0, 1]`, so a sentence may legitimately start below its target and travel to it.
 - `blockPainter.rebind()` now reports the stale role's last sampled presentation value alongside its semantic key, and the sentence layer continues from that value. It is the value the user was actually looking at, so the transition is real presentation continuity rather than a semantic guess; it is never a hardcoded level and never the old target.
 - Only sentences that lie entirely before the merge caret inherit it. The previously focused suffix enters directly at its new role, and a sentence crossing the merge boundary fails toward the focused side because one Highlight Range cannot express two alphas. Reusable sentence state still wins over both.
-- Runtime-observed on SiYuan 3.8.3 through CDP: the first post-mutation frame shows buckets `[26, 38]` — the dim neighbour's 0.4 continued by the prefix, the suffix already at 0.6 — then `26 -> 27 -> 28` across following frames. No full-brightness plateau, no snap, no second jump at the semantic commit.# Changelog
+- Runtime-observed on SiYuan 3.8.3 through CDP: the first post-mutation frame shows buckets `[26, 38]` — the dim neighbour's 0.4 continued by the prefix, the suffix already at 0.6 — then `26 -> 27 -> 28` across following frames. No full-brightness plateau, no snap, no second jump at the semantic commit.
 
 ## v2.9.0-remake.2.6-sentence-first-frame.1 (2026-09-11) — Sentence presentation on the first structural frame
 
@@ -14,7 +36,7 @@
 - `ripple.presentSentences(frame, now, reducedMotion)` runs the existing sentence read/prepare path on that first frame and calls `render()` so the highlight buckets are actually re-registered. It is the same `sample()` with a `sentencesOnly` flag: no block plan, no `collectTargets`, and it never resumes the block owners the structural hold deliberately froze.
 - Session calls it on the `wait` and `geometry` decisions. Block neighborhood ownership still waits for semantic-ready, Cursor still waits for geometry-ready, Typewriter is untouched, and the ordinary path gains no work.
 - The semantic commit reuses the early state: the rebuild guard sees the same editable with no forced content dirty, so the projection, boundaries and color cache are not recomputed.
-- Runtime-observed before/after on the real host: first-frame buckets went from the removed block's `b50,b58` (≈66ms plateau) to `b38` (SENTENCE_ALPHA), with the destination still holding no block owner.# Changelog
+- Runtime-observed before/after on the real host: first-frame buckets went from the removed block's `b50,b58` (≈66ms plateau) to `b38` (SENTENCE_ALPHA), with the destination still holding no block owner.
 
 ## v2.9.0-remake.2.6-sentence-role.1 (2026-09-11) — Sentence role through focused replacement
 

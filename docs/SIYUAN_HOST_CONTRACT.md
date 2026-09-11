@@ -25,6 +25,17 @@
 
 **Runtime-observed (2026-09-11, real DebugKit session).** 在 SiYuan 3.8.3 中，拖选整段内容后执行 range deletion，Selection 会 collapse 到一个空 Text node；该 Range 没有 client rect，而所属 paragraph 仍可能包含零宽或 presentation placeholder text。该观察只约束此真实宿主路径，不推广为所有 ContentEditable 或浏览器实现。
 
+**Runtime-observed (2026-09-12, full CDP, list Tab).** 在真实渲染页对 `- alpha / - beta / - gamma` 列表的第二个 item 按 Tab：Host 的 mutation batch 在 keydown 后约 7ms 到达，形状是 **move 而非 replacement**——新建一个 `NodeList` 挂到前一个 item 的 `<li>` 下，把聚焦 item 的 `<li>` 从外层 `NodeList` 移除并插入这个新 list；`<li>` 与内部 paragraph 的 `data-node-id` 保持不变，另外只做 `class` 归一化与 contenteditable 内空 Text node 的增删。因此 list 缩进没有同 id replacement 语义，连续性只能靠 `visualKey` 匹配与 owner 数值/WAAPI 交接。
+
+**Runtime-observed (2026-09-12, full CDP).** 同一路径上存在两个独立的亮度闪，都由 zenType 自己的 presentation 计划产生，而非 Host 样式：
+
+1. **Block presentation。** commit 计划给「聚焦块自己的 paragraph 与其 marker」算出 `startValue 0.2 → target 1`，原因是 `planHandoff` 把「本次计划即将释放的祖先 `<li>`」的旧 dim 值折进了这两个 target 的起始值。它们在 reparent 后才成为该 `<li>` 的后代，旧 dim 从未覆盖过它们，于是在 commit 帧先渲染为 0.2 再用 150–360ms 回到 1。修复后 commit 的 `changedCount` 由 8 降到 6，聚焦 paragraph 与 marker 不再进入 owner 计划。
+2. **Sentence presentation。** Host 在 reparent 时替换了 paragraph contenteditable 内的 Text node。CSS Highlight Range 按 DOM 规范被重新锚定到元素边界（`startContainer` 变成 Element），`getClientRects()` 为 0，`::highlight` 不再绘制；而首帧 sentence presentation 之前被调用时传的是 `contentDirty = false`，所以直到语义 commit（约 60ms 后）才重新投影。实测该窗口内 dim 语句以全亮度绘制。修复后 Highlight 覆盖从 mutation 后的第一个采样帧起保持 `rects > 0`。
+
+**Runtime-observed (2026-09-12, full CDP, transform ownership).** 同一宿主上，`.protyle-wysiwyg`、`NodeListItem` 与 item 内部 paragraph 的 computed `transform` 均为 `none`、inline `style.transform` 为空、`transition` 为 `all 0s`、`will-change` 为 `auto`。zenType 的 bounded structural slide 可以独占这些元素的 transform 并把原值原样还回；该结论只约束这些列表元素类型，不等于 Host 全局不使用 transform。
+
+**Runtime-observed (2026-09-12, full CDP, caret under transform).** `Range.getBoundingClientRect()` 会包含祖先元素的 transform：对 item 施加 `translate(dx, 0)` 时，caret rect 与 item rect 同步位移。因此如果 Session 在此期间继续采样 host geometry，caret 读数会带上 presentation 位移；zenType 在采样后立刻减去当前 presentation offset，使 Structural Contract 与存储的 frame 始终消费未变换的 Host truth。
+
 ## Editing paths
 
 ### Tab / Shift+Tab
