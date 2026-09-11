@@ -2209,7 +2209,7 @@ test("explicit lifecycle suspension releases owned Ripple opacity instead of cle
   assert.equal(release.playState, "running");
 }, { typewriter: false, ripple: true }));
 
-test("window blur preserves Cursor presentation while hidden document still releases it", () => withSessionHarness(harness => {
+function withDimNeighbour(harness: SessionHarness) {
   const previous = new PaintElement();
   previous.dataset.nodeId = "previous";
   previous.parentElement = harness.editor;
@@ -2217,9 +2217,41 @@ test("window blur preserves Cursor presentation while hidden document still rele
   harness.editable.previousElementSibling = previous;
   harness.editor.children = [previous, harness.editable];
   harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
-
   harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
   harness.tick(0);
+  const dim = previous.animations.at(-1);
+  assert.ok(dim);
+  assert.equal(dim.frames[1].opacity, RIPPLE_LEVELS[1]);
+  // A fully dimmed neighbour is the presentation a window blur actually sees.
+  dim.currentTime = MOTION.blockFadeMs;
+  return previous;
+}
+
+test("window blur releases a dim Ripple from its current value instead of clearing it", () => withSessionHarness(harness => {
+  const previous = withDimNeighbour(harness);
+  const dim = previous.animations.at(-1)!;
+
+  harness.dispatch(16, "blur");
+
+  assert.ok(harness.events.some(event => event.name === "suspend" && event.payload.reason === "window-blur"));
+  assert.equal(harness.events.some(event => event.name === "clear"), false);
+  const release = previous.animations.at(-1)!;
+  assert.notEqual(release, dim);
+  assert.equal(dim.playState, "idle");
+  assert.equal(release.frames[0].opacity, RIPPLE_LEVELS[1]);
+  assert.equal(release.frames[1].opacity, 1);
+  assert.equal(release.playState, "running");
+
+  // The released owner finishes on its own and leaves nothing retained behind.
+  release.finish();
+  assert.equal(release.playState, "idle");
+  harness.tick(1000);
+  assert.equal(harness.rafCount(), 0);
+  assert.equal(harness.timerCount(), 0);
+}, { typewriter: false, ripple: true }));
+
+test("window blur preserves Cursor presentation while a hidden document tears down synchronously", () => withSessionHarness(harness => {
+  const previous = withDimNeighbour(harness);
   const overlay = harness.body.children[0];
   const opacityBefore = Number(overlay.style.opacity);
   const scrollBeforeBlur = harness.scroll.scrollTop;
@@ -2232,11 +2264,10 @@ test("window blur preserves Cursor presentation while hidden document still rele
 
   assert.equal(overlay.hidden, false);
   assert.equal(Number(overlay.style.opacity), opacityBefore);
-  assert.equal(harness.rafCount(), 0);
   assert.equal(harness.timerCount(), 0);
   assert.ok(harness.events.some(event => event.name === "structure-cancel" && event.payload.reason === "lifecycle"));
-  assert.ok(harness.events.some(event => event.name === "clear"));
-  assert.equal(previous.animations.some(animation => animation.playState === "running"), false);
+  assert.equal(harness.events.some(event => event.name === "clear"), false);
+  assert.equal(previous.animations.at(-1)!.playState, "running");
 
   harness.dispatch(100, "focus");
   harness.tick(100);
@@ -2245,9 +2276,20 @@ test("window blur preserves Cursor presentation while hidden document still rele
   assert.equal(harness.events.filter(event => event.name === "prepare").at(-1)?.payload.enabled, false);
   assert.equal(harness.events.filter(event => event.name === "frame-commit").at(-1)?.payload.typewriterMoving, false);
 
+  // A hidden document cannot show the release, so it must not keep one alive.
+  const hidden = Object.getOwnPropertyDescriptor(document, "hidden")!;
   Object.defineProperty(document, "hidden", { configurable: true, value: true });
-  harness.dispatch(120, "visibilitychange");
-  assert.equal(overlay.hidden, true);
+  try {
+    harness.dispatch(120, "visibilitychange");
+    assert.equal(harness.events.some(event => event.name === "clear"), true);
+    assert.equal(overlay.hidden, true);
+    assert.equal(previous.animations.at(-1)!.playState, "idle");
+    // A hidden renderer must not keep a background animation loop alive.
+    harness.tick(121);
+    assert.equal(harness.rafCount(), 0);
+  } finally {
+    Object.defineProperty(document, "hidden", hidden);
+  }
 }, { typewriter: true, ripple: true }));
 
 test("mutation delivery rebinds a semantic replacement before the next rAF", () => withSessionHarness(harness => {

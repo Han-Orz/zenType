@@ -195,6 +195,16 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     typewriter.cancel();
     clearWake();
   }
+  // A suspension that leaves the renderer visible retargets Ripple from its
+  // current presentation to neutral and lets the existing motion finish. Only a
+  // hidden document, which cannot show the release, tears the owners down.
+  function releaseRipple() {
+    if (!frame) return;
+    const release = ripple.sample(frame, false, false, false);
+    release();
+    if (ripple.render(performance.now(), reducedMotion.matches) && !document.hidden) queue();
+  }
+
   function suspend(immediate = false) {
     ZENTYPE_DEBUG: debug?.record("session", "suspend", { reason: "lifecycle" });
     const wasBlocked = blocked;
@@ -208,11 +218,9 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     structuralGeometryGeneration = null;
     stopWriting();
     cursor.hide();
-    if (!immediate && frame) {
-      const releaseRipple = ripple.sample(frame, false, false, false);
-      releaseRipple();
-      if (ripple.render(performance.now(), reducedMotion.matches) && !document.hidden) queue();
-    } else if (immediate || !wasBlocked) ripple.clear();
+    if (immediate || document.hidden) ripple.clear();
+    else if (frame) releaseRipple();
+    else if (!wasBlocked) ripple.clear();
     frame = null;
     observe(null);
   }
@@ -230,7 +238,11 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     stopWriting();
     if (pending !== null) cancelAnimationFrame(pending);
     pending = null;
-    ripple.clear();
+    // Losing OS focus does not make the renderer invisible: the dim Ripple keeps
+    // its Cursor presentation and releases from its current value instead of
+    // snapping every owner to neutral in one frame.
+    if (document.hidden) ripple.clear();
+    else releaseRipple();
     cleanClones();
     frame = null;
     observe(null);
