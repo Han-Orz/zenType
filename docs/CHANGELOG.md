@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.9.0-remake.2.6-ripple.2 (2026-09-11) — Focused owner playback
+
+- Focused geometry handoff now explicitly starts the single destination WAAPI owner while the surrounding Ripple painter remains frozen; no planner, sentence ownership or freeze architecture changes.
+- DebugKit `focused-handoff` now records the owner play state before and after promotion.
+
 ## v2.9.0-remake.2.6-ripple.1 (2026-09-11) — Focused Ripple merge handoff
 
 - Geometry-ready may promote the already-owned focused destination block across a verified cross-key structural handoff, shortening the frozen dim window after a merge; full Ripple neighborhood and sentence ownership still wait for semantic-ready.

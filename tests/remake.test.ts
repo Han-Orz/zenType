@@ -1285,6 +1285,7 @@ test("geometry-ready hands off only the focused Ripple destination owner", () =>
   assert.deepEqual(handoff.payload, {
     fromBlockKey: "source-block", toBlockKey: "destination-block", hadOwner: true,
     previousValue: RIPPLE_LEVELS[1], previousTarget: RIPPLE_LEVELS[1], newTarget: 1,
+    playStateBefore: "paused", playStateAfter: "running",
   });
   const earlyAnimation = destination.animations.at(-1)!;
   assert.equal(earlyAnimation.frames[0].opacity, RIPPLE_LEVELS[1]);
@@ -2233,6 +2234,7 @@ test("focused Ripple handoff promotes one frozen owner and leaves neighbors paus
   const promotion = painter.promoteFocused(focused as unknown as HTMLElement, false);
   assert.deepEqual(promotion, {
     hadOwner: true, previousValue: RIPPLE_LEVELS[1], previousTarget: RIPPLE_LEVELS[1], newTarget: 1,
+    playStateBefore: "paused", playStateAfter: "running",
   });
   const focusedHandoff = focused.animations.at(-1)!;
   assert.notEqual(focusedHandoff, oldFocused);
@@ -2241,8 +2243,24 @@ test("focused Ripple handoff promotes one frozen owner and leaves neighbors paus
   assert.equal(focusedHandoff.playState, "running");
   assert.equal(oldNeighbor.playState, "paused");
 
+  focusedHandoff.currentTime = 48;
+  const progressed = painter.promoteFocused(focused as unknown as HTMLElement, false);
+  assert.ok(progressed.previousValue! > RIPPLE_LEVELS[1] + 0.02);
+  assert.ok(progressed.previousValue! < 1);
+  assert.equal(progressed.playStateBefore, "running");
+  assert.equal(oldNeighbor.playState, "paused");
+
+  focusedHandoff.pause();
+  const resumed = painter.promoteFocused(focused as unknown as HTMLElement, false);
+  assert.equal(resumed.previousTarget, 1);
+  assert.equal(resumed.playStateBefore, "paused");
+  assert.equal(resumed.playStateAfter, "running");
+  assert.equal(focused.animations.at(-1), focusedHandoff);
+  assert.equal(oldNeighbor.playState, "paused");
+
   const absent = painter.promoteFocused(new PaintElement() as unknown as HTMLElement, false);
-  assert.deepEqual(absent, { hadOwner: false, previousValue: null, previousTarget: null, newTarget: 1 });
+  assert.deepEqual(absent, { hadOwner: false, previousValue: null, previousTarget: null, newTarget: 1,
+    playStateBefore: null, playStateAfter: null });
   painter.clear();
 }));
 
@@ -2279,6 +2297,7 @@ test("focused Ripple handoff requires a cross-key geometry authority", () => wit
   assert.deepEqual(event.payload, {
     fromBlockKey: "source", toBlockKey: "destination", hadOwner: true,
     previousValue: RIPPLE_LEVELS[1], previousTarget: RIPPLE_LEVELS[1], newTarget: 1,
+    playStateBefore: "paused", playStateAfter: "running",
   });
   ripple.destroy();
 
@@ -2316,7 +2335,10 @@ test("focused Ripple handoff continues into semantic commit without a stale rest
   painter.freeze();
   painter.promoteFocused(destination as unknown as HTMLElement, false);
   const handoff = destination.animations.at(-1)!;
-  handoff.currentTime = MOTION.blockFadeMs / 2;
+  handoff.currentTime = 48;
+  const progressed = painter.promoteFocused(destination as unknown as HTMLElement, false);
+  assert.ok(progressed.previousValue! > RIPPLE_LEVELS[1] + 0.02);
+  assert.ok(progressed.previousValue! < 1);
 
   painter.prepare(new Map([[destination as unknown as HTMLElement, 1]]), editor as unknown as HTMLElement, false)();
   assert.equal(destination.animations.at(-1), handoff);

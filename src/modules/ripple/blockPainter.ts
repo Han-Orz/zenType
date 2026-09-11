@@ -96,16 +96,25 @@ export function createBlockPainter(debug?: DebugRecorder) {
     /** Promote only an existing focused owner while the surrounding plan stays frozen. */
     promoteFocused(element: HTMLElement, reducedMotion: boolean) {
       const paint = paints.get(element);
-      if (!paint) return { hadOwner: false, previousValue: null, previousTarget: null, newTarget: 1 };
+      if (!paint) return {
+        hadOwner: false, previousValue: null, previousTarget: null, newTarget: 1,
+        playStateBefore: null, playStateAfter: null,
+      };
       const previousValue = sample(paint);
       const previousTarget = paint.target;
+      const playStateBefore = paint.animation.playState;
       if (previousTarget === 1) {
         if (reducedMotion) paint.animation.finish();
-        else if (paint.animation.playState === "paused") paint.animation.play();
+        else if (paint.animation.playState !== "running") paint.animation.play();
       } else {
         write(element, { value: previousValue, target: 1 }, paint.base, reducedMotion);
+        const promoted = paints.get(element);
+        if (!reducedMotion && promoted && promoted.animation.playState !== "running") promoted.animation.play();
       }
-      return { hadOwner: true, previousValue, previousTarget, newTarget: 1 };
+      return {
+        hadOwner: true, previousValue, previousTarget, newTarget: 1,
+        playStateBefore, playStateAfter: paints.get(element)?.animation.playState ?? null,
+      };
     },
     /** Rebind only existing semantic owners; never plan against intermediate DOM. */
     rebind(added: readonly HTMLElement[], seed?: CarrySeed) {
