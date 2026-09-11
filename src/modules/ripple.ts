@@ -34,10 +34,10 @@ export function createRipple(debug?: DebugRecorder) {
   let lastTime: number | null = null;
   let registered: Range[][] = Array.from({ length: names.length }, () => []);
   let scratch: Range[][] = Array.from({ length: names.length }, () => []);
-  // One-shot: the focused replacement whose stale dim role blockPainter just
-  // invalidated. The next sentence rebuild for that semantic block seeds fresh
-  // non-active sentences at their new role instead of overshooting.
-  let pendingSentenceRoleKey: string | null = null;
+  // One-shot: the presentation value of the focused replacement whose stale dim
+  // block role blockPainter just invalidated, together with its semantic key.
+  // The next sentence rebuild for that block continues from it.
+  let pendingSentencePresentation: { key: string; value: number } | null = null;
 
   function sentenceFloor() {
     return sentences.reduce((value, paint) => Math.min(value, paint.value), 1);
@@ -103,7 +103,7 @@ export function createRipple(debug?: DebugRecorder) {
     // resolved before any presentation write, so this frame never forces a style
     // recalc of the invalidation it is about to make.
     let sentenceReady = false;
-    let roleSeeded = false;
+    let inherited: { value: number } | null = null;
     if (!supported) {
       // Block focus only.
     } else if (editable !== frame.editable || contentDirty) {
@@ -111,8 +111,9 @@ export function createRipple(debug?: DebugRecorder) {
         editable.closest<HTMLElement>("[data-node-id]")?.dataset.nodeId === frame.block.dataset.nodeId;
       // Consumed by whichever rebuild runs next; a rebuild of another block or an
       // ordinary content change simply discards it.
-      roleSeeded = pendingSentenceRoleKey === semanticBlockKey(frame.block);
-      pendingSentenceRoleKey = null;
+      const pending = pendingSentencePresentation;
+      inherited = pending && pending.key === semanticBlockKey(frame.block) ? pending : null;
+      pendingSentencePresentation = null;
       const clones: HTMLElement[] = [];
       const projection = projectText(frame.editable, colors, clones);
       writes.push(() => { for (const element of clones) element.style.removeProperty("--zentype-text-color"); });
@@ -188,14 +189,27 @@ export function createRipple(debug?: DebugRecorder) {
     }
     if (offset < 0) { writes.push(clearSentences); return commit; }
     const active = resolveActiveSentenceRanges(sentences, offset, text.length);
+    let seeded = 0;
+    let seedMin = 1;
+    let seedMax = 0;
     for (const paint of sentences) {
       const isActive = active.includes(paint);
       paint.target = isActive ? 1 : SENTENCE_ALPHA;
-      // A focused structural replacement continues text that was already on
-      // screen as a dim neighbour. A fresh non-active sentence starts at the role
-      // it is about to hold instead of overshooting through full brightness.
-      if (roleSeeded && paint.fresh && !isActive) {
-        paint.value = SENTENCE_ALPHA;
+      if (!inherited || !paint.fresh) continue;
+      if (paint.end <= offset) {
+        // A boundary entirely inside the previous block's content continues that
+        // block's presentation: start at the value it was actually showing and
+        // let Critical Motion move it to the new sentence role.
+        paint.value = inherited.value;
+        paint.velocity = 0;
+        seeded++;
+        seedMin = Math.min(seedMin, paint.value);
+        seedMax = Math.max(seedMax, paint.value);
+      } else {
+        // Suffix and boundary-crossing sentences come from the previously
+        // focused block, or cannot express two alphas in one Highlight Range, so
+        // they enter directly at the new semantic role.
+        paint.value = paint.target;
         paint.velocity = 0;
       }
     }
@@ -203,6 +217,7 @@ export function createRipple(debug?: DebugRecorder) {
       blockKey: semanticBlockKey(frame.block), phase: "first-frame",
       sentenceCount: sentences.length, activeCount: active.length,
       movingCount: sentences.filter(paint => paint.value !== paint.target).length,
+      seededCount: seeded, seedValueMin: seeded ? seedMin : null, seedValueMax: seeded ? seedMax : null,
     });
     return commit;
   }
@@ -221,8 +236,11 @@ export function createRipple(debug?: DebugRecorder) {
       const settled = stepCritical(paint, paint.target, elapsed,
         reducedMotion ? 0 : (paint.target === 1 ? MOTION.focusEnterResponseMs : MOTION.focusLeaveResponseMs),
         MOTION.sentenceSettleEpsilon);
-      if (paint.value < SENTENCE_ALPHA || paint.value > 1) {
-        paint.value = clamp(paint.value, SENTENCE_ALPHA, 1);
+      // SENTENCE_ALPHA is a semantic target, not a motion floor: a sentence may
+      // legitimately start below it when it continues a previous presentation.
+      // Only the physical alpha domain is enforced.
+      if (paint.value < 0 || paint.value > 1) {
+        paint.value = clamp(paint.value, 0, 1);
         paint.velocity = 0;
       }
       if (!settled) moving = true;
@@ -258,7 +276,7 @@ export function createRipple(debug?: DebugRecorder) {
     ZENTYPE_DEBUG: debug?.record("ripple", "clear", { blockCount: painter.size(), sentenceCount: sentences.length });
     painter.clear();
     clearSentences();
-    pendingSentenceRoleKey = null;
+    pendingSentencePresentation = null;
     block = null;
     lastTime = null;
   }
@@ -278,7 +296,7 @@ export function createRipple(debug?: DebugRecorder) {
       // dropped, so only a replacement that previously presented as a dim
       // neighbour seeds the sentence layer.
       return painter.rebind(added, key ? { key, value: floor } : undefined, focusedKey,
-        focusedKey ? invalidated => { pendingSentenceRoleKey = invalidated; } : undefined);
+        focusedKey ? invalidated => { pendingSentencePresentation = { key: invalidated.key, value: clamp(invalidated.value, 0, 1) }; } : undefined);
     },
     destroy() { clear(); style.remove(); } };
 }

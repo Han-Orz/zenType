@@ -95,7 +95,7 @@ export function createBlockPainter(debug?: DebugRecorder) {
     },
     /** Rebind only existing semantic owners; never plan against intermediate DOM. */
     rebind(added: readonly HTMLElement[], seed?: CarrySeed, focusedKey?: string | null,
-      onRoleInvalidated?: (key: string) => void) {
+      onRoleInvalidated?: (presentation: { key: string; value: number }) => void) {
       const previous = new Map<string, Pick<Paint, "value" | "target">>();
       for (const paint of paints.values()) if (paint.key) { sample(paint); previous.set(paint.key, paint); }
       if (seed && !previous.has(seed.key)) previous.set(seed.key, { value: seed.value, target: seed.value });
@@ -108,7 +108,10 @@ export function createBlockPainter(debug?: DebugRecorder) {
         if (key && key === focusedKey) {
           // Only a replacement that previously presented a committed role has a
           // stale role to invalidate; a focused predecessor carried no owner.
-          if (previous.has(key)) onRoleInvalidated?.(key);
+          // Its last sampled value is the presentation the user was actually
+          // looking at, so it travels with the invalidation.
+          const carried = previous.get(key);
+          if (carried) onRoleInvalidated?.({ key, value: carried.value });
           return [];
         }
         const old = key && previous.get(key);

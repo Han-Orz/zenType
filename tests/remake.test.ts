@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { stepCritical, type CriticalState } from "../src/motion";
-import { MOTION, RIPPLE_LEVELS } from "../src/config";
+import { MOTION, RIPPLE_LEVELS, SENTENCE_ALPHA } from "../src/config";
 import { createRipple } from "../src/modules/ripple";
 import { createBlockPainter } from "../src/modules/ripple/blockPainter";
 import { createWritingSession } from "../src/session";
@@ -1261,6 +1261,7 @@ interface SentenceCtx {
   textB: { value: string };
   textNodeA: Text;
   textNodeB: Text;
+  highlights: Map<string, unknown>;
 }
 
 function withSentencePresentation(run: (ctx: SentenceCtx) => void) {
@@ -1307,7 +1308,7 @@ function withSentencePresentation(run: (ctx: SentenceCtx) => void) {
   for (const [key, value] of Object.entries(values)) Object.defineProperty(globalThis, key, { configurable: true, value });
   try {
     run({ editor, blockA: a.block, blockB: b.block, editableA: a.editable, editableB: b.editable,
-      textA: a.text, textB: b.text, textNodeA: a.textNode, textNodeB: b.textNode });
+      textA: a.text, textB: b.text, textNodeA: a.textNode, textNodeB: b.textNode, highlights });
   } finally {
     for (const [key, descriptor] of Object.entries(saved)) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);
@@ -1328,8 +1329,8 @@ test("the painter reports a role invalidation only when the replacement carried 
   old.dataset.nodeId = "A";
   old.parentElement = editor;
   const painter = createBlockPainter();
-  const reported: string[] = [];
-  const report = (key: string) => reported.push(key);
+  const reported: Array<{ key: string; value: number }> = [];
+  const report = (presentation: { key: string; value: number }) => { reported.push(presentation); };
 
   const fresh = new PaintElement();
   fresh.dataset.nodeId = "A";
@@ -1344,7 +1345,9 @@ test("the painter reports a role invalidation only when the replacement carried 
   replaced.dataset.nodeId = "A";
   replaced.parentElement = editor;
   painter.rebind([replaced as unknown as HTMLElement], undefined, "A", report);
-  assert.deepEqual(reported, ["A"]);
+  // The last sampled value travels with the invalidation so the sentence layer
+  // can continue the presentation the user was actually looking at.
+  assert.deepEqual(reported, [{ key: "A", value: RIPPLE_LEVELS[1] }]);
   painter.clear();
 }));
 
@@ -1380,9 +1383,42 @@ test("a focused structural replacement starts fresh non-active sentences at thei
 
   const caret = ctx.textA.value.indexOf("Alpha three") + 2;
   ripple.prepare(sentenceFrame(ctx, replacement, ctx.editableA, ctx.textNodeA, caret), true, true, true);
-  // The active sentence stays at 1 and every fresh non-active sentence starts at
-  // SENTENCE_ALPHA, so nothing is still travelling on the first rendered frame.
-  assert.equal(ripple.render(1000, false), false);
+  // Sentences before the caret that continue the previous dim presentation start
+  // at the inherited value and travel to their new role, so the first rendered
+  // frame still has sentence motion.
+  assert.equal(ripple.render(1000, false), true);
+  ripple.destroy();
+}));
+
+test("only the previous block's prefix continues its presentation; the focused suffix does not", () => withSentencePresentation(ctx => {
+  ctx.textB.value = "Bravo one. Bravo two.";
+  ctx.textA.value = "Alpha one. Alpha two. Bravo one. Bravo two.";
+  const ripple = createRipple();
+  ripple.prepare(sentenceFrame(ctx, ctx.blockB, ctx.editableB, ctx.textNodeB, 0), false, true, true);
+  // Settle the dim neighbour so its sampled presentation value is 0.4.
+  ctx.blockA.animations.at(-1)!.currentTime = MOTION.blockFadeMs;
+
+  const replacement = new PaintElement();
+  replacement.dataset.nodeId = "A";
+  replacement.parentElement = ctx.editor;
+  ctx.blockA.isConnected = false;
+  ctx.blockB.isConnected = false;
+  ctx.editor.children = [replacement];
+  ripple.rebind([replacement as unknown as HTMLElement], "A");
+
+  // Caret sits at the old A/B merge boundary; the trailing sentences came from
+  // the previously focused block and must not inherit the dim neighbour value.
+  const caret = ctx.textA.value.indexOf("Bravo one");
+  ripple.presentSentences(sentenceFrame(ctx, replacement, ctx.editableA, ctx.textNodeA, caret), 1000, false);
+
+  const buckets = [...ctx.highlights.keys()].map(key => Number(String(key).replace("zentype-remake-sentence-", "")));
+  // Prefix sentences are seeded from the inherited 0.4 and travel to their role,
+  // so the first committed frame must contain a bucket well below the
+  // SENTENCE_ALPHA bucket. Nothing may sit below that inherited value.
+  assert.ok(buckets.length > 0);
+  const lowest = Math.min(...buckets);
+  assert.ok(lowest < Math.round(SENTENCE_ALPHA * 64), JSON.stringify({ buckets, caret }));
+  assert.ok(lowest >= Math.round(0.4 * 64) - 1, JSON.stringify({ buckets, caret }));
   ripple.destroy();
 }));
 

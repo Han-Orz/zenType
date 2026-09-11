@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.9.0-remake.2.6-sentence-continuity.1 (2026-09-11) — Sentence presentation value continuity
+
+- Restored motion across a structural merge. The previous round seeded every fresh non-active sentence directly at `SENTENCE_ALPHA`, which removed the flash but also made `value === target` with zero displacement, so `stepCritical()` had nothing to move.
+- `SENTENCE_ALPHA` is now a semantic target, not a motion floor. The sentence state is only clamped to the physical alpha domain `[0, 1]`, so a sentence may legitimately start below its target and travel to it.
+- `blockPainter.rebind()` now reports the stale role's last sampled presentation value alongside its semantic key, and the sentence layer continues from that value. It is the value the user was actually looking at, so the transition is real presentation continuity rather than a semantic guess; it is never a hardcoded level and never the old target.
+- Only sentences that lie entirely before the merge caret inherit it. The previously focused suffix enters directly at its new role, and a sentence crossing the merge boundary fails toward the focused side because one Highlight Range cannot express two alphas. Reusable sentence state still wins over both.
+- Runtime-observed on SiYuan 3.8.3 through CDP: the first post-mutation frame shows buckets `[26, 38]` — the dim neighbour's 0.4 continued by the prefix, the suffix already at 0.6 — then `26 -> 27 -> 28` across following frames. No full-brightness plateau, no snap, no second jump at the semantic commit.# Changelog
+
 ## v2.9.0-remake.2.6-sentence-first-frame.1 (2026-09-11) — Sentence presentation on the first structural frame
 
 - Fixed the residual full-brightness plateau on the merged destination. Runtime CDP on SiYuan 3.8.3 proved the first authoritative post-mutation frame arrives ~2ms after the mutation (and ~50ms before the semantic commit) with the final destination already resolved, but the stale sentence buckets of the removed block were still registered: they point at detached text, so the new destination rendered with no highlight at full brightness under an already-focused block.
@@ -516,4 +524,5 @@ Branch: `fix/v2.2.0-cursor-optimization`（8 commits ahead of v2.2.0，尚未发
 ### Fixed
 - 全屏模式高亮条层级问题
 - 退格/回车时空行聚焦问题
+
 
