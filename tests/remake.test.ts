@@ -1982,6 +1982,87 @@ test("Shift+Tab outdent keeps the focused block unowned and releases its former 
   assert.equal(harness.events.some(event => event.name === "structure-timeout"), false);
 }, { typewriter: false, ripple: true }));
 
+test("Enter captures the following content so it can yield to the new block", () => withSessionHarness(harness => {
+  const focused = harness.editable;
+  focused.dataset.nodeId = "focused";
+  const following = new PaintElement();
+  following.dataset.nodeId = "following";
+  following.parentElement = harness.editor;
+  focused.parentElement = harness.editor;
+  focused.nextElementSibling = following;
+  following.previousElementSibling = focused;
+  harness.editor.children = [focused, following];
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
+  harness.setReducedMotion(false);
+  harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
+  harness.tick(0);
+
+  // The caret block is the anchor; the block after it is the content that must yield.
+  paintRect(focused, 0, 100);
+  paintRect(following, 0, 130);
+  harness.dispatch(20, "keydown", { key: "Enter", defaultPrevented: false });
+
+  // Host commit: Enter opened a new line, so the following block moved down.
+  const opened = new PaintElement();
+  opened.dataset.nodeId = "opened";
+  opened.parentElement = harness.editor;
+  paintRect(focused, 0, 100);
+  paintRect(following, 0, 160);
+  harness.editor.children = [focused, opened, following];
+  focused.nextElementSibling = opened; opened.previousElementSibling = focused;
+  opened.nextElementSibling = following; following.previousElementSibling = opened;
+  harness.mutate(24, [{ type: "childList", target: harness.editor,
+    addedNodes: [opened], removedNodes: [] } as unknown as MutationRecord]);
+
+  // The following block presents its old position from within the mutation delivery,
+  // before any frame could paint the Host's new layout.
+  assert.ok(harness.events.some(event => event.name === "structural-presentation-begin" && event.payload.attached === 1));
+  assert.equal(following.style.transform, "translate(0px, -30px)");
+
+  // The displacement converges back to zero on the shared Session frame.
+  for (let now = 40; now <= 900; now += 16) harness.tick(now);
+  assert.equal(following.style.transform, "");
+  // The caret block never moved, so the cursor was never transported by this edit.
+  assert.equal(focused.style.transform, "");
+}, { typewriter: false, ripple: true }));
+
+test("Backspace reclaims following content while the anchor keeps its own place", () => withSessionHarness(harness => {
+  const focused = harness.editable;
+  focused.dataset.nodeId = "focused";
+  const removed = new PaintElement();
+  const following = new PaintElement();
+  removed.dataset.nodeId = "removed"; following.dataset.nodeId = "following";
+  focused.parentElement = removed.parentElement = following.parentElement = harness.editor;
+  focused.nextElementSibling = removed; removed.previousElementSibling = focused;
+  removed.nextElementSibling = following; following.previousElementSibling = removed;
+  harness.editor.children = [focused, removed, following];
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
+  harness.setReducedMotion(false);
+  harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
+  harness.tick(0);
+
+  paintRect(focused, 0, 100);
+  paintRect(removed, 0, 130);
+  paintRect(following, 0, 160);
+  harness.dispatch(20, "keydown", { key: "Backspace", defaultPrevented: false });
+
+  // The merge deletes the middle block; the survivor moves up to close the gap.
+  removed.isConnected = false;
+  harness.editor.children = [focused, following];
+  focused.nextElementSibling = following;
+  following.previousElementSibling = focused;
+  paintRect(following, 0, 130);
+  harness.mutate(24, [{ type: "childList", target: harness.editor,
+    addedNodes: [], removedNodes: [removed] } as unknown as MutationRecord]);
+
+  // The survivor keeps presenting its old spot and travels to the new one; the
+  // anchor is where the caret is, so it is not displaced.
+  assert.equal(following.style.transform, "translate(0px, 30px)");
+  assert.equal(focused.style.transform, "");
+  for (let now = 40; now <= 900; now += 16) harness.tick(now);
+  assert.equal(following.style.transform, "");
+}, { typewriter: false, ripple: true }));
+
 test("IME composition leaves existing block owners untouched", () => withSessionHarness(harness => {
   const focused = harness.editable;
   focused.dataset.nodeId = "B";
