@@ -3120,6 +3120,40 @@ test("a Session frame only steps existing owners and never re-reads host topolog
   }
 }));
 
+test("a rapid block role retarget continues critical motion without a restart", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const block = new PaintElement();
+  block.dataset.nodeId = "block";
+  block.parentElement = editor;
+  const painter = createBlockPainter();
+  const el = block as unknown as HTMLElement;
+
+  painter.prepare(new Map([[el, RIPPLE_LEVELS[1]]]), editor as unknown as HTMLElement, false)();
+  let now = 0;
+  painter.step(now, false);
+  now += MOTION.blockAlphaResponseMs;
+  painter.step(now, false);
+  const before = carrierAlpha(block)!;
+  assert.ok(before > RIPPLE_LEVELS[1] && before < 1);
+
+  // A second structural edit retargets to a different dim role mid-flight. The same
+  // owner must continue from its current value and velocity, not restart from full.
+  painter.prepare(new Map([[el, RIPPLE_LEVELS[2]]]), editor as unknown as HTMLElement, false)();
+  assert.ok(Math.abs(carrierAlpha(block)! - before) < 1e-9, "retarget jumped the current value");
+  const ownerAfter = block.animations.at(-1)!;
+  now += MOTION.blockAlphaResponseMs / 4;
+  painter.step(now, false);
+  const stepped = carrierAlpha(block)!;
+  assert.ok(stepped < before, `expected motion to continue downward, got ${before} -> ${stepped}`);
+  // It steps toward the new role from the old value: not a restart to full, and
+  // not a teleport straight to the new target in one frame.
+  assert.ok(stepped > RIPPLE_LEVELS[2], `expected an intermediate value, got ${stepped}`);
+  settleBlocks(t => { now = t; return painter.step(t, false); }, now);
+  assertAlpha(carrierAlpha(block), RIPPLE_LEVELS[2]);
+  assert.equal(block.animations.at(-1), ownerAfter, "retarget must reuse one carrier, not build a second");
+  painter.clear();
+}));
+
 test("a dim ancestor's alpha is donated to the children it covered, with no dim-to-bright bounce", () => withPresentation(() => {
   const editor = new PaintElement();
   const focused = new PaintElement();
