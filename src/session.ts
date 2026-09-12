@@ -89,11 +89,14 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
   }
 
   /**
-   * Structural displacement is list presentation, not generic Tab animation.
-   * If the live caret block is not inside a NodeListItem, fail closed.
+   * The anchor of a structural displacement: the semantic element whose own
+   * position is the reference for everything that follows it. A list edit moves the
+   * whole NodeListItem; any other edit moves the focused block. The presentation
+   * captures this anchor and its following siblings, which is the bounded local
+   * window the Host can actually displace.
    */
   function structuralMoveRoot(block: HTMLElement | null): HTMLElement | null {
-    return block?.closest<HTMLElement>('[data-type="NodeListItem"]') ?? null;
+    return block?.closest<HTMLElement>('[data-type="NodeListItem"]') ?? block;
   }
 
   /**
@@ -307,9 +310,11 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
       }
       let sampled = false;
       let authoritativeTarget = false;
-      // The one structural displacement is advanced once per Session frame,
-      // before any path below consumes the caret it carries.
-      const offset = presentation.step(now, reducedMotion.matches);
+      // Structural layout continuity advances once per Session frame, before any
+      // path below consumes the caret it carries. The offset applies only to the
+      // caret's own subject: a displaced sibling must not move the cursor.
+      const layoutMoving = presentation.step(now, reducedMotion.matches);
+      const offset = presentation.offsetFor(frame?.block ?? null);
       // A typewriter frame only moves the container: the frame already transports
       // the caret and the cursor by that displacement, so re-reading host geometry
       // every frame of a comfort scroll is redundant work.
@@ -363,7 +368,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           if (intent === "structural" && cursor.isTargetSettled() && !settling) cursorTargetIntent = "navigation";
           geometryDirty = true;
           cleanClones();
-          if (cursorMoving || settling || structure.needsFrameSampling() || offset) queue();
+          if (cursorMoving || settling || structure.needsFrameSampling() || layoutMoving) queue();
           return;
         }
         if (decision === "wait") {
@@ -526,7 +531,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         typewriterMoving: typewriter.isMoving(),
         settling,
       });
-      if (cursorMoving || typewriter.isMoving() || rippleMoving || settling || offset) queue();
+      if (cursorMoving || typewriter.isMoving() || rippleMoving || settling || layoutMoving) queue();
       else if ((wake === null || !frame.caret) && !composing) {
         // Recovery, typing pauses and cursor breathing share the idle wake.
         const cursorDelay = reducedMotion.matches ? Infinity : cursor.wakeDelay(now) ?? Infinity;
@@ -617,12 +622,10 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
             : key.key === "Tab" ? key.shiftKey ? "outdent" : "indent" : "other";
           const editor = editable.closest<HTMLElement>(".protyle-wysiwyg")!;
           const generation = structure.intent(editor, now, intent, blockKeyForStructuralIntent(editable, editor), "keydown");
-          // A list indent reparents Host DOM, so the position the user is looking
-          // at has to be read before the mutation. This is the only geometry read
-          // the structural presentation adds, and it is bounded to one list item.
-          if (intent === "indent" || intent === "outdent") {
-            presentation.capture(generation, structuralMoveRoot(captureCollapsedSelection()?.block ?? null), now);
-          }
+          // A structural edit moves the anchor and everything after it. The position
+          // the user is looking at has to be read before the mutation, bounded to the
+          // local surviving window. A non-structural outcome abandons the capture.
+          presentation.capture(generation, structuralMoveRoot(captureCollapsedSelection()?.block ?? null), now);
         }
         break;
       }

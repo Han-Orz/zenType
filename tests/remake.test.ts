@@ -66,9 +66,10 @@ test("a structural displacement holds the visual position and hands the host bac
   assert.deepEqual(presentation.attach(1, 4, false), { x: -30, y: 0 });
   assert.equal(element.style.transform, "translate(-30px, 0px)");
 
-  let offset: { x: number; y: number } | null = { x: -30, y: 0 };
-  for (let now = 20; now <= 2000 && offset; now += 16) offset = presentation.step(now, false);
-  assert.equal(offset, null);
+  let moving = true;
+  for (let now = 20; now <= 2000 && moving; now += 16) moving = presentation.step(now, false);
+  assert.equal(moving, false);
+  assert.equal(presentation.offsetFor(element as unknown as HTMLElement), null);
   assert.equal(element.style.transform, "");
 }));
 
@@ -116,7 +117,8 @@ test("a superseding capture continues from the current visual position with one 
 
   // Part way through, the Host layout is where it is and the element draws the
   // offset on top of it.
-  const running = presentation.step(36, false)!;
+  presentation.step(36, false);
+  const running = presentation.offsetFor(element as unknown as HTMLElement)!;
   paintRect(element, 130 + running.x, 50);
   presentation.capture(2, element as unknown as HTMLElement, 40);
 
@@ -161,8 +163,10 @@ test("Host transform ownership fails closed and mid-motion takeover wins", () =>
   presentation.capture(2, element as unknown as HTMLElement, 10);
   paintRect(element, 130, 50);
   assert.deepEqual(presentation.attach(2, 14, false), { x: -30, y: 0 });
+  // A Host that seizes the transform mid-motion wins and the runner is dropped.
   element.style.transform = "scale(1.01)";
-  assert.equal(presentation.step(30, false), null);
+  presentation.step(30, false);
+  assert.equal(presentation.offsetFor(element as unknown as HTMLElement), null);
   assert.equal(element.style.transform, "scale(1.01)");
   presentation.cancel();
   assert.equal(element.style.transform, "scale(1.01)");
@@ -189,7 +193,11 @@ test("CSSOM-normalized fractional transforms remain owned", () => withPresentati
   const moving = presentation.step(52, false);
   assert.ok(moving);
   assert.notEqual(normalized, "");
-  assert.notEqual(presentation.step(68, false), null);
+  assert.equal(presentation.step(68, false), true);
+  // The per-frame advance is capped, so convergence is reached by stepping.
+  let now = 68;
+  while (presentation.step(now += 16, false)) { /* converge */ }
+  assert.equal(presentation.offsetFor(element as unknown as HTMLElement), null);
 
   presentation.cancel();
   assert.equal(normalized, "");
@@ -204,6 +212,120 @@ test("matching keydown and beforeinput share one structural generation", () => w
   assert.equal(indent, 1);
   assert.equal(matched, indent);
   assert.equal(outdent, 2);
+}));
+
+test("a local window captures the anchor and its following siblings only", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const anchor = new PaintElement();
+  const above = new PaintElement();
+  const next = new PaintElement();
+  const after = new PaintElement();
+  anchor.dataset.nodeId = "anchor"; above.dataset.nodeId = "above";
+  next.dataset.nodeId = "next"; after.dataset.nodeId = "after";
+  above.nextElementSibling = anchor; anchor.previousElementSibling = above;
+  anchor.nextElementSibling = next; next.previousElementSibling = anchor;
+  next.nextElementSibling = after; after.previousElementSibling = next;
+  for (const el of [above, anchor, next, after]) el.parentElement = editor;
+  editor.children = [above, anchor, next, after];
+  paintRect(above, 0, 0); paintRect(anchor, 0, 100); paintRect(next, 0, 130); paintRect(after, 0, 160);
+
+  const presentation = createStructurePresentation();
+  presentation.capture(1, anchor as unknown as HTMLElement, 0);
+  // The anchor's own block and everything after it are displaced; content above is not.
+  paintRect(anchor, 0, 100); paintRect(next, 0, 150); paintRect(after, 0, 180);
+  const anchorOffset = presentation.attach(1, 4, false);
+  // Enter splits the anchor: its own position is unchanged, so it presents nothing.
+  assert.equal(anchorOffset, null);
+  assert.deepEqual(presentation.offsetFor(next as unknown as HTMLElement), { x: 0, y: -20 });
+  assert.deepEqual(presentation.offsetFor(after as unknown as HTMLElement), { x: 0, y: -20 });
+  assert.equal(presentation.offsetFor(above as unknown as HTMLElement), null, "content above is outside the window");
+  presentation.step(4, false);
+  presentation.step(4 + MOTION.structuralMoveResponseMs / 4, false);
+  const moved = presentation.offsetFor(next as unknown as HTMLElement)!;
+  assert.ok(moved.y > -20 && moved.y < 0, "the displacement converges toward zero");
+  presentation.cancel();
+}));
+
+test("a delete/merge reclaims following content while the anchor keeps its own place", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const anchor = new PaintElement();
+  const closing = new PaintElement();
+  const after = new PaintElement();
+  anchor.dataset.nodeId = "anchor"; closing.dataset.nodeId = "closing"; after.dataset.nodeId = "after";
+  anchor.nextElementSibling = closing; closing.previousElementSibling = anchor;
+  closing.nextElementSibling = after; after.previousElementSibling = closing;
+  for (const el of [anchor, closing, after]) el.parentElement = editor;
+  editor.children = [anchor, closing, after];
+  paintRect(anchor, 0, 100); paintRect(closing, 0, 130); paintRect(after, 0, 160);
+
+  const presentation = createStructurePresentation();
+  presentation.capture(1, anchor as unknown as HTMLElement, 0);
+  // Backspace at the anchor start merges the next block away: following content
+  // moves up. The anchor itself stays where the caret is.
+  closing.isConnected = false;
+  paintRect(after, 0, 130);
+  assert.equal(presentation.attach(1, 4, false), null);
+  const reclaim = presentation.offsetFor(after as unknown as HTMLElement)!;
+  assert.deepEqual(reclaim, { x: 0, y: 30 }, "the survivor starts at its old position");
+  presentation.cancel();
+}));
+
+test("each displaced sibling converges independently and a same-key rebind continues it", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const anchor = new PaintElement();
+  const first = new PaintElement();
+  const second = new PaintElement();
+  anchor.dataset.nodeId = "anchor"; first.dataset.nodeId = "first"; second.dataset.nodeId = "second";
+  anchor.nextElementSibling = first; first.previousElementSibling = anchor;
+  first.nextElementSibling = second; second.previousElementSibling = first;
+  for (const el of [anchor, first, second]) el.parentElement = editor;
+  editor.children = [anchor, first, second];
+  paintRect(anchor, 0, 100); paintRect(first, 0, 130); paintRect(second, 0, 160);
+
+  const presentation = createStructurePresentation();
+  presentation.capture(1, anchor as unknown as HTMLElement, 0);
+  paintRect(first, 0, 110); paintRect(second, 0, 140);
+  presentation.attach(1, 4, false);
+  assert.deepEqual(presentation.offsetFor(first as unknown as HTMLElement), { x: 0, y: 20 });
+  assert.deepEqual(presentation.offsetFor(second as unknown as HTMLElement), { x: 0, y: 20 });
+
+  // The Host re-renders `first` as a fresh element with the same key: the running
+  // displacement must continue on the new actuator instead of restarting.
+  const replacement = new PaintElement();
+  replacement.dataset.nodeId = "first";
+  replacement.parentElement = editor;
+  replacement.previousElementSibling = anchor;
+  replacement.nextElementSibling = second;
+  Object.assign(replacement, { closest: (selector: string) => selector === "[data-node-id]" ? replacement : null });
+  paintRect(replacement, 0, 110);
+  first.isConnected = false;
+  editor.children = [anchor, replacement, second];
+
+  presentation.capture(2, replacement as unknown as HTMLElement, 20);
+  // No new displacement is needed: the replacement is already at its committed spot.
+  presentation.attach(2, 24, false);
+  assert.equal(presentation.offsetFor(replacement as unknown as HTMLElement), null);
+  presentation.cancel();
+}));
+
+test("a non-anchor sibling with its own host transform never joins the window", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const anchor = new PaintElement();
+  const owned = new PaintElement();
+  anchor.dataset.nodeId = "anchor"; owned.dataset.nodeId = "owned";
+  anchor.nextElementSibling = owned; owned.previousElementSibling = anchor;
+  for (const el of [anchor, owned]) el.parentElement = editor;
+  editor.children = [anchor, owned];
+  paintRect(anchor, 0, 100); paintRect(owned, 0, 130);
+  owned.style.computedTransform = "matrix(1, 0, 0, 1, 0, -4)";
+
+  const presentation = createStructurePresentation();
+  presentation.capture(1, anchor as unknown as HTMLElement, 0);
+  paintRect(owned, 0, 160);
+  presentation.attach(1, 4, false);
+  assert.equal(presentation.offsetFor(owned as unknown as HTMLElement), null);
+  assert.equal(owned.style.transform, "");
+  presentation.cancel();
 }));
 
 test("a carried caret is placed instead of approached", () => withPresentation(body => {
