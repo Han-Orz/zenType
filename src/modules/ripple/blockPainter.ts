@@ -41,9 +41,6 @@ interface CarrySeed { key: string; value: number }
  */
 export function createBlockPainter(debug?: DebugRecorder) {
   const owners = new Map<OwnerId, Owner>();
-  // One-shot donation values from owners released for focused-subtree safety,
-  // consumed by the next commit. Bounded by the owner count.
-  const pendingSeeds = new Map<OwnerId, number>();
   let frozen = false;
   let boundEditor: HTMLElement | null = null;
   let last: number | null = null;
@@ -91,7 +88,6 @@ export function createBlockPainter(debug?: DebugRecorder) {
   }
   function clear() {
     for (const owner of [...owners.values()]) release(owner);
-    pendingSeeds.clear();
     frozen = false;
     boundEditor = null;
     last = null;
@@ -209,23 +205,38 @@ export function createBlockPainter(debug?: DebugRecorder) {
      * Immediate presentation safety after a structural reparent. A committed owner
      * the Host has moved above the focused block may not keep covering the focused
      * subtree: the focused block is represented by having no block opacity owner.
-     * Releasing reveals host style at once, so the release also remembers what that
-     * owner was presenting. The next commit donates it to the owners that appear
-     * underneath, instead of letting them restart from full brightness — the
-     * dim -> bright -> dim gap.
+     *
+     * Releasing it would uncover that element's own text at full brightness until
+     * the semantic commit re-dims it one level down — the dim -> bright -> dim gap.
+     * So the alpha moves with the role: the owner's value and target are re-expressed
+     * on its own direct semantic content, everything that is not on the path to the
+     * focused block, in this same delivery. The wrapper is then released, and the
+     * composite the user sees is continuous. This is a bounded re-expression on one
+     * element's children, not a neighborhood plan.
      */
     protectFocus(focused: HTMLElement) {
+      let moved = 0;
       let released = 0;
       for (const owner of [...owners.values()]) {
         if (owner.element === focused) continue;
-        if (owner.element.isConnected && owner.element.contains(focused)) {
-          pendingSeeds.set(owner.mapKey, presented(owner));
-          release(owner);
-          released++;
+        if (!owner.element.isConnected || !owner.element.contains(focused)) continue;
+        if (owner.target !== 1) {
+          const children = owner.element.children;
+          for (let index = 0; index < children.length; index++) {
+            const child = children[index];
+            if (child === focused || child.contains(focused)) continue;
+            const key = visualKey(child as HTMLElement);
+            if (!key || owners.has(key)) continue;
+            adopt(key, child as HTMLElement, Number(getComputedStyle(child as HTMLElement).opacity),
+              { value: owner.value, target: owner.target }, []);
+            moved++;
+          }
         }
+        release(owner);
+        released++;
       }
-      ZENTYPE_DEBUG: if (released) debug?.record("ripple", "focus-ancestor-released", {
-        released, blockCount: owners.size,
+      ZENTYPE_DEBUG: if (released) debug?.record("ripple", "focus-ancestor-replaced", {
+        released, moved, blockCount: owners.size,
       });
     },
     /** Read stage returns a write-only commit, so sentence/color reads can finish first. */
@@ -237,16 +248,6 @@ export function createBlockPainter(debug?: DebugRecorder) {
       for (const owner of owners.values()) if (owner.key && owner.element.isConnected) {
         byKey.set(owner.key, old.get(owner.element)!);
       }
-      // An owner released for focused-subtree safety is gone from the live set but
-      // still owns the alpha the user last saw. It stays a donation source for the
-      // one commit that follows its release: a semantic key joins the projection so
-      // the surviving ancestor or successor is matched, an anonymous element seeds
-      // the handoff directly.
-      for (const [id, value] of pendingSeeds) {
-        if (typeof id === "string") byKey.set(id, value);
-        else old.set(id, value);
-      }
-      pendingSeeds.clear();
       // Match replacement owners and ancestors against the previous committed
       // bindings, even if SiYuan inserted before removing the old DOM element.
       for (const target of targets.keys()) {

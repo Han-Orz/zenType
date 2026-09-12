@@ -1806,11 +1806,12 @@ test("a structural reparent releases a dim ancestor before the semantic commit",
     { type: "childList", target: neighbor, addedNodes: [focused], removedNodes: [] } as unknown as MutationRecord,
   ]);
 
-  // Before any frame or semantic commit, the owner dimming the focused subtree
-  // must already be gone; the focused block itself stays unowned.
+  // Before any frame or semantic commit, the owner on the focused subtree's new
+  // ancestor must already have moved: the wrapper is released and its own visible
+  // content carries the same dim, while the focused block stays unowned.
   assert.equal(dim.playState, "idle");
   assert.equal(focused.animations.length, 0);
-  assert.ok(harness.events.some(event => event.name === "focus-ancestor-released" && event.payload.released === 1));
+  assert.ok(harness.events.some(event => event.name === "focus-ancestor-replaced" && event.payload.released === 1));
   assert.equal(harness.events.some(event => event.name === "structure-commit"), false);
 }, { typewriter: false, ripple: true }));
 
@@ -3154,42 +3155,56 @@ test("a rapid block role retarget continues critical motion without a restart", 
   painter.clear();
 }));
 
-test("a dim ancestor's alpha is donated to the children it covered, with no dim-to-bright bounce", () => withPresentation(() => {
+test("a dim ancestor's alpha moves onto its own content instead of flashing bright", () => withPresentation(() => {
   const editor = new PaintElement();
   const focused = new PaintElement();
   const ancestor = new PaintElement();
-  const child = new PaintElement();
-  focused.dataset.nodeId = "focused"; ancestor.dataset.nodeId = "ancestor"; child.dataset.nodeId = "child";
+  const label = new PaintElement();
+  const marker = new PaintElement();
+  const nested = new PaintElement();
+  focused.dataset.nodeId = "focused"; ancestor.dataset.nodeId = "ancestor"; label.dataset.nodeId = "label";
+  nested.dataset.nodeId = "nested"; nested.dataset.type = "NodeList";
+  marker.classes.add("protyle-action");
   focused.parentElement = ancestor.parentElement = editor;
   focused.nextElementSibling = ancestor; ancestor.previousElementSibling = focused;
+  // The parent's own visible content is a marker and a paragraph directly under the
+  // covering element, exactly like a NodeListItem. Its nested list, which will carry
+  // the focused block after Tab, is the third child.
+  label.parentElement = marker.parentElement = nested.parentElement = ancestor;
+  ancestor.children = [marker, label, nested];
   const painter = createBlockPainter();
   const el = (element: PaintElement) => element as unknown as HTMLElement;
 
-  // The neighbour is a committed dim owner; settle it so the presented value is exact.
+  // The ancestor is committed dim. Its marker, label and nested list are uncovered,
+  // so their dim is produced by the ancestor owner alone.
   painter.prepare(new Map([[el(focused), 1], [el(ancestor), RIPPLE_LEVELS[1]]]), el(editor), false)();
   settleBlocks(now => painter.step(now, false), 0);
   assertAlpha(carrierAlpha(ancestor), RIPPLE_LEVELS[1]);
+  assert.equal(carrierAlpha(label), null);
+  assert.equal(carrierAlpha(marker), null);
 
-  // Tab: the focused block moves under the dim neighbour; the Host also exposes a
-  // new child under it. The covering owner must not dim the focused subtree.
-  focused.parentElement = ancestor;
-  child.parentElement = ancestor;
+  // Tab reparents the focused block into the nested list. The ancestor now covers the
+  // focused subtree, so it may not stay on the wrapper; its own marker and label must
+  // inherit the dim instead, and the nested list on the focus path must not.
+  focused.parentElement = nested;
+  nested.children = [focused];
   painter.protectFocus(el(focused));
-  assert.equal(carrierAlpha(ancestor), null, "the covering owner releases immediately");
+  assert.equal(carrierAlpha(ancestor), null, "the wrapper owner releases");
   assert.equal(carrierAlpha(focused), null, "the focused block is never dimmed");
+  assert.equal(carrierAlpha(nested), null, "the focus path carries no block owner");
+  assertAlpha(carrierAlpha(label), RIPPLE_LEVELS[1], "the parent's own paragraph keeps the dim");
+  assertAlpha(carrierAlpha(marker), RIPPLE_LEVELS[1], "the parent's own marker keeps the dim");
 
-  // The commit donates that alpha to the newly exposed child instead of restarting.
-  painter.prepare(new Map([[el(child), RIPPLE_LEVELS[1]], [el(focused), 1]]), el(editor), false)();
-  assertAlpha(carrierAlpha(child), RIPPLE_LEVELS[1]);
-  // The child never jumped to full brightness on the way to its dim role.
-  let previous = carrierAlpha(child)!;
-  for (let step = 0; step < 60; step++) {
+  // No frame before the commit may brighten the parent's visible content.
+  let previous = carrierAlpha(label)!;
+  for (let step = 1; step <= 200; step++) {
     painter.step(step * 16, false);
-    const alpha = carrierAlpha(child);
+    const alpha = carrierAlpha(label);
     if (alpha === null) break;
-    assert.ok(alpha <= previous + 1e-9, `brightness bounced upward: ${previous} -> ${alpha}`);
+    assert.ok(alpha <= previous + 1e-9, `parent content brightened: ${previous} -> ${alpha}`);
     previous = alpha;
   }
+  assertAlpha(previous, RIPPLE_LEVELS[1]);
   painter.clear();
 }));
 
