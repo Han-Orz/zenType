@@ -1815,6 +1815,80 @@ test("a structural reparent releases a dim ancestor before the semantic commit",
   assert.equal(harness.events.some(event => event.name === "structure-commit"), false);
 }, { typewriter: false, ripple: true }));
 
+test("Shift+Tab outdent keeps the focused block unowned and releases its former ancestors", () => withSessionHarness(harness => {
+  const focused = harness.editable;
+  focused.dataset.nodeId = "B";
+  const neighbor = new PaintElement();
+  neighbor.dataset.nodeId = "A";
+  const wrapper = new PaintElement();
+  wrapper.parentElement = harness.editor;
+  neighbor.parentElement = focused.parentElement = wrapper;
+  neighbor.nextElementSibling = focused;
+  focused.previousElementSibling = neighbor;
+  wrapper.children = [neighbor, focused];
+  harness.editor.children = [wrapper];
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
+  harness.setReducedMotion(false);
+  harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
+  harness.tick(0);
+  settleOwner(harness, neighbor, RIPPLE_LEVELS[1]);
+
+  // Shift+Tab outdents the focused block to the editor level, beside its wrapper.
+  harness.dispatch(20, "keydown", { key: "Tab", shiftKey: true, defaultPrevented: false });
+  assert.ok(harness.events.some(event => event.name === "structure-intent" && event.payload.intent === "outdent"));
+  harness.editor.children = [wrapper, focused];
+  wrapper.children = [neighbor];
+  focused.parentElement = harness.editor;
+  focused.previousElementSibling = wrapper;
+  wrapper.nextElementSibling = focused;
+  harness.setSelection("caret", focused as unknown as Node);
+  harness.setFrame({ ...harness.getFrame(), block: focused as unknown as HTMLElement,
+    editable: focused as unknown as HTMLElement, range: {} as Range,
+    caret: { x: 260, y: 300, height: 20 } });
+  harness.mutate(24, [
+    { type: "childList", target: wrapper, addedNodes: [], removedNodes: [focused] } as unknown as MutationRecord,
+    { type: "childList", target: harness.editor, addedNodes: [focused], removedNodes: [] } as unknown as MutationRecord,
+  ]);
+
+  // The focused block is represented by having no owner: not during the reparent,
+  // not on any frame before or after the semantic commit.
+  for (let now = 32; now <= 240; now += 16) {
+    harness.tick(now);
+    assert.equal(focused.animations.length, 0, `focused block owned at ${now}`);
+  }
+  assert.ok(harness.events.some(event => event.name === "structure-commit" && event.payload.topologyChanged === true));
+  assert.equal(harness.events.some(event => event.name === "structure-timeout"), false);
+}, { typewriter: false, ripple: true }));
+
+test("IME composition leaves existing block owners untouched", () => withSessionHarness(harness => {
+  const focused = harness.editable;
+  focused.dataset.nodeId = "B";
+  const neighbor = new PaintElement();
+  neighbor.dataset.nodeId = "A";
+  neighbor.parentElement = harness.editor;
+  neighbor.nextElementSibling = focused;
+  focused.previousElementSibling = neighbor;
+  harness.editor.children = [neighbor, focused];
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
+  harness.setReducedMotion(false);
+  harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
+  harness.tick(0);
+  settleOwner(harness, neighbor, RIPPLE_LEVELS[1]);
+  const before = carrierAlpha(neighbor)!;
+
+  // Composition entry cancels structural intent; it must not open a new generation,
+  // disturb the committed block presentation, or churn the carrier.
+  harness.dispatch(40, "compositionstart", {});
+  harness.tick(56);
+  const intents = harness.events.filter(event => event.name === "structure-intent").length;
+  harness.dispatch(60, "compositionend", {});
+  harness.tick(76);
+  harness.tick(92);
+  assert.equal(harness.events.filter(event => event.name === "structure-intent").length, intents);
+  assertAlpha(carrierAlpha(neighbor), before, "composition must not move a committed owner");
+  assert.equal(neighbor.animations.length, 1, "composition must not churn carriers");
+}, { typewriter: false, ripple: true }));
+
 test("a representation replacement keeps its committed presentation role", () => withSessionHarness(harness => {
   const focused = harness.editable;
   focused.dataset.nodeId = "B";
@@ -3152,6 +3226,68 @@ test("a rapid block role retarget continues critical motion without a restart", 
   settleBlocks(t => { now = t; return painter.step(t, false); }, now);
   assertAlpha(carrierAlpha(block), RIPPLE_LEVELS[2]);
   assert.equal(block.animations.at(-1), ownerAfter, "retarget must reuse one carrier, not build a second");
+  painter.clear();
+}));
+
+test("alternating block role retargets reuse one owner and never restart from full", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const block = new PaintElement();
+  block.dataset.nodeId = "block";
+  block.parentElement = editor;
+  const painter = createBlockPainter();
+  const el = block as unknown as HTMLElement;
+  const roles = [RIPPLE_LEVELS[1], RIPPLE_LEVELS[2], RIPPLE_LEVELS[3], RIPPLE_LEVELS[1]];
+
+  painter.prepare(new Map([[el, roles[0]]]), editor as unknown as HTMLElement, false)();
+  let now = 0;
+  painter.step(now, false);
+  for (let round = 1; round < 12; round++) {
+    const target = roles[round % roles.length];
+    const before = carrierAlpha(block)!;
+    // A retarget must not move the presented value: it only changes the destination.
+    painter.prepare(new Map([[el, target]]), editor as unknown as HTMLElement, false)();
+    assert.ok(Math.abs(carrierAlpha(block)! - before) < 1e-9, `round ${round} jumped on retarget`);
+    // Off by one frame deliberately: a retarget lands mid-flight, as rapid Tab /
+    // Shift+Tab does. The step continues from the current value toward the new role
+    // and never teleports to it in one frame.
+    now += MOTION.blockAlphaResponseMs / 3;
+    painter.step(now, false);
+    const alpha = carrierAlpha(block)!;
+    assert.ok(Math.abs(alpha - target) > 1e-9, `round ${round} teleported to target`);
+    assert.ok(alpha < 1, `round ${round} returned to full brightness: ${alpha}`);
+  }
+  // One semantic owner, one carrier: no WAAPI churn across the whole alternation.
+  assert.equal(painter.size(), 1);
+  assert.equal(block.animations.length, 1, "alternating retargets must not build new carriers");
+  painter.clear();
+}));
+
+test("reduced motion commits a block owner at its role without an animated tail", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const target = new PaintElement();
+  target.dataset.nodeId = "target";
+  target.parentElement = editor;
+  const painter = createBlockPainter();
+  const e = target as unknown as HTMLElement;
+  const ed = editor as unknown as HTMLElement;
+
+  // The commit snaps straight to the role: no partial value is ever presented.
+  painter.prepare(new Map([[e, RIPPLE_LEVELS[1]]]), ed, true)();
+  assertAlpha(carrierAlpha(target), RIPPLE_LEVELS[1]);
+  painter.step(0, true);
+  assertAlpha(carrierAlpha(target), RIPPLE_LEVELS[1]);
+
+  // A held dim owner resumed under reduced motion keeps its role immediately: the
+  // reduced-motion contract removes the transition, not the presentation.
+  painter.freeze();
+  painter.resume(true);
+  assert.equal(painter.size(), 1);
+  assertAlpha(carrierAlpha(target), RIPPLE_LEVELS[1]);
+
+  // A neutral role has nowhere to settle but release, so it does not linger.
+  painter.prepare(new Map([[e, 1]]), ed, true)();
+  assert.equal(painter.size(), 0);
+  assert.equal(carrierAlpha(target), null);
   painter.clear();
 }));
 
