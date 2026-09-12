@@ -206,13 +206,13 @@ export function createBlockPainter(debug?: DebugRecorder) {
      * the Host has moved above the focused block may not keep covering the focused
      * subtree: the focused block is represented by having no block opacity owner.
      *
-     * Releasing it would uncover that element's own text at full brightness until
-     * the semantic commit re-dims it one level down — the dim -> bright -> dim gap.
-     * So the alpha moves with the role: the owner's value and target are re-expressed
-     * on its own direct semantic content, everything that is not on the path to the
-     * focused block, in this same delivery. The wrapper is then released, and the
-     * composite the user sees is continuous. This is a bounded re-expression on one
-     * element's children, not a neighborhood plan.
+     * An owner's alpha means its whole subtree, so releasing it would uncover every
+     * element that relied on it at full brightness until the semantic commit re-dims
+     * them — the dim -> bright -> dim gap. The alpha therefore moves with the role:
+     * walking down from the covering element to the focused block, every off-path
+     * sibling at every level takes over the same composite, so the subtracted focus
+     * path is exactly what stops being multiplied and nothing else changes. That is
+     * a bounded subtree partition around one cut, not a neighborhood plan.
      */
     protectFocus(focused: HTMLElement) {
       let moved = 0;
@@ -221,15 +221,46 @@ export function createBlockPainter(debug?: DebugRecorder) {
         if (owner.element === focused) continue;
         if (!owner.element.isConnected || !owner.element.contains(focused)) continue;
         if (owner.target !== 1) {
-          const children = owner.element.children;
-          for (let index = 0; index < children.length; index++) {
-            const child = children[index];
-            if (child === focused || child.contains(focused)) continue;
-            const key = visualKey(child as HTMLElement);
-            if (!key || owners.has(key)) continue;
-            adopt(key, child as HTMLElement, Number(getComputedStyle(child as HTMLElement).opacity),
-              { value: owner.value, target: owner.target }, []);
-            moved++;
+          // The focus path owner.element -> ... -> focused, so each level knows which
+          // child to leave uncovered.
+          const path: HTMLElement[] = [];
+          for (let node: HTMLElement | null = focused;
+               node && node !== owner.element && path.length <= STRUCTURE_LIMITS.depth;
+               node = node.parentElement) {
+            path.push(node);
+          }
+          path.reverse();
+          // Removing this owner removes one multiplicative factor from its entire
+          // subtree. The focus path owns no owner (it contained the focus), so each
+          // off-path child at every level was multiplied by exactly this composite;
+          // handing that value down leaves every covered element unchanged.
+          const composite = presented(owner);
+          for (let level = 0; level < path.length && moved < STRUCTURE_LIMITS.nodes; level++) {
+            const onPath = path[level];
+            const host = level === 0 ? owner.element : path[level - 1];
+            const children = host.children;
+            for (let index = 0; index < children.length; index++) {
+              const child = children[index] as HTMLElement;
+              if (child === onPath) continue;
+              const key = visualKey(child);
+              if (!key) continue;
+              const existing = owners.get(key);
+              if (existing) {
+                // An owner already down here absorbs the removed factor itself. Its
+                // local value is relative to this removed owner, so scaling by that
+                // owner's local value preserves its composite exactly.
+                existing.value *= owner.value;
+                if (existing.target !== 1) existing.target *= owner.value;
+                writeCarrier(existing);
+                continue;
+              }
+              adopt(key, child, Number(getComputedStyle(child).opacity),
+                { value: composite, target: owner.target }, []);
+              moved++;
+            }
+            // The focused block's own subtree is the focused content: the factor stops
+            // here, so everything below it stays uncovered while its siblings keep it.
+            if (onPath === focused) break;
           }
         }
         release(owner);

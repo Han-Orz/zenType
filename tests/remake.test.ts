@@ -3208,6 +3208,118 @@ test("a dim ancestor's alpha moves onto its own content instead of flashing brig
   painter.clear();
 }));
 
+test("a deep dim sibling keeps its dim when the focused block is indented past it", () => withPresentation(() => {
+  // The reported document shape:
+  //   - A
+  //       - B
+  //   - C     (focused, indented under A)
+  // B is a grandchild of the covering element, not a direct child.
+  const editor = new PaintElement();
+  const rootList = new PaintElement();
+  const itemA = new PaintElement();
+  const markerA = new PaintElement();
+  const paraA = new PaintElement();
+  const listA = new PaintElement();
+  const itemB = new PaintElement();
+  const markerB = new PaintElement();
+  const paraB = new PaintElement();
+  const itemC = new PaintElement();
+  const markerC = new PaintElement();
+  const paraC = new PaintElement();
+  rootList.dataset.nodeId = "root"; itemA.dataset.nodeId = "A"; paraA.dataset.nodeId = "A-p";
+  listA.dataset.nodeId = "A-list"; itemB.dataset.nodeId = "B"; paraB.dataset.nodeId = "B-p";
+  itemC.dataset.nodeId = "C"; paraC.dataset.nodeId = "C-p";
+  rootList.dataset.type = "NodeList"; itemA.dataset.type = "NodeListItem"; itemB.dataset.type = "NodeListItem";
+  itemC.dataset.type = "NodeListItem"; listA.dataset.type = "NodeList";
+  paraA.dataset.type = "NodeParagraph"; paraB.dataset.type = "NodeParagraph"; paraC.dataset.type = "NodeParagraph";
+  for (const m of [markerA, markerB, markerC]) m.classes.add("protyle-action");
+  const link = (parent: PaintElement, children: PaintElement[]) => {
+    parent.children = children;
+    children.forEach((c, i) => { c.parentElement = parent; c.previousElementSibling = children[i - 1] ?? null; c.nextElementSibling = children[i + 1] ?? null; });
+  };
+  link(editor, [rootList]);
+  // Before Tab: A (dim) and C (focused) are siblings under the root list.
+  link(rootList, [itemA, itemC]);
+  link(itemA, [markerA, paraA, listA]);
+  link(listA, [itemB]);
+  link(itemB, [markerB, paraB]);
+  link(itemC, [markerC, paraC]);
+  const painter = createBlockPainter();
+  const el = (element: PaintElement) => element as unknown as HTMLElement;
+
+  painter.prepare(new Map([[el(paraC), 1], [el(itemA), RIPPLE_LEVELS[1]]]), el(editor), false)();
+  settleBlocks(now => painter.step(now, false), 0);
+  assertAlpha(carrierAlpha(itemA), RIPPLE_LEVELS[1]);
+  // B is deep: its dim comes from A's owner across two levels.
+  assert.equal(carrierAlpha(itemB), null);
+
+  // Tab indents C under A's list, so A now covers the focused block. B is a
+  // grandchild of A and must keep the exact dim it already had.
+  link(listA, [itemB, itemC]);
+  link(rootList, [itemA]);
+  painter.protectFocus(el(paraC));
+
+  assert.equal(carrierAlpha(itemA), null, "the covering owner releases");
+  assert.equal(carrierAlpha(paraC), null, "the focused block is never dimmed");
+  assert.equal(carrierAlpha(itemC), null, "the focused item carries no block owner");
+  assertAlpha(carrierAlpha(markerA), RIPPLE_LEVELS[1], "A's own marker keeps the dim");
+  assertAlpha(carrierAlpha(paraA), RIPPLE_LEVELS[1], "A's own paragraph keeps the dim");
+  assertAlpha(carrierAlpha(itemB), RIPPLE_LEVELS[1], "the deep sibling B keeps the dim");
+
+  // Nothing in the covering subtree may brighten on any frame before the commit.
+  const watched = [markerA, paraA, itemB];
+  let previous = watched.map(carrierAlpha) as number[];
+  for (let step = 1; step <= 200; step++) {
+    painter.step(step * 16, false);
+    const current = watched.map(carrierAlpha);
+    current.forEach((alpha, index) => {
+      if (alpha === null) return;
+      assert.ok(alpha <= previous[index] + 1e-9, `${watched[index].dataset.nodeId} brightened: ${previous[index]} -> ${alpha}`);
+      previous[index] = alpha;
+    });
+  }
+  painter.clear();
+}));
+
+test("an owner already inside the covering subtree absorbs the removed factor", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const focused = new PaintElement();
+  const ancestor = new PaintElement();
+  const label = new PaintElement();
+  const nested = new PaintElement();
+  const inner = new PaintElement();
+  focused.dataset.nodeId = "focused"; ancestor.dataset.nodeId = "ancestor"; label.dataset.nodeId = "label";
+  nested.dataset.nodeId = "nested"; inner.dataset.nodeId = "inner";
+  const el = (element: PaintElement) => element as unknown as HTMLElement;
+  ancestor.children = [label, nested]; label.parentElement = nested.parentElement = ancestor;
+  ancestor.parentElement = editor;
+  nested.children = [inner, focused]; inner.parentElement = focused.parentElement = nested;
+  const painter = createBlockPainter();
+  // The covering ancestor is dim, and its inner sibling is itself an owner that is
+  // one level further dimmed: its local factor sits under the ancestor's factor.
+  painter.prepare(new Map([[el(focused), 1], [el(ancestor), RIPPLE_LEVELS[1]], [el(inner), RIPPLE_LEVELS[2]]]), el(editor), false)();
+  painter.step(0, false);
+  painter.step(MOTION.blockAlphaResponseMs * 2, false);
+  // label is uncovered, so the ancestor owner alone produces its dim; inner owns
+  // only its residual local factor and composites under the ancestor.
+  assert.equal(carrierAlpha(label), null, "label is covered by the ancestor owner");
+  const ancestorLocal = carrierAlpha(ancestor)!;
+  const innerLocalBefore = carrierAlpha(inner)!;
+  const innerCompositeBefore = ancestorLocal * innerLocalBefore;
+
+  // The focused block is reparented so the ancestor covers it; the ancestor owner
+  // must go, and the inner owner must absorb exactly the removed factor.
+  focused.parentElement = nested;
+  painter.protectFocus(el(focused));
+  assert.equal(carrierAlpha(ancestor), null, "the covering owner releases");
+  assertAlpha(carrierAlpha(label), ancestorLocal, "the leftover content keeps the ancestor's factor");
+  // inner is a sibling of the focused block, not on the focus path, so it keeps the
+  // dim too: its new local value now equals the composite it was already showing.
+  assertAlpha(carrierAlpha(inner), innerCompositeBefore, "inner keeps its composite");
+  assert.ok(carrierAlpha(inner)! <= innerLocalBefore + 1e-9, "inner never brightens");
+  painter.clear();
+}));
+
 test("editor bind recovers only stale plugin-owned WAAPI without touching host opacity", () => withPresentation(() => {
   const editor = new PaintElement();
   const target = new PaintElement();
