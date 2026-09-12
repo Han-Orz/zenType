@@ -5,7 +5,7 @@ import type { DebugRecord, DebugRecorder } from "../../debug/types";
 
 const OWNERSHIP_TELEMETRY_LIMIT = 16;
 
-interface Paint { value: number; from: number; target: number; base: number; animation: Animation; key: string | undefined }
+interface Paint { value: number; from: number; target: number; base: number; animation: Animation; key: string | undefined; parents: Paint[] }
 interface CarrySeed { key: string; value: number }
 
 /**
@@ -47,7 +47,7 @@ export function createBlockPainter(debug?: DebugRecorder) {
     // Install the incoming effect before cancelling the outgoing one. No style
     // flush/transition suppression is needed: the underlying CSS never changed.
     release(element);
-    const paint: Paint = { ...step, from: step.value, base, animation, key: visualKey(element) };
+    const paint: Paint = { ...step, from: step.value, base, animation, key: visualKey(element), parents: [] };
     paints.set(element, paint);
     animation.onfinish = () => {
       if (paints.get(element) !== paint) return;
@@ -56,7 +56,12 @@ export function createBlockPainter(debug?: DebugRecorder) {
     };
     if (reducedMotion) animation.finish();
   }
-  function snapshot() { return new Map([...paints].map(([element, paint]) => [element, sample(paint)])); }
+  // These are the committed presentation ancestors, not the Host's potentially
+  // reparented live ancestors. Sample their factors before replacing any effect.
+  function presented(paint: Paint) {
+    return paint.parents.reduce((value, parent) => value * sample(parent), sample(paint));
+  }
+  function snapshot() { return new Map([...paints].map(([element, paint]) => [element, presented(paint)])); }
   function clear() {
     for (const element of paints.keys()) release(element);
     frozen = false;
@@ -96,9 +101,9 @@ export function createBlockPainter(debug?: DebugRecorder) {
     /** Rebind only existing semantic owners; never plan against intermediate DOM. */
     rebind(added: readonly HTMLElement[], seed?: CarrySeed, focusedKey?: string | null,
       onRoleInvalidated?: (presentation: { key: string; value: number }) => void) {
-      const previous = new Map<string, Pick<Paint, "value" | "target">>();
-      for (const paint of paints.values()) if (paint.key) { sample(paint); previous.set(paint.key, paint); }
-      if (seed && !previous.has(seed.key)) previous.set(seed.key, { value: seed.value, target: seed.value });
+      const previous = new Map<string, { value: number; target: number; parents: Paint[] }>();
+      for (const paint of paints.values()) if (paint.key) previous.set(paint.key, { value: sample(paint), target: paint.target, parents: paint.parents });
+      if (seed && !previous.has(seed.key)) previous.set(seed.key, { value: seed.value, target: seed.value, parents: [] });
       const replacements = added.flatMap(element => {
         const key = visualKey(element);
         // A same-key replacement that the Host has already made the focused block
@@ -129,7 +134,11 @@ export function createBlockPainter(debug?: DebugRecorder) {
           return;
         }
         for (const { element, old, base } of replacements) {
-          write(element, { value: old.value, target: frozen ? old.value : old.target }, base, false);
+          // Pause the trajectory, not its semantic target. Replacing the target
+          // with the held value would restart a second fade at semantic commit.
+          write(element, { value: old.value, target: old.target }, base, false);
+          const paint = paints.get(element);
+          if (paint) paint.parents = old.parents;
           if (frozen) paints.get(element)?.animation.pause();
         }
         ZENTYPE_DEBUG: if (replacements.length) debug?.record("ripple", "replacement-carry", { count: replacements.length, blockCount: paints.size });
@@ -199,6 +208,14 @@ export function createBlockPainter(debug?: DebugRecorder) {
         }
         for (const [element, step] of steps) write(element, step, bases.get(element)!, reducedMotion);
         for (const element of paints.keys()) if (!steps.has(element)) release(element);
+        for (const [element, paint] of paints) {
+          paint.parents = [];
+          let parent = element.parentElement;
+          for (let depth = 0; parent && parent !== editor && depth < STRUCTURE_LIMITS.depth; depth++, parent = parent.parentElement) {
+            const owner = paints.get(parent);
+            if (owner) paint.parents.push(owner);
+          }
+        }
         ZENTYPE_DEBUG: if (ownershipTelemetry) debug?.record("ripple", "ownership-commit", {
           ...ownershipTelemetry, blockCount: paints.size,
         });

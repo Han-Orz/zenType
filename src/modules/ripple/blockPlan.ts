@@ -43,7 +43,7 @@ export function collectTargets(block: HTMLElement, editor: HTMLElement): Map<HTM
 export interface BlockStep { value: number; target: number }
 
 /**
- * Repartition the existing alpha product into new disjoint owners, without writes.
+ * Repartition previous presented alpha into new disjoint owners, without writes.
  * Ancestor -> children folds down; children -> ancestor takes the brightest child
  * and leaves normalized residuals underneath. Each walk is bounded, never pairs
  * every old owner with every target. Called only when the owner plan changes.
@@ -61,16 +61,16 @@ export function planHandoff(old: ReadonlyMap<HTMLElement, number>, targets: Read
   }
   for (const [element, target] of targets) {
     let value = old.get(element) ?? 1;
-    // Folding a released ancestor's value into a target that the plan neutralizes
-    // animates away a dim frame no earlier frame showed. That ancestor is either
-    // already dimming the element through its own opacity, or — after a reparent
-    // such as a list indent — it dimmed a different subtree and this element has
-    // simply moved underneath it. Only a target that inherits the released role
-    // carries the ancestor's factor, and that target is never neutral.
-    const inherits = target !== 1;
+    // An existing semantic owner already has an exact presented baseline. The
+    // live DOM may now place it under a formerly independent dim neighbour; that
+    // new ancestry must not multiply the presentation the user previously saw.
+    let inherits = !old.has(element) && target !== 1;
     walk(element, parent => {
       ancestors.add(parent);
-      if (inherits) value *= old.get(parent) ?? 1;
+      if (inherits && old.has(parent)) {
+        value = old.get(parent)!;
+        inherits = false;
+      }
     });
     steps.set(element, { value, target });
   }
@@ -83,13 +83,25 @@ export function planHandoff(old: ReadonlyMap<HTMLElement, number>, targets: Read
       return false;
     });
   }
-  for (const [element, donor] of donors) steps.get(element)!.value *= donor.value;
+  for (const [element, donor] of donors) steps.get(element)!.value = donor.value;
   for (const [element, value] of old) {
     if (targets.has(element) || !element.isConnected || ancestors.has(element)) continue;
     const parent = nearest.get(element);
     const donor = parent && donors.get(parent);
     if (donor && donor.element === element) continue;
-    steps.set(element, { value: donor ? value / donor.value : value, target: 1 });
+    steps.set(element, { value, target: 1 });
   }
-  return steps;
+  // Steps above are composite baselines. Convert to local factors only after
+  // the complete incoming partition exists, including neutral release owners.
+  // A lifecycle fade can retain both a parent and its residual child.
+  return new Map([...steps].map(([element, step]) => {
+    let value = step.value;
+    walk(element, parent => {
+      const inherited = steps.get(parent);
+      if (!inherited) return;
+      value = inherited.value === 0 ? 1 : value / inherited.value;
+      return false;
+    });
+    return [element, { value, target: step.target }];
+  }));
 }

@@ -1868,6 +1868,29 @@ test("a detached owner no longer enters the current semantic projection", () => 
   painter.clear();
 }));
 
+test("a paused replacement retains its moving baseline and semantic target at commit", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const old = new PaintElement();
+  const fresh = new PaintElement();
+  old.dataset.nodeId = fresh.dataset.nodeId = "K";
+  old.parentElement = fresh.parentElement = editor;
+  const painter = createBlockPainter();
+  painter.prepare(new Map([[old as unknown as HTMLElement, 0.4]]), editor as unknown as HTMLElement, false)();
+  old.animations.at(-1)!.currentTime = MOTION.blockFadeMs / 2;
+  painter.freeze();
+  old.isConnected = false;
+  painter.rebind([fresh as unknown as HTMLElement])();
+  const carried = fresh.animations.at(-1)!;
+  assert.equal(carried.frames[0].opacity, 0.475);
+  assert.equal(carried.frames[1].opacity, 0.4);
+  assert.equal(carried.playState, "paused");
+  painter.prepare(new Map([[fresh as unknown as HTMLElement, 0.4]]), editor as unknown as HTMLElement, false)();
+  assert.equal(fresh.animations.at(-1), carried);
+  assert.equal(carried.playState, "running");
+  assert.equal(old.animations.at(-1)!.playState, "idle");
+  painter.clear();
+}));
+
 test("a connected replacement still contributes its carried value", () => withPresentation(() => {
   const editor = new PaintElement();
   const old = new PaintElement();
@@ -2539,7 +2562,7 @@ test("mutation delivery rebinds a semantic replacement before the next rAF", () 
   const carry = replacement.animations.at(-1)!;
   assert.ok(carry);
   assert.equal(carry.frames[0].opacity, 1 + (RIPPLE_LEVELS[1] - 1) * 0.875);
-  assert.equal(carry.frames[1].opacity, 1 + (RIPPLE_LEVELS[1] - 1) * 0.875);
+  assert.equal(carry.frames[1].opacity, RIPPLE_LEVELS[1]);
   assert.equal(carry.playState, "paused");
 }, { typewriter: false, ripple: true }));
 
@@ -2747,6 +2770,73 @@ test("list reparenting transfers parent alpha to its children without restarting
   ripple.prepare(input, false, false, false);
   assert.equal(child.animations.at(-1)?.frames[1].opacity, 1);
   ripple.destroy();
+}));
+
+test("Tab handoff preserves a moving marker baseline across a new list wrapper", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const outer = new PaintElement();
+  const item = new PaintElement();
+  const marker = new PaintElement();
+  const content = new PaintElement();
+  const outerContent = new PaintElement();
+  const wrapper = new PaintElement();
+  for (const [element, key] of [[outer, "outer"], [item, "item"], [marker, "marker"],
+    [content, "content"], [outerContent, "outer-content"], [wrapper, "new-list"]] as const) element.dataset.nodeId = key;
+  outer.parentElement = item.parentElement = editor;
+  marker.parentElement = content.parentElement = item;
+  outerContent.parentElement = outer;
+  const painter = createBlockPainter();
+  const asElement = (element: PaintElement) => element as unknown as HTMLElement;
+  painter.prepare(new Map([[asElement(outer), 0.4], [asElement(marker), 0.4], [asElement(content), 1]]), asElement(editor), false)();
+  const markerFade = marker.animations.at(-1)!;
+  const outerFade = outer.animations.at(-1)!;
+  markerFade.currentTime = outerFade.currentTime = MOTION.blockFadeMs / 2;
+  painter.freeze();
+  const baseline = 1 - 0.6 * 0.875;
+  wrapper.parentElement = outer;
+  item.parentElement = wrapper;
+  painter.prepare(new Map([[asElement(outerContent), 0.4], [asElement(marker), 0.4], [asElement(content), 1]]), asElement(editor), false)();
+  assert.equal(marker.animations.at(-1), markerFade, "stable marker trajectory must not restart from alpha squared");
+  assert.equal(outerContent.animations.at(-1)!.frames[0].opacity, baseline);
+  assert.equal(outerFade.playState, "idle");
+  assert.equal(content.animations.length, 0);
+  assert.equal(wrapper.animations.length, 0);
+  // Reverse reparent while the inherited content owner is still in flight.
+  outerContent.animations.at(-1)!.currentTime = MOTION.blockFadeMs / 2;
+  const carried = baseline + (0.4 - baseline) * 0.875;
+  item.parentElement = editor;
+  painter.prepare(new Map([[asElement(outer), 0.4], [asElement(marker), 0.4], [asElement(content), 1]]), asElement(editor), false)();
+  assert.equal(outer.animations.at(-1)!.frames[0].opacity, carried);
+  assert.equal(marker.animations.at(-1), markerFade);
+  painter.clear();
+}));
+
+test("nested residual owners hand back their composite presentation without multiplying twice", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const parent = new PaintElement();
+  const bright = new PaintElement();
+  const dim = new PaintElement();
+  parent.parentElement = editor;
+  bright.parentElement = dim.parentElement = parent;
+  const el = (element: PaintElement) => element as unknown as HTMLElement;
+  const painter = createBlockPainter();
+  painter.prepare(new Map([[el(bright), 0.4], [el(dim), 0.1]]), el(editor), true)();
+  painter.prepare(new Map([[el(parent), 0.2]]), el(editor), false)();
+  assert.equal(parent.animations.at(-1)!.frames[0].opacity, 0.4);
+  assert.ok(Math.abs(Number(dim.animations.at(-1)!.frames[0].opacity) - 0.25) < 1e-12);
+  // The residual is a local factor; the old visible alpha is parent * residual.
+  parent.animations.at(-1)!.currentTime = MOTION.blockFadeMs / 2;
+  dim.animations.at(-1)!.currentTime = MOTION.blockFadeMs / 2;
+  const parentAlpha = 0.4 + (0.2 - 0.4) * 0.875;
+  const residualAlpha = 0.25 + 0.75 * 0.875;
+  const residual = dim.animations.at(-1)!;
+  painter.prepare(new Map(), el(editor), false)();
+  assert.equal(parent.animations.at(-1)!.frames[0].opacity, parentAlpha);
+  assert.equal(dim.animations.at(-1), residual, "neutral release keeps the residual trajectory");
+  painter.prepare(new Map([[el(bright), 0.4], [el(dim), 0.1]]), el(editor), false)();
+  assert.equal(bright.animations.at(-1)!.frames[0].opacity, parentAlpha);
+  assert.equal(dim.animations.at(-1)!.frames[0].opacity, parentAlpha * residualAlpha);
+  painter.clear();
 }));
 
 test("ancestor markers share the alpha of their direct list content", () => withPresentation(() => {
