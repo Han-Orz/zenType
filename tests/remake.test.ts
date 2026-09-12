@@ -3344,6 +3344,52 @@ test("a dim ancestor's alpha moves onto its own content instead of flashing brig
   painter.clear();
 }));
 
+test("nested covering owners are removed exactly once regardless of iteration order", () => withPresentation(() => {
+  // owner O (outer) > owner I (inner) > focused. Both are ancestors of the focused
+  // block, so both factors must come off, and each inner region must keep exactly
+  // the composite it was already showing.
+  const editor = new PaintElement();
+  const outer = new PaintElement();
+  const outerLabel = new PaintElement();
+  const inner = new PaintElement();
+  const innerLabel = new PaintElement();
+  const focused = new PaintElement();
+  const branch = new PaintElement();
+  outer.dataset.nodeId = "outer"; outerLabel.dataset.nodeId = "outer-label";
+  inner.dataset.nodeId = "inner"; innerLabel.dataset.nodeId = "inner-label";
+  focused.dataset.nodeId = "focused"; branch.dataset.nodeId = "branch";
+  const el = (element: PaintElement) => element as unknown as HTMLElement;
+  outer.parentElement = editor;
+  outer.children = [outerLabel, inner];
+  outerLabel.parentElement = inner.parentElement = outer;
+  // inner holds one off-path child (branch) and the path child that contains focus.
+  inner.children = [innerLabel, branch];
+  innerLabel.parentElement = branch.parentElement = inner;
+  branch.children = [focused];
+  focused.parentElement = branch;
+
+  const painter = createBlockPainter();
+  // Hand-crafted steady state: outer 0.4, inner a further 0.2, so the region under
+  // inner composites at 0.4 * 0.2 = 0.08.
+  painter.prepare(new Map([[el(focused), 1], [el(outer), RIPPLE_LEVELS[1]], [el(inner), RIPPLE_LEVELS[2]]]), el(editor), false)();
+  painter.step(0, false);
+  painter.step(MOTION.blockAlphaResponseMs * 2, false);
+  const outerLocal = carrierAlpha(outer)!;
+  const innerLocalBefore = carrierAlpha(inner)!;
+  const innerRegionComposite = outerLocal * innerLocalBefore;
+
+  painter.protectFocus(el(focused));
+
+  assert.equal(carrierAlpha(outer), null, "outer covering owner releases");
+  assert.equal(carrierAlpha(inner), null, "inner covering owner releases");
+  assert.equal(carrierAlpha(focused), null, "the focused block is never owned");
+  // Nothing that was dim may brighten: each leftover region keeps its composite.
+  assert.ok(carrierAlpha(outerLabel)! <= outerLocal + 1e-9, "outer label brightened");
+  assert.ok(carrierAlpha(innerLabel)! <= innerRegionComposite + 1e-9, "inner label brightened");
+  assert.ok(carrierAlpha(branch)! <= innerRegionComposite + 1e-9, "inner branch brightened");
+  painter.clear();
+}));
+
 test("a deep dim sibling keeps its dim when the focused block is indented past it", () => withPresentation(() => {
   // The reported document shape:
   //   - A
