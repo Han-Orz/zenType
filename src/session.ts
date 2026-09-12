@@ -170,7 +170,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         // A list reparent moves Host DOM. Structural Presentation consumes only
         // the Structural Contract generation that classified this very delivery.
         if (changes.kind === "structural" && authority) {
-          presentation.attach(authority.generation, structuralMoveRoot(focused?.block ?? null), now, reducedMotion.matches);
+          presentation.attach(authority.generation, now, reducedMotion.matches);
         }
       }
     }

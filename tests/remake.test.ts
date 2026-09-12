@@ -39,7 +39,7 @@ test("a structural displacement holds the visual position and hands the host bac
 
   // The Host reparents the item: same node, new committed position.
   paintRect(element, 130, 50);
-  assert.deepEqual(presentation.attach(1, element as unknown as HTMLElement, 4, false), { x: -30, y: 0 });
+  assert.deepEqual(presentation.attach(1, 4, false), { x: -30, y: 0 });
   assert.equal(element.style.transform, "translate(-30px, 0px)");
 
   let offset: { x: number; y: number } | null = { x: -30, y: 0 };
@@ -48,37 +48,36 @@ test("a structural displacement holds the visual position and hands the host bac
   assert.equal(element.style.transform, "");
 }));
 
-test("a structural displacement refuses a mismatched key, a host transform and reduced motion", () => withPresentation(() => {
+test("a structural displacement refuses replacement, host transform and reduced motion", () => withPresentation(() => {
   const element = new PaintElement();
   element.dataset.nodeId = "item";
   paintRect(element, 100, 50);
   const presentation = createStructurePresentation();
 
-  // The Host replaced the node under a different key: DOM identity is not
-  // continuity, and the live fallback has to agree on the semantic key.
+  // A replacement is not continuity, even when the semantic key is the same.
   presentation.capture(1, element as unknown as HTMLElement, 0);
   element.isConnected = false;
   const replacement = new PaintElement();
-  replacement.dataset.nodeId = "other";
+  replacement.dataset.nodeId = "item";
   paintRect(replacement, 130, 50);
-  assert.equal(presentation.attach(1, replacement as unknown as HTMLElement, 4, false), null);
+  assert.equal(presentation.attach(1, 4, false), null);
   assert.equal(element.style.transform, "");
   element.isConnected = true;
 
   // Nothing may animate through a capture the Host never acted on.
   presentation.capture(2, element as unknown as HTMLElement, 0);
   paintRect(element, 130, 50);
-  assert.equal(presentation.attach(2, element as unknown as HTMLElement, MOTION.structureDeadlineMs + 1, false), null);
+  assert.equal(presentation.attach(2, MOTION.structureDeadlineMs + 1, false), null);
   assert.equal(element.style.transform, "");
 
   presentation.capture(3, element as unknown as HTMLElement, 0);
-  assert.equal(presentation.attach(3, element as unknown as HTMLElement, 4, true), null);
+  assert.equal(presentation.attach(3, 4, true), null);
   assert.equal(element.style.transform, "");
 
   // A Host that owns its own inline transform keeps it.
   element.style.transform = "translateX(2px)";
   presentation.capture(4, element as unknown as HTMLElement, 0);
-  assert.equal(presentation.attach(4, element as unknown as HTMLElement, 4, false), null);
+  assert.equal(presentation.attach(4, 4, false), null);
   assert.equal(element.style.transform, "translateX(2px)");
 }));
 
@@ -89,7 +88,7 @@ test("a superseding capture continues from the current visual position with one 
   const presentation = createStructurePresentation();
   presentation.capture(1, element as unknown as HTMLElement, 0);
   paintRect(element, 130, 50);
-  assert.deepEqual(presentation.attach(1, element as unknown as HTMLElement, 4, false), { x: -30, y: 0 });
+  assert.deepEqual(presentation.attach(1, 4, false), { x: -30, y: 0 });
 
   // Part way through, the Host layout is where it is and the element draws the
   // offset on top of it.
@@ -99,7 +98,7 @@ test("a superseding capture continues from the current visual position with one 
 
   // A second reparent: the new handoff has to keep the visual position.
   paintRect(element, 160 + running.x, 50);
-  const second = presentation.attach(2, element as unknown as HTMLElement, 44, false)!;
+  const second = presentation.attach(2, 44, false)!;
   assert.ok(Math.abs(second.x - (running.x - 30)) < 0.001, String(second.x));
   // One owner, one transform value: no accumulation across handoffs.
   assert.equal(element.style.transform, `translate(${second.x}px, 0px)`);
@@ -115,9 +114,9 @@ test("a structural capture is consumed only by its matching generation", () => w
   presentation.capture(41, element as unknown as HTMLElement, 0);
   paintRect(element, 130, 50);
 
-  assert.equal(presentation.attach(42, element as unknown as HTMLElement, 4, false), null);
+  assert.equal(presentation.attach(42, 4, false), null);
   assert.equal(element.style.transform, "");
-  assert.deepEqual(presentation.attach(41, element as unknown as HTMLElement, 5, false), { x: -30, y: 0 });
+  assert.deepEqual(presentation.attach(41, 5, false), { x: -30, y: 0 });
   presentation.cancel();
 }));
 
@@ -130,19 +129,46 @@ test("Host transform ownership fails closed and mid-motion takeover wins", () =>
   element.style.computedTransform = "matrix(1, 0, 0, 1, 2, 0)";
   presentation.capture(1, element as unknown as HTMLElement, 0);
   paintRect(element, 130, 50);
-  assert.equal(presentation.attach(1, element as unknown as HTMLElement, 4, false), null);
+  assert.equal(presentation.attach(1, 4, false), null);
   assert.equal(element.style.transform, "");
 
   element.style.computedTransform = "none";
   paintRect(element, 100, 50);
   presentation.capture(2, element as unknown as HTMLElement, 10);
   paintRect(element, 130, 50);
-  assert.deepEqual(presentation.attach(2, element as unknown as HTMLElement, 14, false), { x: -30, y: 0 });
+  assert.deepEqual(presentation.attach(2, 14, false), { x: -30, y: 0 });
   element.style.transform = "scale(1.01)";
   assert.equal(presentation.step(30, false), null);
   assert.equal(element.style.transform, "scale(1.01)");
   presentation.cancel();
   assert.equal(element.style.transform, "scale(1.01)");
+}));
+
+test("CSSOM-normalized fractional transforms remain owned", () => withPresentation(() => {
+  const element = new PaintElement();
+  element.dataset.nodeId = "item";
+  paintRect(element, 100, 50);
+  let normalized = "";
+  Object.defineProperty(element.style, "transform", {
+    configurable: true,
+    get: () => normalized,
+    set: (value: string) => {
+      normalized = value.replace(/(-?\d+\.\d{4})\d+(?=px)/g, "$1");
+    },
+  });
+  const presentation = createStructurePresentation();
+  presentation.capture(1, element as unknown as HTMLElement, 0);
+  paintRect(element, 130, 50);
+  assert.deepEqual(presentation.attach(1, 4, false), { x: -30, y: 0 });
+
+  presentation.step(36, false);
+  const moving = presentation.step(52, false);
+  assert.ok(moving);
+  assert.notEqual(normalized, "");
+  assert.notEqual(presentation.step(68, false), null);
+
+  presentation.cancel();
+  assert.equal(normalized, "");
 }));
 
 test("matching keydown and beforeinput share one structural generation", () => withPresentation(() => {

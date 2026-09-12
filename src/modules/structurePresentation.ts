@@ -89,11 +89,14 @@ export function createStructurePresentation(debug?: DebugRecorder) {
     const x = offset.x.value, y = offset.y.value;
     const value = x === 0 && y === 0 ? "" : "translate(" + x + "px, " + y + "px)";
     subject.style.transform = value;
-    ownedTransform = value;
+    // CSSOM may canonicalize fractional transform text on assignment. Keep the
+    // representation the browser actually owns so a later check distinguishes
+    // an external writer from our own normalized value.
+    ownedTransform = subject.style.transform;
     return true;
   }
-  function refusal(pending: Armed, fallback: HTMLElement | null, now: number, reducedMotion: boolean): string | null {
-    const target = pending.element.isConnected ? pending.element : fallback;
+  function refusal(pending: Armed, now: number, reducedMotion: boolean): string | null {
+    const target = pending.element;
     if (now - pending.at > MOTION.structureDeadlineMs) return "stale";
     if (reducedMotion) return "reduced-motion";
     if (!target?.isConnected) return "no-subject";
@@ -128,7 +131,7 @@ export function createStructurePresentation(debug?: DebugRecorder) {
         host: { x: rect.left - carriedX, y: rect.top - carriedY } };
     },
     /** Structural evidence may consume only the capture from its generation. */
-    attach(generation: number, fallback: HTMLElement | null, now: number, reducedMotion: boolean): StructuralOffset | null {
+    attach(generation: number, now: number, reducedMotion: boolean): StructuralOffset | null {
       const pending = armed;
       if (!pending) {
         // Dev-only bounded evidence: at most one rect read per later structural
@@ -157,7 +160,7 @@ export function createStructurePresentation(debug?: DebugRecorder) {
       const velocityX = carrying ? offset.x.velocity : 0;
       const velocityY = carrying ? offset.y.velocity : 0;
       const carriedLast = carrying ? last : null;
-      const reason = refusal(pending, fallback, now, reducedMotion);
+      const reason = refusal(pending, now, reducedMotion);
       if (reason) {
         refuse(reason, generation);
         return null;
