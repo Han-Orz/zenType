@@ -89,11 +89,11 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
   }
 
   /**
-   * The Host root a list indent actually moves. A list item is reparented as a
-   * whole, so its marker and any nested list have to travel with the text.
+   * Structural displacement is list presentation, not generic Tab animation.
+   * If the live caret block is not inside a NodeListItem, fail closed.
    */
   function structuralMoveRoot(block: HTMLElement | null): HTMLElement | null {
-    return block ? block.closest<HTMLElement>('[data-type="NodeListItem"]') ?? block : null;
+    return block?.closest<HTMLElement>('[data-type="NodeListItem"]') ?? null;
   }
 
   /**
@@ -154,7 +154,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     if (changes.kind === "text" || changes.kind === "representation") targetAuthorityPending = true;
     if (observedEditor && !blocked && !pointerDown) {
       const now = performance.now();
-      structure.mutation(observedEditor, now, changes.kind, changes.textOnly);
+      const authority = structure.mutation(observedEditor, now, changes.kind, changes.textOnly);
       if (changes.kind === "representation" || changes.kind === "structural") {
         // A structural topology change can replace the destination element under
         // the same semantic key while its Ripple role changes from dim neighbour
@@ -167,11 +167,10 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         const carry = ripple.rebind(changes.added, focusedKey);
         ripple.freeze();
         carry();
-        // A list reparent moves Host DOM. Attaching here, inside the mutation
-        // delivery, is what keeps the displacement in place before the first
-        // frame can paint the Host's new layout.
-        if (changes.kind === "structural") {
-          presentation.attach(structuralMoveRoot(focused?.block ?? null), now, reducedMotion.matches);
+        // A list reparent moves Host DOM. Structural Presentation consumes only
+        // the Structural Contract generation that classified this very delivery.
+        if (changes.kind === "structural" && authority) {
+          presentation.attach(authority.generation, structuralMoveRoot(focused?.block ?? null), now, reducedMotion.matches);
         }
       }
     }
@@ -400,6 +399,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
             fromBlockKey: handoff?.fromBlockKey ?? null, toBlockKey: handoff?.toBlockKey ?? null,
           });
         }
+        if (decision === "ordinary") presentation.abandon();
         if (decision === "ordinary" && next?.caret && (targetAuthorityPending || frame === null)) {
           authoritativeTarget = true;
           targetAuthorityPending = false;
@@ -572,16 +572,21 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         blocked = false;
         activate(editable);
         contentDirty = true;
-        if (event.type === "beforeinput" && /^(insertParagraph|insertLineBreak|formatIndent|formatOutdent|historyUndo|historyRedo|deleteByCut|deleteByDrag)$/.test((event as InputEvent).inputType)) {
-          const editor = editable.closest<HTMLElement>(".protyle-wysiwyg")!;
-          structure.intent(editor, performance.now(), "other", blockKeyForStructuralIntent(editable, editor));
+        {
+          const now = performance.now();
+          if (event.type === "beforeinput" && /^(insertParagraph|insertLineBreak|formatIndent|formatOutdent|historyUndo|historyRedo|deleteByCut|deleteByDrag)$/.test((event as InputEvent).inputType)) {
+            const editor = editable.closest<HTMLElement>(".protyle-wysiwyg")!;
+            const inputType = (event as InputEvent).inputType;
+            const intent = inputType === "formatIndent" ? "indent" : inputType === "formatOutdent" ? "outdent" : "other";
+            structure.intent(editor, now, intent, blockKeyForStructuralIntent(editable, editor), "beforeinput");
+          }
+          if (event.type === "input") {
+            cursorTargetIntent = "typing";
+            targetAuthorityPending = true;
+            structure.input();
+          }
+          structure.activity(now, event.type);
         }
-        if (event.type === "input") {
-          cursorTargetIntent = "typing";
-          targetAuthorityPending = true;
-          structure.input();
-        }
-        structure.activity(performance.now(), event.type);
         if ((event as InputEvent).isComposing) composingEditor = editable.closest<HTMLElement>(".protyle-wysiwyg");
         break;
       case "keydown": {
@@ -605,12 +610,12 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           const intent = key.key === "Backspace" ? "backspace" : key.key === "Delete" ? "delete"
             : key.key === "Tab" ? key.shiftKey ? "outdent" : "indent" : "other";
           const editor = editable.closest<HTMLElement>(".protyle-wysiwyg")!;
-          structure.intent(editor, now, intent, blockKeyForStructuralIntent(editable, editor));
+          const generation = structure.intent(editor, now, intent, blockKeyForStructuralIntent(editable, editor), "keydown");
           // A list indent reparents Host DOM, so the position the user is looking
           // at has to be read before the mutation. This is the only geometry read
-          // the structural presentation adds, and it is bounded to one element.
+          // the structural presentation adds, and it is bounded to one list item.
           if (intent === "indent" || intent === "outdent") {
-            presentation.capture(structuralMoveRoot(captureCollapsedSelection()?.block ?? null), now);
+            presentation.capture(generation, structuralMoveRoot(captureCollapsedSelection()?.block ?? null), now);
           }
         }
         break;

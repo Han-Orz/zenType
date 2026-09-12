@@ -4,7 +4,8 @@ import type { DebugRecorder } from "./debug/types";
 
 export type MutationKind = "text" | "representation" | "structural" | "overflow";
 export const STRUCTURE_LIMITS = { records: 256, nodes: 2048, depth: 64 } as const;
-type IntentKind = "backspace" | "delete" | "indent" | "outdent" | "other";
+export type StructureIntentKind = "backspace" | "delete" | "indent" | "outdent" | "other";
+type IntentSource = "direct" | "keydown" | "beforeinput";
 export type StructureDecision = "ordinary" | "wait" | "geometry" | "commit" | "timeout" | "overflow";
 
 export interface StructuralHandoff {
@@ -16,13 +17,19 @@ export interface StructuralHandoff {
   semanticReady: boolean;
 }
 
+export interface StructuralMutationAuthority {
+  generation: number;
+  intent: StructureIntentKind;
+}
+
 interface PendingStructure {
   generation: number;
   editor: HTMLElement;
   start: number;
   activity: number;
   evidence: "structural" | "overflow" | null;
-  intent: IntentKind;
+  intent: StructureIntentKind;
+  intentSource: IntentSource;
   inputObserved: boolean;
   nonStructuralObserved: boolean;
   textObserved: boolean;
@@ -93,7 +100,7 @@ export function classifyMutations(records: readonly MutationRecord[]) {
   return { kind, added, textOnly };
 }
 
-function hasSafeOrdinaryTextPosition(frame: EditorFrame | null, intent: IntentKind): boolean {
+function hasSafeOrdinaryTextPosition(frame: EditorFrame | null, intent: StructureIntentKind): boolean {
   if (intent !== "backspace" && intent !== "delete") return false;
   if (!frame || frame.selection !== "caret" || frame.caretless || !frame.caret ||
       !frame.editable || !frame.block || !frame.range?.collapsed) return false;
@@ -134,9 +141,9 @@ export function createStructureGate(debug?: DebugRecorder) {
     publishedHandoff = null;
   }
   function createPending(editor: HTMLElement, now: number, evidence: "structural" | "overflow" | null,
-    intent: IntentKind, fromBlockKey?: string | null): PendingStructure {
+    intent: StructureIntentKind, intentSource: IntentSource, fromBlockKey?: string | null): PendingStructure {
     const generation = ++nextGeneration;
-    return { generation, editor, start: now, activity: now, evidence, intent,
+    return { generation, editor, start: now, activity: now, evidence, intent, intentSource,
       inputObserved: false, nonStructuralObserved: false, textObserved: false, replacementObserved: false,
       stable: 0, geometryPublished: false, caret: null,
       handoff: { generation, topologyChanged: evidence === "structural",
@@ -145,16 +152,28 @@ export function createStructureGate(debug?: DebugRecorder) {
   }
   function begin(editor: HTMLElement, now: number, evidence: "structural" | "overflow" | null) {
     if (pending?.editor !== editor) {
-      pending = createPending(editor, now, evidence, "other");
+      pending = createPending(editor, now, evidence, "other", "direct");
       publishedHandoff = null;
       ZENTYPE_DEBUG: debug?.record("session", evidence ? "structure-begin" : "structure-intent",
         { now, generation: pending.generation, intent: pending.intent,
           fromBlockKey: pending.handoff.fromBlockKey });
     }
   }
-  function intent(editor: HTMLElement, now: number, kind: IntentKind = "other", fromBlockKey?: string | null) {
+  function intent(editor: HTMLElement, now: number, kind: StructureIntentKind = "other",
+    fromBlockKey?: string | null, source: IntentSource = "direct"): number {
+    // A browser may surface one physical edit twice: first keydown, then the
+    // matching beforeinput. That second signal confirms the existing intent; it
+    // must not supersede the structural generation it belongs to. A beforeinput
+    // without a matching keydown still starts its own generation.
+    if (source === "beforeinput" && pending?.editor === editor && pending.intent === kind && pending.intentSource === "keydown") {
+      pending.intentSource = "beforeinput";
+      ZENTYPE_DEBUG: debug?.record("session", "structure-intent-matched", {
+        now, generation: pending.generation, intent: kind,
+      });
+      return pending.generation;
+    }
     const previous = pending?.editor === editor ? pending : null;
-    pending = createPending(editor, now, null, kind, fromBlockKey);
+    pending = createPending(editor, now, null, kind, source, fromBlockKey);
     publishedHandoff = null;
     ZENTYPE_DEBUG: if (previous) {
       debug?.record("session", "structure-generation-superseded", {
@@ -167,6 +186,7 @@ export function createStructureGate(debug?: DebugRecorder) {
         fromBlockKey: pending.handoff.fromBlockKey,
       });
     }
+    return pending.generation;
   }
   function activity(now: number, reason: string) {
     if (!pending) return;
@@ -182,7 +202,7 @@ export function createStructureGate(debug?: DebugRecorder) {
   }
   return {
     intent,
-    mutation(editor: HTMLElement, now: number, kind: MutationKind, textOnly = false) {
+    mutation(editor: HTMLElement, now: number, kind: MutationKind, textOnly = false): StructuralMutationAuthority | null {
       if (kind === "structural" || kind === "overflow") {
         begin(editor, now, kind);
         pending!.evidence = kind;
@@ -193,7 +213,9 @@ export function createStructureGate(debug?: DebugRecorder) {
         if (kind === "text" && textOnly) pending.textObserved = true;
         else pending.replacementObserved = true;
       }
+      const authority = pending ? { generation: pending.generation, intent: pending.intent } : null;
       activity(now, kind);
+      return authority;
     },
     activity,
     input() { if (pending) pending.inputObserved = true; },

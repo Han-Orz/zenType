@@ -25,4 +25,5 @@ jobs:
       - run: pnpm test
       - run: pnpm run build
       - run: pnpm run verify:prod
+      - run: pnpm run build:dev
       - run: git diff --check

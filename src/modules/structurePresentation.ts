@@ -9,61 +9,87 @@ export interface StructuralOffset {
 }
 
 interface Armed {
+  generation: number;
   element: HTMLElement;
   key: string | undefined;
   at: number;
-  visual: { x: number; y: number };
+  host: { x: number; y: number };
 }
 
 /**
  * The single presentation owner of one structural displacement.
  *
- * The Host owns the layout; this owns only the transform that holds a reparented
- * subject where the user last saw it and then closes the gap to the Host's
- * committed geometry. One physical displacement therefore has exactly one owner,
- * and the Cursor consumes that same offset instead of chasing it a second time.
+ * The Host owns layout. Structure owns the generation. This consumer may only
+ * attach a capture to structural evidence from that exact generation; semantic
+ * continuity still has to pass the visual-key and transform-ownership checks.
  *
  * `capture` runs before the Host mutation, `attach` runs inside the mutation
  * delivery so no frame can paint the new layout before the transform exists, and
- * `step` advances on the shared Session frame. Nothing here samples the document,
- * schedules a frame or keeps its own clock.
+ * `step` advances on the shared Session frame. Nothing here schedules a frame,
+ * creates a generation or keeps a second business clock.
  */
 export function createStructurePresentation(debug?: DebugRecorder) {
   let armed: Armed | null = null;
   let subject: HTMLElement | null = null;
-  let origin = "";
-  let held = false;
+  let ownerGeneration: number | null = null;
+  let ownedTransform: string | null = null;
+  let host: { x: number; y: number } | null = null;
   let last: number | null = null;
   const offset = { x: { value: 0, velocity: 0 } as CriticalState, y: { value: 0, velocity: 0 } as CriticalState };
 
-  function apply() {
-    if (!subject) return;
-    const x = offset.x.value, y = offset.y.value;
-    subject.style.transform = x === 0 && y === 0 ? origin : "translate(" + x + "px, " + y + "px)";
-  }
-  function release() {
-    if (subject && subject.style.transform !== origin) subject.style.transform = origin;
+  function clearRunning() {
     subject = null;
-    origin = "";
-    held = false;
+    ownerGeneration = null;
+    ownedTransform = null;
+    host = null;
     last = null;
     offset.x.value = offset.x.velocity = offset.y.value = offset.y.velocity = 0;
+  }
+  function release() {
+    // Restore only the exact inline value zenType last wrote. If the Host took
+    // transform ownership during the motion, its value wins and is untouched.
+    if (subject && ownedTransform !== null && subject.style.transform === ownedTransform) subject.style.transform = "";
+    clearRunning();
   }
   function record(reason: string) {
     ZENTYPE_DEBUG: debug?.record("session", "structural-presentation-settle", { reason });
   }
-  function refuse(reason: string) {
-    ZENTYPE_DEBUG: debug?.record("session", "structural-presentation-refused", { reason });
+  function refuse(reason: string, generation?: number) {
+    ZENTYPE_DEBUG: debug?.record("session", "structural-presentation-refused", { reason, generation: generation ?? null });
   }
-  /** Take ownership of one element's transform; refuse a Host that owns its own. */
+  function hostOwnsTransform(element: HTMLElement): boolean {
+    if (element.style.transform) return true;
+    const computed = getComputedStyle(element).transform;
+    return !!computed && computed !== "none";
+  }
+  /** Take ownership of one element's transform; refuse a Host/theme owner. */
   function adopt(element: HTMLElement | null): boolean {
-    if (subject === element) return true;
+    if (subject === element) {
+      if (!element?.isConnected) return false;
+      if (ownedTransform !== null && element.style.transform !== ownedTransform) {
+        record("host-transform-takeover");
+        clearRunning();
+        return false;
+      }
+      return true;
+    }
+    if (!element?.isConnected || hostOwnsTransform(element)) return false;
     release();
-    // A Host or theme that already sets an inline transform keeps it: this
-    // presentation never overwrites a transform it does not own.
-    if (!element?.isConnected || element.style.transform) return false;
     subject = element;
-    origin = element.style.transform;
+    ownedTransform = element.style.transform;
+    return true;
+  }
+  function apply(): boolean {
+    if (!subject) return false;
+    if (ownedTransform !== null && subject.style.transform !== ownedTransform) {
+      record("host-transform-takeover");
+      clearRunning();
+      return false;
+    }
+    const x = offset.x.value, y = offset.y.value;
+    const value = x === 0 && y === 0 ? "" : "translate(" + x + "px, " + y + "px)";
+    subject.style.transform = value;
+    ownedTransform = value;
     return true;
   }
   function refusal(pending: Armed, fallback: HTMLElement | null, now: number, reducedMotion: boolean): string | null {
@@ -75,58 +101,91 @@ export function createStructurePresentation(debug?: DebugRecorder) {
     return adopt(target) ? null : "host-transform";
   }
   return {
-    /** Host mutation has not happened yet: remember where the subject is drawn. */
-    capture(element: HTMLElement | null, now: number) {
+    /** Host mutation has not happened yet: bind one list item to one generation. */
+    capture(generation: number, element: HTMLElement | null, now: number) {
       if (!element?.isConnected) {
-        if (armed || subject) { record("no-capture-subject"); release(); }
         armed = null;
+        refuse("no-capture-subject", generation);
         return;
       }
-      // Only a displacement already running on this subject keeps its ownership.
-      // Merely arming must not take the transform, or a Session frame would be
-      // queued for an offset that is still exactly zero.
+      // A Host/theme transform fails closed before the current owner is lost.
+      if (subject === element && ownedTransform !== null && element.style.transform !== ownedTransform) {
+        record("host-transform-takeover");
+        clearRunning();
+      }
+      if (subject !== element && hostOwnsTransform(element)) {
+        armed = null;
+        refuse("host-transform", generation);
+        return;
+      }
       if (subject && subject !== element) { record("subject-change"); release(); }
-      if (subject === element) held = true;
+      const carriedX = subject === element ? offset.x.value : 0;
+      const carriedY = subject === element ? offset.y.value : 0;
       const rect = element.getBoundingClientRect();
-      armed = { element, key: visualKey(element), at: now, visual: { x: rect.left, y: rect.top } };
+      // Store Host geometry, not transformed visual geometry. A running earlier
+      // displacement may keep moving until this generation receives evidence.
+      armed = { generation, element, key: visualKey(element), at: now,
+        host: { x: rect.left - carriedX, y: rect.top - carriedY } };
     },
-    /**
-     * Mutation delivery. The Host moves the item node itself, so the captured
-     * element is normally still the subject; `fallback` only covers a Host that
-     * replaced it, and a same-key replacement still has to prove continuity.
-     * The live Selection is deliberately not the primary source here: SiYuan
-     * restores it through a `<wbr>` that outdent resolves after this delivery.
-     */
-    attach(fallback: HTMLElement | null, now: number, reducedMotion: boolean): StructuralOffset | null {
+    /** Structural evidence may consume only the capture from its generation. */
+    attach(generation: number, fallback: HTMLElement | null, now: number, reducedMotion: boolean): StructuralOffset | null {
       const pending = armed;
-      if (!pending) return null;
-      armed = null;
-      const reason = refusal(pending, fallback, now, reducedMotion);
-      if (reason) {
-        // A displacement already running keeps running; only this new capture is
-        // dropped, so a refused handoff never jumps the subject.
-        refuse(reason);
-        held = false;
+      if (!pending) {
+        // Dev-only bounded evidence: at most one rect read per later structural
+        // delivery, never a per-frame sampler. This decides whether rebase exists.
+        ZENTYPE_DEBUG: if (debug && subject && ownerGeneration === generation && subject.isConnected) {
+          const rect = subject.getBoundingClientRect();
+          const nextHost = { x: rect.left - offset.x.value, y: rect.top - offset.y.value };
+          debug.record("session", "structural-presentation-repeat-evidence", {
+            generation, key: visualKey(subject) ?? null,
+            hostDx: host ? nextHost.x - host.x : null,
+            hostDy: host ? nextHost.y - host.y : null,
+            dx: offset.x.value, dy: offset.y.value,
+          });
+        }
         return null;
       }
-      held = false;
-      // Separate Host layout from what this presentation is drawing, then hold
-      // the visual position the user is looking at across the Host's move.
+      if (pending.generation !== generation) {
+        refuse("generation-mismatch", generation);
+        return null;
+      }
+      armed = null;
+
+      const carrying = subject === pending.element;
+      const carriedX = carrying ? offset.x.value : 0;
+      const carriedY = carrying ? offset.y.value : 0;
+      const velocityX = carrying ? offset.x.velocity : 0;
+      const velocityY = carrying ? offset.y.velocity : 0;
+      const carriedLast = carrying ? last : null;
+      const reason = refusal(pending, fallback, now, reducedMotion);
+      if (reason) {
+        refuse(reason, generation);
+        return null;
+      }
+
       const rect = subject!.getBoundingClientRect();
-      const x = pending.visual.x - (rect.left - offset.x.value);
-      const y = pending.visual.y - (rect.top - offset.y.value);
-      // Below the settled-caret threshold there is no displacement to present.
+      const transformX = carrying && subject === pending.element ? carriedX : 0;
+      const transformY = carrying && subject === pending.element ? carriedY : 0;
+      const nextHost = { x: rect.left - transformX, y: rect.top - transformY };
+      const x = pending.host.x + carriedX - nextHost.x;
+      const y = pending.host.y + carriedY - nextHost.y;
       if (Math.abs(x) <= MOTION.cursorSettlePx && Math.abs(y) <= MOTION.cursorSettlePx) {
-        refuse("no-displacement");
+        refuse("no-displacement", generation);
         release();
         return null;
       }
+
+      ownerGeneration = generation;
+      host = nextHost;
       offset.x.value = x;
       offset.y.value = y;
-      offset.x.velocity = offset.y.velocity = 0;
-      last = null;
-      apply();
-      ZENTYPE_DEBUG: debug?.record("session", "structural-presentation-begin", { key: pending.key ?? null, dx: x, dy: y });
+      offset.x.velocity = velocityX;
+      offset.y.velocity = velocityY;
+      last = carriedLast;
+      if (!apply()) return null;
+      ZENTYPE_DEBUG: debug?.record("session", "structural-presentation-begin", {
+        generation, key: pending.key ?? null, dx: x, dy: y,
+      });
       return { x, y };
     },
     /** One Session frame; the returned offset is what this frame presents. */
@@ -135,34 +194,20 @@ export function createStructurePresentation(debug?: DebugRecorder) {
       if (!subject.isConnected) { record("detached"); release(); return null; }
       const elapsed = last === null ? 0 : Math.max(0, now - last);
       last = now;
-      if (!held) {
-        // A structural displacement is its own personality dimension: it is not
-        // the block alpha timescale, and it settles once the remaining
-        // displacement is below the same sub-pixel threshold the cursor uses.
-        const response = reducedMotion ? 0 : MOTION.structuralMoveResponseMs;
-        // A renderer can stall for far longer than a frame while the window is
-        // still visible. Consuming that gap in one step would teleport the
-        // subject and leave the caret presentation behind, so one frame may
-        // advance at most a quarter of the response.
-        const advance = Math.min(elapsed, response / 4);
-        const settledX = stepCritical(offset.x, 0, advance, response, MOTION.cursorSettlePx);
-        const settledY = stepCritical(offset.y, 0, advance, response, MOTION.cursorSettlePx);
-        if (settledX && settledY) { record("settled"); release(); return null; }
-      }
-      apply();
+      // Presentation pause/resume policy, not a change to the analytic motion law.
+      const response = reducedMotion ? 0 : MOTION.structuralMoveResponseMs;
+      const advance = Math.min(elapsed, response / 4);
+      const settledX = stepCritical(offset.x, 0, advance, response, MOTION.cursorSettlePx);
+      const settledY = stepCritical(offset.y, 0, advance, response, MOTION.cursorSettlePx);
+      if (settledX && settledY) { record("settled"); release(); return null; }
+      if (!apply()) return null;
       const x = offset.x.value, y = offset.y.value;
       return x === 0 && y === 0 ? null : { x, y };
     },
-    /**
-     * Drop a capture whose own structural generation ended without acting. A
-     * displacement already running belongs to an earlier generation and keeps
-     * converging, because killing it mid-flight is exactly the jump this exists
-     * to avoid.
-     */
+    /** Drop only the unconsumed capture; a running displacement keeps converging. */
     abandon() {
       if (!armed) return;
       armed = null;
-      held = false;
       record("abandoned");
     },
     cancel() {
