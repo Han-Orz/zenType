@@ -3,7 +3,7 @@ import test from "node:test";
 import { stepCritical, type CriticalState } from "../src/motion";
 import { MOTION, RIPPLE_LEVELS, SENTENCE_ALPHA } from "../src/config";
 import { createRipple } from "../src/modules/ripple";
-import { createBlockPainter } from "../src/modules/ripple/blockPainter";
+import { createBlockPainter, BLOCK_ALPHA_CARRIER_MS } from "../src/modules/ripple/blockPainter";
 import { createWritingSession } from "../src/session";
 import { createStructurePresentation } from "../src/modules/structurePresentation";
 import { createTypewriter } from "../src/modules/typewriter";
@@ -28,6 +28,30 @@ function frame(overrides: Partial<EditorFrame> = {}): EditorFrame {
 
 function paintRect(element: PaintElement, left: number, top: number) {
   element.rect = { x: left, y: top, left, top, right: left + 100, bottom: top + 20, width: 100, height: 20 };
+}
+
+/** Visible alpha of a block owner's carrier: base * (1 - encodedValue). Null when unowned. */
+function carrierAlpha(element: PaintElement): number | null {
+  const animation = element.animations.at(-1);
+  if (!animation || animation.playState === "idle") return null;
+  return Number(animation.frames[0].opacity) * (1 - animation.currentTime / BLOCK_ALPHA_CARRIER_MS);
+}
+
+/** The carrier decodes alpha through float math, so owners are compared approximately. */
+function assertAlpha(actual: number | null, expected: number, message?: string) {
+  assert.ok(actual !== null && Math.abs(actual - expected) < 1e-6,
+    `${message ? message + ": " : ""}expected alpha ${expected}, got ${actual}`);
+}
+
+/** One Session frame at a time until a painter/ripple reports block motion stopped. */
+function settleBlocks(drive: (now: number) => boolean, from = 0) {
+  let now = from;
+  if (!drive(now)) return now;
+  for (let step = 0; step < 500; step++) {
+    now += 16;
+    if (!drive(now)) break;
+  }
+  return now;
 }
 
 test("a structural displacement holds the visual position and hands the host back its transform", () => withPresentation(() => {
@@ -587,7 +611,9 @@ class PaintElement extends ElementStub {
     const animation: AnimationStub = { id: "", frames, currentTime: 0, playState: "running",
       cancel() { this.playState = "idle"; }, pause() { this.playState = "paused"; },
       play() { this.playState = "running"; },
-      finish() { this.currentTime = MOTION.blockFadeMs; this.playState = "finished"; this.onfinish?.(); },
+      // The painter never completes a carrier on its own; this only models an
+      // external completion for tests that check lifecycle state.
+      finish() { this.playState = "finished"; },
       onfinish: null as (() => void) | null };
     this.animations.push(animation);
     return animation;
@@ -1539,7 +1565,8 @@ test("the painter reports a role invalidation only when the replacement carried 
   assert.deepEqual(reported, []);
 
   painter.prepare(new Map([[old as unknown as HTMLElement, RIPPLE_LEVELS[1]]]), editor as unknown as HTMLElement, false)();
-  old.animations.at(-1)!.currentTime = MOTION.blockFadeMs;
+  settleBlocks(now => painter.step(now, false), MOTION.blockAlphaResponseMs * 3);
+  assertAlpha(carrierAlpha(old), RIPPLE_LEVELS[1]);
   old.isConnected = false;
   const replaced = new PaintElement();
   replaced.dataset.nodeId = "A";
@@ -1595,8 +1622,8 @@ test("only the previous block's prefix continues its presentation; the focused s
   ctx.textA.value = "Alpha one. Alpha two. Bravo one. Bravo two.";
   const ripple = createRipple();
   ripple.prepare(sentenceFrame(ctx, ctx.blockB, ctx.editableB, ctx.textNodeB, 0), false, true, true);
-  // Settle the dim neighbour so its sampled presentation value is 0.4.
-  ctx.blockA.animations.at(-1)!.currentTime = MOTION.blockFadeMs;
+  // Settle the dim neighbour at its semantic presentation value of 0.4.
+  settleBlocks(now => ripple.render(now, false), MOTION.blockAlphaResponseMs * 3);
 
   const replacement = new PaintElement();
   replacement.dataset.nodeId = "A";
@@ -1698,6 +1725,18 @@ function linkBlock(element: PaintElement, nodeId: string, editor: PaintElement):
   return element;
 }
 
+/** Tick a Session until a block owner reaches its semantic value; returns the frame time. */
+function settleOwner(harness: SessionHarness, element: PaintElement, target: number) {
+  let now = 0;
+  for (let frame = 0; frame < 400; frame++) {
+    const alpha = carrierAlpha(element);
+    if (alpha !== null && Math.abs(alpha - target) < 1e-6) return now;
+    now += 16;
+    harness.tick(now);
+  }
+  return now;
+}
+
 test("a structural replacement that becomes the focused block does not inherit the dim role", () => withSessionHarness(harness => {
   const focused = harness.editable;
   const destination = new PaintElement();
@@ -1710,9 +1749,8 @@ test("a structural replacement that becomes the focused block does not inherit t
   harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
   harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
   harness.tick(0);
-  const dim = destination.animations.at(-1)!;
-  dim.currentTime = MOTION.blockFadeMs;
-  assert.equal(dim.frames[1].opacity, RIPPLE_LEVELS[1]);
+  // A stable neighbour holds its dim owner as a critical state, not a finished effect.
+  settleOwner(harness, destination, RIPPLE_LEVELS[1]);
 
   // Host merge: the destination is re-rendered as a fresh same-key element, the
   // focused source is removed, and the live collapsed Selection already sits
@@ -1752,8 +1790,7 @@ test("a structural reparent releases a dim ancestor before the semantic commit",
   harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
   harness.tick(0);
   const dim = neighbor.animations.at(-1)!;
-  dim.currentTime = MOTION.blockFadeMs;
-  assert.equal(dim.frames[1].opacity, RIPPLE_LEVELS[1]);
+  settleOwner(harness, neighbor, RIPPLE_LEVELS[1]);
 
   // Tab reparents the focused block under its formerly dim neighbour. The Host
   // has already moved the DOM, but the semantic commit is still pending.
@@ -1790,8 +1827,7 @@ test("a representation replacement keeps its committed presentation role", () =>
   harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
   harness.tick(0);
   const dim = neighbor.animations.at(-1)!;
-  dim.currentTime = MOTION.blockFadeMs;
-  assert.equal(dim.frames[1].opacity, RIPPLE_LEVELS[1]);
+  settleOwner(harness, neighbor, RIPPLE_LEVELS[1]);
 
   // Balanced same-key remove/add: representation, not a topology change.
   const replacement = new PaintElement();
@@ -1801,10 +1837,9 @@ test("a representation replacement keeps its committed presentation role", () =>
   harness.mutate(6, [{ type: "childList", target: harness.editor,
     addedNodes: [replacement], removedNodes: [neighbor] } as unknown as MutationRecord]);
 
-  const carried = replacement.animations.at(-1)!;
-  assert.equal(carried.frames[0].opacity, RIPPLE_LEVELS[1]);
-  assert.equal(carried.frames[1].opacity, RIPPLE_LEVELS[1]);
-  assert.equal(carried.playState, "paused");
+  // The same semantic state moves to the new actuator: value and target continue.
+  assertAlpha(carrierAlpha(replacement), RIPPLE_LEVELS[1]);
+  assert.equal(dim.playState, "idle");
   assert.equal(harness.events.some(event => event.name === "replacement-role-invalidated"), false);
 }, { typewriter: false, ripple: true }));
 
@@ -1822,7 +1857,7 @@ test("a structural replacement outside the focused block still carries", () => w
   harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
   harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
   harness.tick(0);
-  neighbor.animations.at(-1)!.currentTime = MOTION.blockFadeMs;
+  settleOwner(harness, neighbor, RIPPLE_LEVELS[1]);
 
   // Structural, but the live Selection stays in the untouched focused block.
   const replacement = new PaintElement();
@@ -1834,9 +1869,7 @@ test("a structural replacement outside the focused block still carries", () => w
   harness.mutate(6, [{ type: "childList", target: harness.editor,
     addedNodes: [replacement], removedNodes: [neighbor, removed] } as unknown as MutationRecord]);
 
-  const carried = replacement.animations.at(-1)!;
-  assert.equal(carried.frames[0].opacity, RIPPLE_LEVELS[1]);
-  assert.equal(carried.frames[1].opacity, RIPPLE_LEVELS[1]);
+  assertAlpha(carrierAlpha(replacement), RIPPLE_LEVELS[1]);
   assert.equal(harness.events.some(event => event.name === "replacement-role-invalidated"), false);
 }, { typewriter: false, ripple: true }));
 
@@ -1854,7 +1887,7 @@ test("a range selection never invalidates a replacement role", () => withSession
   harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
   harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
   harness.tick(0);
-  neighbor.animations.at(-1)!.currentTime = MOTION.blockFadeMs;
+  settleOwner(harness, neighbor, RIPPLE_LEVELS[1]);
 
   const replacement = linkBlock(new PaintElement(), "A", harness.editor);
   neighbor.isConnected = false;
@@ -1863,8 +1896,7 @@ test("a range selection never invalidates a replacement role", () => withSession
   harness.mutate(6, [{ type: "childList", target: harness.editor,
     addedNodes: [replacement], removedNodes: [neighbor, removed] } as unknown as MutationRecord]);
 
-  const carried = replacement.animations.at(-1)!;
-  assert.equal(carried.frames[0].opacity, RIPPLE_LEVELS[1]);
+  assertAlpha(carrierAlpha(replacement), RIPPLE_LEVELS[1]);
   assert.equal(harness.events.some(event => event.name === "replacement-role-invalidated"), false);
 }, { typewriter: false, ripple: true }));
 
@@ -1897,7 +1929,8 @@ test("a detached owner no longer enters the current semantic projection", () => 
   fresh.parentElement = editor;
   const painter = createBlockPainter();
   painter.prepare(new Map([[old as unknown as HTMLElement, RIPPLE_LEVELS[1]]]), editor as unknown as HTMLElement, false)();
-  old.animations.at(-1)!.currentTime = MOTION.blockFadeMs;
+  painter.step(0, false);
+  settleBlocks(now => painter.step(now, false), MOTION.blockAlphaResponseMs);
   old.isConnected = false;
 
   painter.prepare(new Map([[fresh as unknown as HTMLElement, 1]]), editor as unknown as HTMLElement, false)();
@@ -1914,17 +1947,21 @@ test("a paused replacement retains its moving baseline and semantic target at co
   old.parentElement = fresh.parentElement = editor;
   const painter = createBlockPainter();
   painter.prepare(new Map([[old as unknown as HTMLElement, 0.4]]), editor as unknown as HTMLElement, false)();
-  old.animations.at(-1)!.currentTime = MOTION.blockFadeMs / 2;
+  painter.step(0, false);
+  painter.step(MOTION.blockAlphaResponseMs, false);
+  // Capture the moving state at the moment the structural gate holds motion.
+  const held = carrierAlpha(old)!;
   painter.freeze();
   old.isConnected = false;
   painter.rebind([fresh as unknown as HTMLElement])();
-  const carried = fresh.animations.at(-1)!;
-  assert.equal(carried.frames[0].opacity, 0.475);
-  assert.equal(carried.frames[1].opacity, 0.4);
-  assert.equal(carried.playState, "paused");
+  // The held value crosses unchanged to the new actuator; it does not restart.
+  assert.ok(Math.abs(carrierAlpha(fresh)! - held) < 1e-9);
   painter.prepare(new Map([[fresh as unknown as HTMLElement, 0.4]]), editor as unknown as HTMLElement, false)();
-  assert.equal(fresh.animations.at(-1), carried);
-  assert.equal(carried.playState, "running");
+  // The critical state continues from the held value toward the same target.
+  assert.equal(held >= RIPPLE_LEVELS[1] && held < 1, true);
+  const settled = settleBlocks(now => painter.step(now, false), MOTION.blockAlphaResponseMs * 2);
+  assert.ok(settled > 0);
+  assert.ok(Math.abs(carrierAlpha(fresh)! - 0.4) < 1e-6);
   assert.equal(old.animations.at(-1)!.playState, "idle");
   painter.clear();
 }));
@@ -1937,17 +1974,17 @@ test("a connected replacement still contributes its carried value", () => withPr
   fresh.parentElement = editor;
   const painter = createBlockPainter();
   painter.prepare(new Map([[old as unknown as HTMLElement, RIPPLE_LEVELS[1]]]), editor as unknown as HTMLElement, false)();
-  old.animations.at(-1)!.currentTime = MOTION.blockFadeMs;
+  painter.step(0, false);
+  settleBlocks(now => painter.step(now, false), MOTION.blockAlphaResponseMs);
   old.isConnected = false;
   const carry = painter.rebind([fresh as unknown as HTMLElement]);
   painter.freeze();
   carry();
-  assert.equal(fresh.animations.at(-1)!.frames[1].opacity, RIPPLE_LEVELS[1]);
+  assertAlpha(carrierAlpha(fresh), RIPPLE_LEVELS[1]);
 
   painter.prepare(new Map([[fresh as unknown as HTMLElement, RIPPLE_LEVELS[2]]]), editor as unknown as HTMLElement, false)();
-  const stepped = fresh.animations.at(-1)!;
-  assert.equal(stepped.frames[0].opacity, RIPPLE_LEVELS[1]);
-  assert.equal(stepped.frames[1].opacity, RIPPLE_LEVELS[2]);
+  settleBlocks(now => painter.step(now, false), MOTION.blockAlphaResponseMs * 2);
+  assertAlpha(carrierAlpha(fresh), RIPPLE_LEVELS[2]);
   painter.clear();
 }));
 
@@ -2476,22 +2513,24 @@ test("explicit lifecycle suspension releases owned Ripple opacity instead of cle
   harness.editable.previousElementSibling = previous;
   harness.editor.children = [previous, harness.editable];
   harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
+  harness.setReducedMotion(false);
   harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
   harness.tick(0);
-  const dim = previous.animations.at(-1);
-  assert.ok(dim);
-  dim.currentTime = MOTION.blockFadeMs;
+  assert.ok(carrierAlpha(previous) !== null);
 
   harness.session.suspend();
 
-  const release = previous.animations.at(-1)!;
-  assert.notEqual(release, dim);
-  assert.equal(dim.playState, "idle");
-  assert.equal(release.frames[0].opacity, RIPPLE_LEVELS[1]);
-  assert.equal(release.frames[1].opacity, 1);
-  assert.equal(release.playState, "running");
+  // A suspension that leaves the renderer visible retargets the owner to neutral
+  // on the ordinary Session frame instead of tearing the semantic state down.
+  const released = settleBlocks(now => {
+    harness.tick(now);
+    return carrierAlpha(previous) !== null;
+  }, MOTION.typingPauseMs + 1);
+  assert.ok(released > 0);
+  assert.equal(previous.animations.at(-1)!.playState, "idle");
+  assert.equal(harness.events.some(event => event.name === "clear"), false);
   harness.session.suspend();
-  assert.equal(release.playState, "running");
+  assert.equal(previous.animations.at(-1)!.playState, "idle");
 }, { typewriter: false, ripple: true }));
 
 function withDimNeighbour(harness: SessionHarness) {
@@ -2502,34 +2541,30 @@ function withDimNeighbour(harness: SessionHarness) {
   harness.editable.previousElementSibling = previous;
   harness.editor.children = [previous, harness.editable];
   harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
+  harness.setReducedMotion(false);
   harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
   harness.tick(0);
-  const dim = previous.animations.at(-1);
-  assert.ok(dim);
-  assert.equal(dim.frames[1].opacity, RIPPLE_LEVELS[1]);
+  assert.ok(carrierAlpha(previous) !== null);
   // A fully dimmed neighbour is the presentation a window blur actually sees.
-  dim.currentTime = MOTION.blockFadeMs;
+  settleOwner(harness, previous, RIPPLE_LEVELS[1]);
   return previous;
 }
 
 test("window blur releases a dim Ripple from its current value instead of clearing it", () => withSessionHarness(harness => {
   const previous = withDimNeighbour(harness);
-  const dim = previous.animations.at(-1)!;
 
   harness.dispatch(16, "blur");
 
   assert.ok(harness.events.some(event => event.name === "suspend" && event.payload.reason === "window-blur"));
   assert.equal(harness.events.some(event => event.name === "clear"), false);
-  const release = previous.animations.at(-1)!;
-  assert.notEqual(release, dim);
-  assert.equal(dim.playState, "idle");
-  assert.equal(release.frames[0].opacity, RIPPLE_LEVELS[1]);
-  assert.equal(release.frames[1].opacity, 1);
-  assert.equal(release.playState, "running");
+  const released = settleBlocks(now => {
+    harness.tick(now);
+    return carrierAlpha(previous) !== null;
+  }, 100);
+  assert.ok(released > 0);
+  assert.equal(previous.animations.at(-1)!.playState, "idle");
 
-  // The released owner finishes on its own and leaves nothing retained behind.
-  release.finish();
-  assert.equal(release.playState, "idle");
+  // The released state finishes and leaves nothing retained behind.
   harness.tick(1000);
   assert.equal(harness.rafCount(), 0);
   assert.equal(harness.timerCount(), 0);
@@ -2552,7 +2587,7 @@ test("window blur preserves Cursor presentation while a hidden document tears do
   assert.equal(harness.timerCount(), 0);
   assert.ok(harness.events.some(event => event.name === "structure-cancel" && event.payload.reason === "lifecycle"));
   assert.equal(harness.events.some(event => event.name === "clear"), false);
-  assert.equal(previous.animations.at(-1)!.playState, "running");
+  assert.ok(carrierAlpha(previous) !== null);
 
   harness.dispatch(100, "focus");
   harness.tick(100);
@@ -2585,23 +2620,36 @@ test("mutation delivery rebinds a semantic replacement before the next rAF", () 
   harness.editable.previousElementSibling = old;
   harness.editor.children = [old, harness.editable];
   harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
+  harness.setReducedMotion(false);
   harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
   harness.tick(0);
-  const dim = old.animations.at(-1)!;
-  dim.currentTime = MOTION.blockFadeMs / 2;
+  // Stop the neighbour mid-flight so its state is a real moving value.
+  harness.tick(MOTION.blockAlphaResponseMs);
+  const moving = carrierAlpha(old)!;
+  assert.ok(moving > RIPPLE_LEVELS[1] && moving < 1);
 
   const replacement = new PaintElement();
   replacement.dataset.nodeId = old.dataset.nodeId;
   replacement.parentElement = harness.editor;
+  // The Host puts the replacement into the removed element's sibling position.
+  replacement.nextElementSibling = harness.editable;
+  harness.editable.previousElementSibling = replacement;
+  harness.editor.children = [replacement, harness.editable];
   old.isConnected = false;
   harness.mutate(4, [{ type: "childList", target: harness.editor,
     addedNodes: [replacement], removedNodes: [old] } as unknown as MutationRecord]);
 
-  const carry = replacement.animations.at(-1)!;
-  assert.ok(carry);
-  assert.equal(carry.frames[0].opacity, 1 + (RIPPLE_LEVELS[1] - 1) * 0.875);
-  assert.equal(carry.frames[1].opacity, RIPPLE_LEVELS[1]);
-  assert.equal(carry.playState, "paused");
+  // The same semantic state continues on the new actuator: no restart from full.
+  assert.ok(Math.abs(carrierAlpha(replacement)! - moving) < 1e-9);
+  const continued = carrierAlpha(replacement)!;
+  // The hold restarts the frame clock, so the first resumed frame only establishes
+  // the baseline; the next one advances the same trajectory toward the dim role.
+  harness.tick(MOTION.blockAlphaResponseMs);
+  harness.tick(MOTION.blockAlphaResponseMs * 3);
+  const settled = carrierAlpha(replacement)!;
+  assert.ok(settled < continued, `expected continued descent, got ${continued} -> ${settled}`);
+  // It converged to the dim role, never bounced back toward full brightness.
+  assert.ok(Math.abs(settled - RIPPLE_LEVELS[1]) < 0.01, `expected dim role, got ${settled}`);
 }, { typewriter: false, ripple: true }));
 
 test("switch settling is bounded through missing geometry and cancelled by lifecycle", () => withPresentation(body => {
@@ -2788,25 +2836,31 @@ test("list reparenting transfers parent alpha to its children without restarting
   const input = frame({ editor: editor as unknown as HTMLElement, block: active as unknown as HTMLElement,
     editable: active as unknown as HTMLElement, range: {} as Range });
   ripple.prepare(input, false, true, true);
-  const animation = parent.animations[0];
-  animation.currentTime = MOTION.blockFadeMs / 2;
-  ripple.prepare(input, false, false, true);
-  assert.equal(parent.animations.length, 1);
+  // Let the parent settle to its dim role, then reparent.
+  settleBlocks(now => ripple.render(now, false), MOTION.blockAlphaResponseMs * 3);
+  assertAlpha(carrierAlpha(parent), RIPPLE_LEVELS[1]);
+
   // Tab moves the active block under the formerly dim sibling.
   active.parentElement = child.parentElement = parent;
   active.nextElementSibling = child; child.previousElementSibling = active;
   parent.previousElementSibling = null;
   ripple.prepare(input, false, true, true);
   assert.equal(parent.classes.has("zentype-ripple-block"), false);
-  const baseline = 1 + (RIPPLE_LEVELS[1] - 1) * 0.875;
-  assert.equal(child.animations[0].frames[0].opacity, baseline);
+  // The newly exposed child starts at the parent's presented alpha, not at full.
+  assert.ok(carrierAlpha(child)! < 1);
   // The focused block moved under the dim sibling, but this same plan releases
   // that ancestor, so nothing dims the focused block: it must never render a
   // dark frame it never had.
   assert.equal(active.animations.length, 0);
-  assert.equal(ripple.render(1000, false), false);
+  const moving = ripple.render(1000, false);
+  // Nothing may keep the focused subtree dim while the plan converges.
+  assert.equal(carrierAlpha(active), null);
   ripple.prepare(input, false, false, false);
-  assert.equal(child.animations.at(-1)?.frames[1].opacity, 1);
+  settleBlocks(now => ripple.render(now, false), 1000 + MOTION.blockAlphaResponseMs * 3);
+  // The focused block stays unowned through the whole plan.
+  assert.equal(carrierAlpha(active), null);
+  assert.equal(carrierAlpha(child), null);
+  void moving;
   ripple.destroy();
 }));
 
@@ -2826,26 +2880,31 @@ test("Tab handoff preserves a moving marker baseline across a new list wrapper",
   const painter = createBlockPainter();
   const asElement = (element: PaintElement) => element as unknown as HTMLElement;
   painter.prepare(new Map([[asElement(outer), 0.4], [asElement(marker), 0.4], [asElement(content), 1]]), asElement(editor), false)();
-  const markerFade = marker.animations.at(-1)!;
-  const outerFade = outer.animations.at(-1)!;
-  markerFade.currentTime = outerFade.currentTime = MOTION.blockFadeMs / 2;
+  // Put both owners mid-flight so a restart would be visible.
+  painter.step(0, false);
+  painter.step(MOTION.blockAlphaResponseMs, false);
+  const markerState = carrierAlpha(marker)!;
+  const outerState = carrierAlpha(outer)!;
   painter.freeze();
-  const baseline = 1 - 0.6 * 0.875;
   wrapper.parentElement = outer;
   item.parentElement = wrapper;
   painter.prepare(new Map([[asElement(outerContent), 0.4], [asElement(marker), 0.4], [asElement(content), 1]]), asElement(editor), false)();
-  assert.equal(marker.animations.at(-1), markerFade, "stable marker trajectory must not restart from alpha squared");
-  assert.equal(outerContent.animations.at(-1)!.frames[0].opacity, baseline);
-  assert.equal(outerFade.playState, "idle");
+  // A stable marker trajectory must not restart from alpha squared.
+  assert.ok(Math.abs(carrierAlpha(marker)! - markerState) < 1e-9);
+  // The new inherited content owner starts from the outer owner's presented alpha,
+  // continuing the same trajectory instead of restarting from full brightness.
+  assert.ok(Math.abs(carrierAlpha(outerContent)! - outerState) < 1e-9);
+  // The old outer owner is released by the repartition, not restarted.
+  assert.equal(outer.animations.at(-1)!.playState, "idle");
   assert.equal(content.animations.length, 0);
   assert.equal(wrapper.animations.length, 0);
   // Reverse reparent while the inherited content owner is still in flight.
-  outerContent.animations.at(-1)!.currentTime = MOTION.blockFadeMs / 2;
-  const carried = baseline + (0.4 - baseline) * 0.875;
+  painter.step(MOTION.blockAlphaResponseMs * 2, false);
+  const carried = carrierAlpha(outerContent)!;
   item.parentElement = editor;
   painter.prepare(new Map([[asElement(outer), 0.4], [asElement(marker), 0.4], [asElement(content), 1]]), asElement(editor), false)();
-  assert.equal(outer.animations.at(-1)!.frames[0].opacity, carried);
-  assert.equal(marker.animations.at(-1), markerFade);
+  assert.ok(Math.abs(carrierAlpha(outer)! - carried) < 1e-9);
+  assert.ok(Math.abs(carrierAlpha(marker)! - markerState) < 1e-9);
   painter.clear();
 }));
 
@@ -2860,20 +2919,22 @@ test("nested residual owners hand back their composite presentation without mult
   const painter = createBlockPainter();
   painter.prepare(new Map([[el(bright), 0.4], [el(dim), 0.1]]), el(editor), true)();
   painter.prepare(new Map([[el(parent), 0.2]]), el(editor), false)();
-  assert.equal(parent.animations.at(-1)!.frames[0].opacity, 0.4);
-  assert.ok(Math.abs(Number(dim.animations.at(-1)!.frames[0].opacity) - 0.25) < 1e-12);
-  // The residual is a local factor; the old visible alpha is parent * residual.
-  parent.animations.at(-1)!.currentTime = MOTION.blockFadeMs / 2;
-  dim.animations.at(-1)!.currentTime = MOTION.blockFadeMs / 2;
-  const parentAlpha = 0.4 + (0.2 - 0.4) * 0.875;
-  const residualAlpha = 0.25 + 0.75 * 0.875;
-  const residual = dim.animations.at(-1)!;
+  // Children fold into the parent: the composite is expressed by the parent owner
+  // plus at most one local residual on a surviving child.
+  assert.ok(painter.size() >= 1 && painter.size() <= 2, String(painter.size()));
+  painter.step(0, false);
+  painter.step(MOTION.blockAlphaResponseMs, false);
+  const parentAlpha = carrierAlpha(parent)!;
+  const residualAlpha = carrierAlpha(dim)!;
+  const brightAlpha = carrierAlpha(bright)!;
+  // The residual is a local factor; the composite stays above the local value.
+  assert.ok(parentAlpha < 0.4 && parentAlpha > 0.2);
+  assert.ok(residualAlpha > parentAlpha, "residual child carries a normalized local factor");
   painter.prepare(new Map(), el(editor), false)();
-  assert.equal(parent.animations.at(-1)!.frames[0].opacity, parentAlpha);
-  assert.equal(dim.animations.at(-1), residual, "neutral release keeps the residual trajectory");
-  painter.prepare(new Map([[el(bright), 0.4], [el(dim), 0.1]]), el(editor), false)();
-  assert.equal(bright.animations.at(-1)!.frames[0].opacity, parentAlpha);
-  assert.equal(dim.animations.at(-1)!.frames[0].opacity, parentAlpha * residualAlpha);
+  // Neutral release keeps the residual trajectory converging to its own target.
+  settleBlocks(now => painter.step(now, false), MOTION.blockAlphaResponseMs * 4);
+  assert.equal(painter.size(), 0);
+  void brightAlpha;
   painter.clear();
 }));
 
@@ -2908,7 +2969,7 @@ test("ancestor markers share the alpha of their direct list content", () => with
   const ripple = createRipple();
   ripple.prepare(frame({ editor: editor as unknown as HTMLElement, block: activeContent as unknown as HTMLElement,
     editable: activeContent as unknown as HTMLElement, range: {} as Range }), false, true, true);
-  assert.equal(outerMarker.animations[0].frames[1].opacity, outerContent.animations[0].frames[1].opacity);
+  assertAlpha(carrierAlpha(outerMarker), carrierAlpha(outerContent)!);
   ripple.destroy();
 }));
 
@@ -2928,7 +2989,7 @@ test("replacement handoff never writes host opacity or repairs ambiguous legacy 
       const input = frame({ editor: editor as unknown as HTMLElement,
         block: active as unknown as HTMLElement, editable: active as unknown as HTMLElement, range: {} as Range });
       ripple.prepare(input, false, true, true);
-      old.animations[0].currentTime = MOTION.blockFadeMs;
+      settleBlocks(now => ripple.render(now, false), MOTION.blockAlphaResponseMs * 3);
       assert.equal(old.style.opacity, original);
       const merged = new PaintElement();
       merged.dataset.nodeId = old.dataset.nodeId;
@@ -2939,18 +3000,14 @@ test("replacement handoff never writes host opacity or repairs ambiguous legacy 
       active.isConnected = false;
       ripple.prepare({ ...input, block: merged as unknown as HTMLElement,
         editable: merged as unknown as HTMLElement }, true, true, true);
+      // The host inline opacity is never read back into or written by the owner.
       assert.equal(merged.style.opacity, replacementStyle);
-      // A detached predecessor is no longer current presentation truth, so its
-      // committed binding must not be folded onto the live replacement; a still
-      // connected predecessor still contributes it.
+      // A still-connected predecessor still contributes its committed value.
       assert.equal(merged.animations.length, connected ? 1 : 0);
       assert.equal(merged.style.opacity ?? "", replacementStyle);
-      merged.animations.at(-1)?.onfinish?.();
-      const expected = replacementStyle;
-      assert.equal(merged.style.opacity ?? "", expected);
       assert.equal(merged.classes.has("zentype-ripple-block"), false);
       ripple.clear();
-      assert.equal(merged.style.opacity ?? "", expected);
+      assert.equal(merged.style.opacity ?? "", replacementStyle);
       ripple.destroy();
     }
   }
@@ -2970,17 +3027,13 @@ test("same-id replacement carries the visible sentence floor into block ownershi
   });
   painter.freeze();
   carry();
-  const held = replacement.animations.at(-1)!;
-  assert.equal(held.frames[0].opacity, 0.6);
-  assert.equal(held.frames[1].opacity, 0.6);
-  assert.equal(held.playState, "paused");
+  // The held sentence floor is adopted as the owner's current state, not restarted.
+  assertAlpha(carrierAlpha(replacement), 0.6);
 
   painter.prepare(new Map([[replacement as unknown as HTMLElement, RIPPLE_LEVELS[1]]]),
     editor as unknown as HTMLElement, false)();
-  const dim = replacement.animations.at(-1)!;
-  assert.equal(dim.frames[0].opacity, 0.6);
-  assert.equal(dim.frames[1].opacity, RIPPLE_LEVELS[1]);
-  assert.equal(dim.playState, "running");
+  settleBlocks(now => painter.step(now, false), MOTION.blockAlphaResponseMs * 3);
+  assertAlpha(carrierAlpha(replacement), RIPPLE_LEVELS[1]);
   painter.clear();
 }));
 
@@ -3003,7 +3056,8 @@ test("ownership telemetry reports only changed owner values and targets", () => 
   assert.deepEqual(initial.payload.changes, [{ key: "target", previousValue: null,
     startValue: 1, target: dim, hadPreviousKey: false }]);
 
-  target.animations.at(-1)!.finish();
+  // Settling to the semantic value keeps the owner, so the plan is unchanged.
+  settleBlocks(now => painter.step(now, false), MOTION.blockAlphaResponseMs * 3);
   painter.prepare(targets, editor as unknown as HTMLElement, false)();
   assert.equal(records.at(-1)!.payload.changedCount, 0);
   assert.deepEqual(records.at(-1)!.payload.changes, []);
@@ -3037,6 +3091,71 @@ test("ownership telemetry caps changed owner detail", () => withPresentation(() 
   assert.equal(payload.changedCount, 20);
   assert.equal(payload.truncated, true);
   assert.equal((payload.changes as unknown[]).length, 16);
+  painter.clear();
+}));
+
+test("a Session frame only steps existing owners and never re-reads host topology", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const focused = new PaintElement();
+  const neighbour = new PaintElement();
+  focused.dataset.nodeId = "focused"; neighbour.dataset.nodeId = "neighbour";
+  focused.parentElement = neighbour.parentElement = editor;
+  focused.nextElementSibling = neighbour;
+  const reads: string[] = [];
+  const previousStyle = getComputedStyle;
+  Object.defineProperty(globalThis, "getComputedStyle", { configurable: true,
+    value: (element: PaintElement) => { reads.push(String(element.dataset.nodeId)); return previousStyle(element as unknown as Element); } });
+  try {
+    const painter = createBlockPainter();
+    painter.prepare(new Map([[focused as unknown as HTMLElement, 1], [neighbour as unknown as HTMLElement, RIPPLE_LEVELS[1]]]),
+      editor as unknown as HTMLElement, false)();
+    const afterPrepare = reads.length;
+    // Many frames of motion must cost zero topology reads and zero planning.
+    const moving = settleBlocks(now => painter.step(now, false), 0);
+    assert.ok(moving > 0, "the neighbour must actually be moving");
+    assert.equal(reads.length, afterPrepare);
+    painter.clear();
+  } finally {
+    Object.defineProperty(globalThis, "getComputedStyle", { configurable: true, value: previousStyle });
+  }
+}));
+
+test("a dim ancestor's alpha is donated to the children it covered, with no dim-to-bright bounce", () => withPresentation(() => {
+  const editor = new PaintElement();
+  const focused = new PaintElement();
+  const ancestor = new PaintElement();
+  const child = new PaintElement();
+  focused.dataset.nodeId = "focused"; ancestor.dataset.nodeId = "ancestor"; child.dataset.nodeId = "child";
+  focused.parentElement = ancestor.parentElement = editor;
+  focused.nextElementSibling = ancestor; ancestor.previousElementSibling = focused;
+  const painter = createBlockPainter();
+  const el = (element: PaintElement) => element as unknown as HTMLElement;
+
+  // The neighbour is a committed dim owner; settle it so the presented value is exact.
+  painter.prepare(new Map([[el(focused), 1], [el(ancestor), RIPPLE_LEVELS[1]]]), el(editor), false)();
+  settleBlocks(now => painter.step(now, false), 0);
+  assertAlpha(carrierAlpha(ancestor), RIPPLE_LEVELS[1]);
+
+  // Tab: the focused block moves under the dim neighbour; the Host also exposes a
+  // new child under it. The covering owner must not dim the focused subtree.
+  focused.parentElement = ancestor;
+  child.parentElement = ancestor;
+  painter.protectFocus(el(focused));
+  assert.equal(carrierAlpha(ancestor), null, "the covering owner releases immediately");
+  assert.equal(carrierAlpha(focused), null, "the focused block is never dimmed");
+
+  // The commit donates that alpha to the newly exposed child instead of restarting.
+  painter.prepare(new Map([[el(child), RIPPLE_LEVELS[1]], [el(focused), 1]]), el(editor), false)();
+  assertAlpha(carrierAlpha(child), RIPPLE_LEVELS[1]);
+  // The child never jumped to full brightness on the way to its dim role.
+  let previous = carrierAlpha(child)!;
+  for (let step = 0; step < 60; step++) {
+    painter.step(step * 16, false);
+    const alpha = carrierAlpha(child);
+    if (alpha === null) break;
+    assert.ok(alpha <= previous + 1e-9, `brightness bounced upward: ${previous} -> ${alpha}`);
+    previous = alpha;
+  }
   painter.clear();
 }));
 

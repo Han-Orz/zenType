@@ -13,7 +13,7 @@ export const MOTION = {
   cursorDisappearResponseMs: 80,
   cursorSettlePx: 0.15,
   alphaSettleEpsilon: 0.005,
-  blockFadeMs: 360,
+  blockAlphaResponseMs: 220,
   breathDownResponseMs: 900,
   breathUpResponseMs: 600,
   breatheLowAlpha: 0,

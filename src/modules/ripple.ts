@@ -223,13 +223,16 @@ export function createRipple(debug?: DebugRecorder) {
   }
 
   function render(now: number, reducedMotion: boolean): boolean {
+    // Block owners advance on this same Session frame whether or not Custom
+    // Highlight sentences are available: opacity must not depend on that.
+    const blocksMoving = painter.step(now, reducedMotion);
     const elapsed = lastTime === null ? 16 : Math.max(0, now - lastTime);
     lastTime = now;
     let moving = false;
     if (!supported) {
-      ZENTYPE_DEBUG: debug?.record("ripple", "render", { supported: false, moving: false, sentenceCount: sentences.length, blockCount: painter.size() });
-      if (!moving) lastTime = null;
-      return moving;
+      ZENTYPE_DEBUG: debug?.record("ripple", "render", { supported: false, moving: blocksMoving, sentenceCount: sentences.length, blockCount: painter.size() });
+      if (!blocksMoving) lastTime = null;
+      return blocksMoving;
     }
     for (const ranges of scratch) ranges.length = 0;
     for (const paint of sentences) {
@@ -264,12 +267,12 @@ export function createRipple(debug?: DebugRecorder) {
     if (!moving) lastTime = null;
     ZENTYPE_DEBUG: debug?.record("ripple", "render", {
       supported: true,
-      moving,
+      moving: moving || blocksMoving,
       sentenceCount: sentences.length,
       blockCount: painter.size(),
       now,
     });
-    return moving;
+    return moving || blocksMoving;
   }
 
   function clear() {

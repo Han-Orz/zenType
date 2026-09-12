@@ -1,78 +1,107 @@
 import { MOTION } from "../../config";
+import { clamp, stepCritical, type CriticalState } from "../../motion";
 import { visualKey, STRUCTURE_LIMITS } from "../../structure";
 import { planHandoff, type BlockStep } from "./blockPlan";
 import type { DebugRecord, DebugRecorder } from "../../debug/types";
 
 const OWNERSHIP_TELEMETRY_LIMIT = 16;
+const BASELINE_EPSILON = 0.002;
+// One paused linear effect per owner is the pixel actuator only:
+// alpha = base * (1 - currentTime / BLOCK_ALPHA_CARRIER_MS). It has no easing and
+// never advances on its own; the critical law decides the value on the Session frame.
+export const BLOCK_ALPHA_CARRIER_MS = 1000;
 
-interface Paint { value: number; from: number; target: number; base: number; animation: Animation; key: string | undefined; parents: Paint[] }
+/** Semantic identity when the Host provides one; element identity otherwise. */
+type OwnerId = string | HTMLElement;
+
+/**
+ * Semantic presentation identity. The bound element is only the current paint
+ * actuator, so a Host replacement or reparent moves this same state to a new
+ * element instead of cancelling and rebuilding a motion.
+ */
+interface Owner extends CriticalState {
+  mapKey: OwnerId;
+  key: string | undefined;
+  element: HTMLElement;
+  target: number;
+  base: number;
+  parents: Owner[];
+  carrier: Animation;
+}
 interface CarrySeed { key: string; value: number }
 
 /**
- * Opacity exists exclusively in owned WAAPI effects, including settled fills.
- * Never commitStyles(), never inline opacity, never a dim class. DOM cloning
- * cannot copy a KeyframeEffect. Cancelling the owner reveals the live host style.
+ * Block alpha is semantic presentation state advanced by the shared Session frame
+ * through the critical law. Identity is the visual key, so continuity across a
+ * Host replacement is a rebind of one state, not a second animation.
+ *
+ * The value is delivered by one paused effect per owner, set only from that state.
+ * Opacity therefore still never exists as an inline style, a dim class or a custom
+ * property: a cloned element cannot serialize a zenType block alpha.
  */
 export function createBlockPainter(debug?: DebugRecorder) {
-  const paints = new Map<HTMLElement, Paint>();
+  const owners = new Map<OwnerId, Owner>();
+  // One-shot donation values from owners released for focused-subtree safety,
+  // consumed by the next commit. Bounded by the owner count.
+  const pendingSeeds = new Map<OwnerId, number>();
   let frozen = false;
   let boundEditor: HTMLElement | null = null;
-  function sample(paint: Paint) {
-    const time = paint.animation.currentTime;
-    if (typeof time === "number") {
-      const progress = Math.min(1, Math.max(0, time / MOTION.blockFadeMs));
-      paint.value = paint.from + (paint.target - paint.from) * (1 - Math.pow(1 - progress, 3));
-    }
-    return paint.value;
+  let last: number | null = null;
+
+  const idOf = (element: HTMLElement): OwnerId => visualKey(element) ?? element;
+
+  function carrierFor(element: HTMLElement, base: number): Animation {
+    const carrier = element.animate([{ opacity: base }, { opacity: 0 }],
+      { duration: BLOCK_ALPHA_CARRIER_MS, easing: "linear", fill: "both" });
+    carrier.id = "zentype-ripple";
+    carrier.pause();
+    return carrier;
   }
-  function release(element: HTMLElement) {
-    const paint = paints.get(element);
-    if (!paint) return;
-    paint.animation.onfinish = null;
-    paint.animation.cancel();
-    paints.delete(element);
+  function writeCarrier(owner: Owner) {
+    owner.carrier.currentTime = (1 - clamp(owner.value, 0, 1)) * BLOCK_ALPHA_CARRIER_MS;
   }
-  function write(element: HTMLElement, step: BlockStep, base: number, reducedMotion: boolean) {
-    const old = paints.get(element);
-    if (old && Math.abs(sample(old) - step.value) < 0.002 && old.target === step.target) {
-      if (reducedMotion) old.animation.finish();
-      else if (old.animation.playState === "paused") old.animation.play();
-      return;
-    }
-    if (step.value === 1 && step.target === 1) { release(element); return; }
-    const animation = element.animate([{ opacity: step.value * base }, { opacity: step.target * base }], {
-      duration: MOTION.blockFadeMs, easing: "cubic-bezier(0.333333, 1, 0.666667, 1)", fill: "both",
-    });
-    animation.id = "zentype-ripple";
-    // Install the incoming effect before cancelling the outgoing one. No style
-    // flush/transition suppression is needed: the underlying CSS never changed.
-    release(element);
-    const paint: Paint = { ...step, from: step.value, base, animation, key: visualKey(element), parents: [] };
-    paints.set(element, paint);
-    animation.onfinish = () => {
-      if (paints.get(element) !== paint) return;
-      paint.value = paint.target;
-      if (paint.target === 1) release(element);
-    };
-    if (reducedMotion) animation.finish();
+  function release(owner: Owner) {
+    owner.carrier.cancel();
+    owners.delete(owner.mapKey);
+  }
+  /** Bind one semantic owner to its current actuator element and start it at `step`. */
+  function adopt(id: OwnerId, element: HTMLElement, base: number, step: BlockStep, parents: Owner[]): Owner {
+    const owner: Owner = { mapKey: id, key: visualKey(element), element, base, parents,
+      value: step.value, velocity: 0, target: step.target, carrier: carrierFor(element, base) };
+    owners.set(id, owner);
+    writeCarrier(owner);
+    return owner;
+  }
+  function rebindElement(owner: Owner, element: HTMLElement, base: number) {
+    owner.element = element;
+    owner.base = base;
+    owner.carrier.cancel();
+    owner.carrier = carrierFor(element, base);
+    writeCarrier(owner);
   }
   // These are the committed presentation ancestors, not the Host's potentially
-  // reparented live ancestors. Sample their factors before replacing any effect.
-  function presented(paint: Paint) {
-    return paint.parents.reduce((value, parent) => value * sample(parent), sample(paint));
+  // reparented live ancestors. Composite alpha is the product of their local states.
+  function presented(owner: Owner) {
+    return owner.parents.reduce((value, parent) => value * parent.value, owner.value);
   }
-  function snapshot() { return new Map([...paints].map(([element, paint]) => [element, presented(paint)])); }
+  function snapshot() { return new Map([...owners.values()].map(owner => [owner.element, presented(owner)] as const)); }
+  function baseFor(element: HTMLElement): number {
+    const owner = owners.get(idOf(element));
+    return owner && owner.element === element ? owner.base : Number(getComputedStyle(element).opacity);
+  }
   function clear() {
-    for (const element of paints.keys()) release(element);
+    for (const owner of [...owners.values()]) release(owner);
+    pendingSeeds.clear();
     frozen = false;
     boundEditor = null;
+    last = null;
   }
   return {
-    size: () => paints.size,
+    size: () => owners.size,
     bind(editor: HTMLElement) {
       if (boundEditor === editor) return;
       boundEditor = editor;
-      const owned = new Set([...paints.values()].map(paint => paint.animation));
+      const owned = new Set([...owners.values()].map(owner => owner.carrier));
       let released = 0;
       for (const animation of editor.getAnimations({ subtree: true })) {
         if (animation.id !== "zentype-ripple" || owned.has(animation)) continue;
@@ -81,29 +110,54 @@ export function createBlockPainter(debug?: DebugRecorder) {
       }
       ZENTYPE_DEBUG: if (released) debug?.record("ripple", "stale-recovery", { released });
     },
-    resume(reducedMotion: boolean) {
-      if (!frozen && !reducedMotion) return;
-      frozen = false;
-      for (const paint of paints.values()) {
-        if (reducedMotion) paint.animation.finish();
-        else if (paint.animation.playState === "paused") paint.animation.play();
-      }
-    },
+    /** Hold block motion for one structural gate. Motion resumes from the held state. */
     freeze() {
       if (frozen) return;
       frozen = true;
-      for (const paint of paints.values()) {
-        sample(paint);
-        if (paint.animation.playState === "running") paint.animation.pause();
-      }
-      ZENTYPE_DEBUG: debug?.record("ripple", "presentation-hold", { blockCount: paints.size });
+      last = null;
+      ZENTYPE_DEBUG: debug?.record("ripple", "presentation-hold", { blockCount: owners.size });
     },
-    /** Rebind only existing semantic owners; never plan against intermediate DOM. */
+    resume(reducedMotion: boolean) {
+      if (!frozen && !reducedMotion) return;
+      frozen = false;
+      if (!reducedMotion) return;
+      for (const owner of [...owners.values()]) {
+        owner.value = owner.target;
+        owner.velocity = 0;
+        if (owner.target === 1) { release(owner); continue; }
+        writeCarrier(owner);
+      }
+    },
+    /** One Session frame: step the existing states and update their actuators. */
+    step(now: number, reducedMotion: boolean): boolean {
+      if (frozen) { last = null; return false; }
+      const elapsed = last === null ? 0 : Math.max(0, now - last);
+      last = now;
+      let moving = false;
+      const response = reducedMotion ? 0 : MOTION.blockAlphaResponseMs;
+      for (const owner of [...owners.values()]) {
+        if (owner.value === owner.target && owner.velocity === 0) continue;
+        moving = true;
+        if (stepCritical(owner, owner.target, elapsed, response, MOTION.alphaSettleEpsilon) && owner.target === 1) {
+          release(owner);
+          continue;
+        }
+        writeCarrier(owner);
+      }
+      // Nothing in flight: restart the clock so a later motion does not inherit
+      // the idle interval as one elapsed step.
+      if (!moving) last = null;
+      return moving;
+    },
+    /** Rebind existing semantic owners; never plan against intermediate DOM. */
     rebind(added: readonly HTMLElement[], seed?: CarrySeed, focusedKey?: string | null,
       onRoleInvalidated?: (presentation: { key: string; value: number }) => void) {
-      const previous = new Map<string, { value: number; target: number; parents: Paint[] }>();
-      for (const paint of paints.values()) if (paint.key) previous.set(paint.key, { value: sample(paint), target: paint.target, parents: paint.parents });
+      const previous = new Map<string, { value: number; target: number; parents: Owner[] }>();
+      for (const owner of owners.values()) if (owner.key) previous.set(owner.key, {
+        value: owner.value, target: owner.target, parents: owner.parents,
+      });
       if (seed && !previous.has(seed.key)) previous.set(seed.key, { value: seed.value, target: seed.value, parents: [] });
+      const measured = new Set<OwnerId>();
       const replacements = added.flatMap(element => {
         const key = visualKey(element);
         // A same-key replacement that the Host has already made the focused block
@@ -112,15 +166,16 @@ export function createBlockPainter(debug?: DebugRecorder) {
         // represented by having no block opacity owner at all.
         if (key && key === focusedKey) {
           // Only a replacement that previously presented a committed role has a
-          // stale role to invalidate; a focused predecessor carried no owner.
-          // Its last sampled value is the presentation the user was actually
-          // looking at, so it travels with the invalidation.
+          // stale role to invalidate. Its last value is the presentation the user
+          // was actually looking at, so it travels with the invalidation.
           const carried = previous.get(key);
           if (carried) onRoleInvalidated?.({ key, value: carried.value });
+          const owner = owners.get(key);
+          if (owner) release(owner);
           return [];
         }
-        const old = key && previous.get(key);
-        return old && !paints.has(element) && element.isConnected ? [{ element, old, base: Number(getComputedStyle(element).opacity) }] : [];
+        const carried = key && element.isConnected ? previous.get(key) : undefined;
+        return carried ? [{ element, key: key!, carried }] : [];
       });
       ZENTYPE_DEBUG: if (focusedKey && added.some(element => visualKey(element) === focusedKey)) {
         debug?.record("ripple", "replacement-role-invalidated", {
@@ -128,39 +183,50 @@ export function createBlockPainter(debug?: DebugRecorder) {
         });
       }
       return () => {
-        if (paints.size + replacements.length > STRUCTURE_LIMITS.nodes) {
+        if (owners.size + replacements.length > STRUCTURE_LIMITS.nodes) {
           ZENTYPE_DEBUG: debug?.record("ripple", "ownership-limit", { phase: "replacement" });
           clear();
           return;
         }
-        for (const { element, old, base } of replacements) {
-          // Pause the trajectory, not its semantic target. Replacing the target
-          // with the held value would restart a second fade at semantic commit.
-          write(element, { value: old.value, target: old.target }, base, false);
-          const paint = paints.get(element);
-          if (paint) paint.parents = old.parents;
-          if (frozen) paints.get(element)?.animation.pause();
+        let moved = 0;
+        for (const { element, key, carried } of replacements) {
+          const owner = owners.get(key);
+          if (owner) {
+            if (owner.element === element) continue;
+            // Same presentation state, new actuator. The host baseline may only be
+            // read once per element per commit; afterwards the owner carries it.
+            const base = measured.has(key) ? owner.base : (measured.add(key), Number(getComputedStyle(element).opacity));
+            rebindElement(owner, element, base);
+          } else {
+            adopt(key, element, Number(getComputedStyle(element).opacity), { value: carried.value, target: carried.target }, carried.parents);
+          }
+          moved++;
         }
-        ZENTYPE_DEBUG: if (replacements.length) debug?.record("ripple", "replacement-carry", { count: replacements.length, blockCount: paints.size });
+        ZENTYPE_DEBUG: if (moved) debug?.record("ripple", "replacement-rebind", { count: moved, blockCount: owners.size });
       };
     },
     /**
      * Immediate presentation safety after a structural reparent. A committed owner
-     * the Host has moved above the focused block would hold its stale dim alpha
-     * over the entire focused subtree until the semantic commit. The focused block
-     * is represented by having no block opacity owner, so an owner that now
-     * contains it is no longer a legal presentation. Release it within this
-     * delivery, before the next paint; the commit still plans the final topology.
+     * the Host has moved above the focused block may not keep covering the focused
+     * subtree: the focused block is represented by having no block opacity owner.
+     * Releasing reveals host style at once, so the release also remembers what that
+     * owner was presenting. The next commit donates it to the owners that appear
+     * underneath, instead of letting them restart from full brightness — the
+     * dim -> bright -> dim gap.
      */
     protectFocus(focused: HTMLElement) {
       let released = 0;
-      for (const [element] of paints) {
-        if (element !== focused && element.isConnected && element.contains(focused)) {
-          release(element);
+      for (const owner of [...owners.values()]) {
+        if (owner.element === focused) continue;
+        if (owner.element.isConnected && owner.element.contains(focused)) {
+          pendingSeeds.set(owner.mapKey, presented(owner));
+          release(owner);
           released++;
         }
       }
-      ZENTYPE_DEBUG: if (released) debug?.record("ripple", "focus-ancestor-released", { released, blockCount: paints.size });
+      ZENTYPE_DEBUG: if (released) debug?.record("ripple", "focus-ancestor-released", {
+        released, blockCount: owners.size,
+      });
     },
     /** Read stage returns a write-only commit, so sentence/color reads can finish first. */
     prepare(targets: ReadonlyMap<HTMLElement, number>, editor: HTMLElement, reducedMotion: boolean) {
@@ -168,7 +234,19 @@ export function createBlockPainter(debug?: DebugRecorder) {
       const byKey = new Map<string, number>();
       // Current semantic projection. A detached owner is no longer presenting
       // anything, so its value must not be folded onto a live replacement.
-      for (const [element, paint] of paints) if (paint.key && element.isConnected) byKey.set(paint.key, old.get(element)!);
+      for (const owner of owners.values()) if (owner.key && owner.element.isConnected) {
+        byKey.set(owner.key, old.get(owner.element)!);
+      }
+      // An owner released for focused-subtree safety is gone from the live set but
+      // still owns the alpha the user last saw. It stays a donation source for the
+      // one commit that follows its release: a semantic key joins the projection so
+      // the surviving ancestor or successor is matched, an anonymous element seeds
+      // the handoff directly.
+      for (const [id, value] of pendingSeeds) {
+        if (typeof id === "string") byKey.set(id, value);
+        else old.set(id, value);
+      }
+      pendingSeeds.clear();
       // Match replacement owners and ancestors against the previous committed
       // bindings, even if SiYuan inserted before removing the old DOM element.
       for (const target of targets.keys()) {
@@ -184,13 +262,13 @@ export function createBlockPainter(debug?: DebugRecorder) {
         ZENTYPE_DEBUG: debug?.record("ripple", "ownership-limit", { phase: "commit" });
         clear();
       };
-      const bases = new Map([...steps].map(([element]) => [element, paints.get(element)?.base ?? Number(getComputedStyle(element).opacity)]));
+      const bases = new Map([...steps].map(([element]) => [element, baseFor(element)]));
       return () => {
         frozen = false;
         let ownershipTelemetry: DebugRecord | null = null;
         ZENTYPE_DEBUG: if (debug) {
           const previousTargets = new Map<string, number>();
-          for (const paint of paints.values()) if (paint.key) previousTargets.set(paint.key, paint.target);
+          for (const owner of owners.values()) if (owner.key) previousTargets.set(owner.key, owner.target);
           const changes: DebugRecord[] = [];
           let changedCount = 0;
           const recordChange = (key: string | null, previousValue: number | null,
@@ -202,16 +280,16 @@ export function createBlockPainter(debug?: DebugRecorder) {
           for (const [element, step] of steps) {
             const key = visualKey(element) ?? null;
             const previousValue = old.get(element) ?? (key === null ? undefined : byKey.get(key));
-            const previousTarget = key === null ? paints.get(element)?.target : previousTargets.get(key);
+            const previousTarget = key === null ? undefined : previousTargets.get(key);
             const hadPreviousKey = key === null ? old.has(element) : previousTargets.has(key);
             if (previousValue === undefined && step.value === 1 && step.target === 1) continue;
-            if (previousValue !== undefined && Math.abs(previousValue - step.value) < 0.002 && previousTarget === step.target) continue;
+            if (previousValue !== undefined && Math.abs(previousValue - step.value) < BASELINE_EPSILON && previousTarget === step.target) continue;
             recordChange(key, previousValue ?? null, step.value, step.target, hadPreviousKey);
           }
           for (const [element, value] of old) {
             if (steps.has(element)) continue;
             const key = visualKey(element) ?? null;
-            const previousTarget = key === null ? paints.get(element)?.target : previousTargets.get(key);
+            const previousTarget = key === null ? undefined : previousTargets.get(key);
             if (value === 1 && previousTarget === 1) continue;
             recordChange(key, value, value, 1, key === null || previousTargets.has(key));
           }
@@ -224,18 +302,57 @@ export function createBlockPainter(debug?: DebugRecorder) {
             changes,
           };
         }
-        for (const [element, step] of steps) write(element, step, bases.get(element)!, reducedMotion);
-        for (const element of paints.keys()) if (!steps.has(element)) release(element);
-        for (const [element, paint] of paints) {
-          paint.parents = [];
-          let parent = element.parentElement;
+        const stepped = new Set<OwnerId>([...steps.keys()].map(idOf));
+        const adopted = new Set<OwnerId>();
+        for (const [element, step] of steps) {
+          const id = idOf(element);
+          const existing = owners.get(id);
+          if (existing && existing.element !== element) {
+            if (existing.element.isConnected) {
+              // The same semantic state moves to a live successor; value and
+              // velocity continue, so the move is invisible.
+              rebindElement(existing, element, bases.get(element)!);
+            } else {
+              release(existing);
+            }
+          }
+          let owner = owners.get(id);
+          if (!owner) {
+            if (step.value === 1 && step.target === 1) continue;
+            owner = adopt(id, element, bases.get(element)!, step, []);
+            adopted.add(id);
+          } else if (owner.element === element && !adopted.has(id)) {
+            if (Math.abs(owner.value - step.value) < BASELINE_EPSILON) {
+              // The planned baseline is where this owner already is: a pure retarget.
+              // Critical Motion continues from the current value and velocity.
+              owner.target = step.target;
+            } else {
+              // Ancestry redistribution moved the local baseline; adopt the planned
+              // start so the composite alpha stays where the user saw it.
+              owner.value = step.value;
+              owner.velocity = 0;
+              owner.target = step.target;
+            }
+          }
+          if (!owner) continue;
+          if (reducedMotion && owner.value !== owner.target) {
+            owner.value = owner.target;
+            owner.velocity = 0;
+          }
+          writeCarrier(owner);
+          if (owner.target === 1 && owner.value === 1) release(owner);
+        }
+        for (const owner of [...owners.values()]) if (!stepped.has(owner.mapKey)) release(owner);
+        for (const owner of owners.values()) {
+          owner.parents = [];
+          let parent = owner.element.parentElement;
           for (let depth = 0; parent && parent !== editor && depth < STRUCTURE_LIMITS.depth; depth++, parent = parent.parentElement) {
-            const owner = paints.get(parent);
-            if (owner) paint.parents.push(owner);
+            const ancestor = owners.get(idOf(parent));
+            if (ancestor && ancestor !== owner) owner.parents.push(ancestor);
           }
         }
         ZENTYPE_DEBUG: if (ownershipTelemetry) debug?.record("ripple", "ownership-commit", {
-          ...ownershipTelemetry, blockCount: paints.size,
+          ...ownershipTelemetry, blockCount: owners.size,
         });
       };
     },
