@@ -144,6 +144,24 @@ export function createBlockPainter(debug?: DebugRecorder) {
         ZENTYPE_DEBUG: if (replacements.length) debug?.record("ripple", "replacement-carry", { count: replacements.length, blockCount: paints.size });
       };
     },
+    /**
+     * Immediate presentation safety after a structural reparent. A committed owner
+     * the Host has moved above the focused block would hold its stale dim alpha
+     * over the entire focused subtree until the semantic commit. The focused block
+     * is represented by having no block opacity owner, so an owner that now
+     * contains it is no longer a legal presentation. Release it within this
+     * delivery, before the next paint; the commit still plans the final topology.
+     */
+    protectFocus(focused: HTMLElement) {
+      let released = 0;
+      for (const [element] of paints) {
+        if (element !== focused && element.isConnected && element.contains(focused)) {
+          release(element);
+          released++;
+        }
+      }
+      ZENTYPE_DEBUG: if (released) debug?.record("ripple", "focus-ancestor-released", { released, blockCount: paints.size });
+    },
     /** Read stage returns a write-only commit, so sentence/color reads can finish first. */
     prepare(targets: ReadonlyMap<HTMLElement, number>, editor: HTMLElement, reducedMotion: boolean) {
       const old = snapshot();

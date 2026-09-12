@@ -162,11 +162,17 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         // the final block by the time this microtask runs, so its semantic key is
         // the evidence for that role change. Only the key crosses the boundary;
         // Ripple decides that the old non-focused presentation role is stale.
-        const focused = changes.kind === "structural" ? captureCollapsedSelection() : null;
-        const focusedKey = focused && focused.editor === observedEditor ? focused.blockKey : null;
+        const handoff = changes.kind === "structural" ? captureCollapsedSelection() : null;
+        const focused = handoff && handoff.editor === observedEditor ? handoff : null;
+        const focusedKey = focused?.blockKey ?? null;
         const carry = ripple.rebind(changes.added, focusedKey);
         ripple.freeze();
         carry();
+        // The Host may have reparented a committed dim owner above the focused
+        // block; its held alpha would dim the whole focused subtree until commit.
+        // The focused block is represented by having no block owner, so this is an
+        // immediate safety release, not a new plan.
+        if (focused?.block) ripple.protectFocus(focused.block);
         // A list reparent moves Host DOM. Structural Presentation consumes only
         // the Structural Contract generation that classified this very delivery.
         if (changes.kind === "structural" && authority) {

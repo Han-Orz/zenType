@@ -1739,6 +1739,44 @@ test("a structural replacement that becomes the focused block does not inherit t
   assert.equal(replacement.animations.length, 0);
 }, { typewriter: false, ripple: true }));
 
+test("a structural reparent releases a dim ancestor before the semantic commit", () => withSessionHarness(harness => {
+  const focused = harness.editable;
+  focused.dataset.nodeId = "B";
+  const neighbor = new PaintElement();
+  neighbor.dataset.nodeId = "A";
+  neighbor.parentElement = harness.editor;
+  neighbor.nextElementSibling = focused;
+  focused.previousElementSibling = neighbor;
+  harness.editor.children = [neighbor, focused];
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, range: {} as Range });
+  harness.dispatch(0, "input", { inputType: "insertText", isComposing: false });
+  harness.tick(0);
+  const dim = neighbor.animations.at(-1)!;
+  dim.currentTime = MOTION.blockFadeMs;
+  assert.equal(dim.frames[1].opacity, RIPPLE_LEVELS[1]);
+
+  // Tab reparents the focused block under its formerly dim neighbour. The Host
+  // has already moved the DOM, but the semantic commit is still pending.
+  focused.parentElement = neighbor;
+  harness.editor.children = [neighbor];
+  neighbor.children = [focused];
+  harness.setSelection("caret", focused as unknown as Node);
+  harness.setFrame({ ...harness.getFrame(), block: focused as unknown as HTMLElement,
+    editable: focused as unknown as HTMLElement, range: {} as Range,
+    caret: { x: 220, y: 420, height: 20 } });
+  harness.mutate(6, [
+    { type: "childList", target: harness.editor, addedNodes: [], removedNodes: [focused] } as unknown as MutationRecord,
+    { type: "childList", target: neighbor, addedNodes: [focused], removedNodes: [] } as unknown as MutationRecord,
+  ]);
+
+  // Before any frame or semantic commit, the owner dimming the focused subtree
+  // must already be gone; the focused block itself stays unowned.
+  assert.equal(dim.playState, "idle");
+  assert.equal(focused.animations.length, 0);
+  assert.ok(harness.events.some(event => event.name === "focus-ancestor-released" && event.payload.released === 1));
+  assert.equal(harness.events.some(event => event.name === "structure-commit"), false);
+}, { typewriter: false, ripple: true }));
+
 test("a representation replacement keeps its committed presentation role", () => withSessionHarness(harness => {
   const focused = harness.editable;
   focused.dataset.nodeId = "B";

@@ -298,5 +298,6 @@ export function createRipple(debug?: DebugRecorder) {
       return painter.rebind(added, key ? { key, value: floor } : undefined, focusedKey,
         focusedKey ? invalidated => { pendingSentencePresentation = { key: invalidated.key, value: clamp(invalidated.value, 0, 1) }; } : undefined);
     },
+    protectFocus(focused: HTMLElement) { painter.protectFocus(focused); },
     destroy() { clear(); style.remove(); } };
 }
