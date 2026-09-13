@@ -60,7 +60,7 @@ export function createLayoutContinuity(debug?: DebugRecorder) {
   const runners = new Map<string, Runner>();
   let last: number | null = null;
 
-  function isSubject(element: Element): element is HTMLElement {
+  function isSubject(element: Element): boolean {
     return element instanceof HTMLElement && !!element.dataset.nodeId &&
       !element.classList.contains("protyle-action") && !element.classList.contains("protyle-attr");
   }
@@ -160,7 +160,7 @@ export function createLayoutContinuity(debug?: DebugRecorder) {
   }
 
   function semanticAncestor(element: HTMLElement | null, editor: HTMLElement): HTMLElement | null {
-    for (let node = element?.parentElement ?? null, depth = 0;
+    for (let node: HTMLElement | null = element?.parentElement ?? null, depth = 0;
          node && node !== editor && depth < STRUCTURE_LIMITS.depth;
          node = node.parentElement, depth++) {
       if (isSubject(node)) return node;
@@ -192,13 +192,13 @@ export function createLayoutContinuity(debug?: DebugRecorder) {
     for (let depth = 0; path && path !== editor && depth < STRUCTURE_LIMITS.depth; depth++) {
       const pathKey = visualKey(path);
       if (pathKey) preEditKeys.add(pathKey);
-      const parent = path.parentElement;
+      const parent: HTMLElement | null = path.parentElement;
       if (!parent) break;
 
-      let sibling = path.nextElementSibling;
+      let sibling: Element | null = path.nextElementSibling;
       while (sibling && subjects.length < FLOW_HARD_LIMIT) {
-        const next = sibling.nextElementSibling;
-        if (isSubject(sibling)) {
+        const next: Element | null = sibling.nextElementSibling;
+        if (sibling instanceof HTMLElement && isSubject(sibling)) {
           const key = visualKey(sibling);
           if (key) preEditKeys.add(key);
           if (key && !seen.has(key)) {
