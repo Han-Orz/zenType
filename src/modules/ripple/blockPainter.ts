@@ -86,6 +86,20 @@ export function createBlockPainter(debug?: DebugRecorder) {
     const owner = owners.get(idOf(element));
     return owner && owner.element === element ? owner.base : Number(getComputedStyle(element).opacity);
   }
+  /**
+   * A stale covering owner may have become an ancestor because the Host reparented
+   * the focused list item. The old owner never covered that item's own chrome/content
+   * before the mutation, so its alpha may only be repartitioned down to the item
+   * boundary, not into the item's marker, paragraph or existing descendants.
+   */
+  function focusBranchBoundary(covering: HTMLElement, focused: HTMLElement): HTMLElement {
+    let node: HTMLElement | null = focused;
+    for (let depth = 0; node && depth < STRUCTURE_LIMITS.depth; depth++, node = node.parentElement) {
+      if (node.dataset.type === "NodeListItem") return node;
+      if (node === covering) break;
+    }
+    return focused;
+  }
   function clear() {
     for (const owner of [...owners.values()]) release(owner);
     frozen = false;
@@ -209,10 +223,10 @@ export function createBlockPainter(debug?: DebugRecorder) {
      * An owner's alpha means its whole subtree, so releasing it would uncover every
      * element that relied on it at full brightness until the semantic commit re-dims
      * them — the dim -> bright -> dim gap. The alpha therefore moves with the role:
-     * walking down from the covering element to the focused block, every off-path
-     * sibling at every level takes over the same composite, so the subtracted focus
-     * path is exactly what stops being multiplied and nothing else changes. That is
-     * a bounded subtree partition around one cut, not a neighborhood plan.
+     * walking down from the covering element toward the focused branch, every
+     * off-path sibling takes over the same composite. For a list reparent the walk
+     * stops at the focused NodeListItem: that branch was outside the stale ancestor
+     * before the Host moved it, so its marker/content must not inherit the old dim.
      */
     protectFocus(focused: HTMLElement) {
       let moved = 0;
@@ -221,19 +235,19 @@ export function createBlockPainter(debug?: DebugRecorder) {
         if (owner.element === focused) continue;
         if (!owner.element.isConnected || !owner.element.contains(focused)) continue;
         if (owner.target !== 1) {
-          // The focus path owner.element -> ... -> focused, so each level knows which
-          // child to leave uncovered.
+          const boundary = focusBranchBoundary(owner.element, focused);
+          // The focus path owner.element -> ... -> boundary, so each level knows
+          // which child stays on the protected branch.
           const path: HTMLElement[] = [];
-          for (let node: HTMLElement | null = focused;
+          for (let node: HTMLElement | null = boundary;
                node && node !== owner.element && path.length <= STRUCTURE_LIMITS.depth;
                node = node.parentElement) {
             path.push(node);
           }
           path.reverse();
-          // Removing this owner removes one multiplicative factor from its entire
-          // subtree. The focus path owns no owner (it contained the focus), so each
-          // off-path child at every level was multiplied by exactly this composite;
-          // handing that value down leaves every covered element unchanged.
+          // Removing this owner removes one multiplicative factor from its old
+          // subtree. Preserve that factor only on branches that were already part of
+          // the covering subtree; the protected focus branch itself receives none.
           const composite = presented(owner);
           for (let level = 0; level < path.length && moved < STRUCTURE_LIMITS.nodes; level++) {
             const onPath = path[level];
@@ -258,9 +272,6 @@ export function createBlockPainter(debug?: DebugRecorder) {
                 { value: composite, target: owner.target }, []);
               moved++;
             }
-            // The focused block's own subtree is the focused content: the factor stops
-            // here, so everything below it stays uncovered while its siblings keep it.
-            if (onPath === focused) break;
           }
         }
         release(owner);
