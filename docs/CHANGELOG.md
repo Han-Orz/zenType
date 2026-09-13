@@ -1,5 +1,34 @@
 # Changelog
 
+## v2.9.0-remake.2.8-layout-continuity.1 (2026-09-13) — Enter/Delete/Backspace document flow
+
+Session integration only. `src/modules/layoutContinuity.ts` and its suite are the architecture; this round wires that engine into `WritingSession` and changes nothing about its motion law or read budget.
+
+### Session wiring
+
+- One `createLayoutContinuity(debug)` is instantiated beside the existing `createStructurePresentation(debug)`. The two geometry owners are mutually exclusive per structural generation, so their offsets never add.
+- Keydown admission keeps the Structural Contract generation. `indent`/`outdent` keep the validated single-NodeListItem `presentation.capture(...)` unchanged; Enter/Delete/Backspace arm the flow engine with the focused block, editor, `frame.viewport` and, for Enter, the pre-edit Host caret as `continuationOrigin`.
+- A delete the frame proves is an ordinary interior text delete arms nothing. Session reuses StructureGate's `hasSafeOrdinaryTextPosition` (now exported) instead of keeping a second definition, so ordinary character editing pays no layout geometry capture.
+- The Phase 1 Ripple mutation sequence is byte-for-byte unchanged: `ripple.rebind -> ripple.freeze -> carry -> ripple.protectFocus`. `layout.attach(...)` runs inside the same structural delivery, immediately after `presentation.attach(...)`, so no frame can paint the Host's new layout before the survivors' transform exists.
+- Both geometry consumers advance from the one existing Session frame: `presentation.step(now, ...)` and `layout.step(now, ...)`. After `readEditorFrame` the effective carry is `layout.offsetFor(next.block) ?? reparentOffset`, so a displaced following sibling never transports the cursor. A frame is queued while either owner is still moving.
+- Lifecycle release is paired: every path that already cancelled `presentation` (suspension, window blur, timeout/overflow release, missing-frame teardown, editor switch, configure disable, destroy) now cancels `layout` too, and the ordinary-outcome abandon abandons both.
+
+### Constraints held
+
+- No new scheduler, rAF, timer or observer; the engine owns no clock.
+- Phase 1 Block Ripple architecture is untouched.
+- Tab/Shift+Tab keep the real-machine-passed single-item path; a regression asserts Tab arms no flow capture.
+- Motion personality is unchanged; no tuning in this round.
+
+### Verification
+
+- `typecheck`, `typecheck:tests`, `tests` (132), `build`, `verify:prod`, `git diff --check`.
+- New Session-level tests cover: Enter arms/attaches inside delivery and the split continuation advances on the first Session frame; a proven ordinary interior Backspace arms no capture; a boundary Backspace captures and animates the survivor; Tab arms no flow capture; suspension releases both geometry presentations. Each wiring point was confirmed discriminating by temporarily disabling it.
+
+### Status
+
+Awaiting real-machine visual acceptance. Automated fixtures do not establish browser pixels; Enter/Delete/Backspace flow, rapid repeats, nested-list flow and IME/selection still need real SiYuan 3.8.3 acceptance.
+
 ## v2.9.0-remake.2.7-list-presentation.1 (2026-09-12) — One structural displacement owner
 
 Real-device feedback on the previous round: window blur was correct, but Tab/Shift+Tab still flashed strongly and the focused-only transform felt slow and looked like several systems fighting. The prototype was reverted and re-derived from evidence.
