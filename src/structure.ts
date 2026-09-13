@@ -100,7 +100,13 @@ export function classifyMutations(records: readonly MutationRecord[]) {
   return { kind, added, textOnly };
 }
 
-function hasSafeOrdinaryTextPosition(frame: EditorFrame | null, intent: StructureIntentKind): boolean {
+/**
+ * A proven ordinary interior text delete: the caret is inside a text node with a
+ * character on the delete side. Used by the gate to admit an ordinary edit early,
+ * and by Session to skip structural layout capture for the same case, so both read
+ * one definition of "this edit cannot change layout".
+ */
+export function hasSafeOrdinaryTextPosition(frame: EditorFrame | null, intent: StructureIntentKind): boolean {
   if (intent !== "backspace" && intent !== "delete") return false;
   if (!frame || frame.selection !== "caret" || frame.caretless || !frame.caret ||
       !frame.editable || !frame.block || !frame.range?.collapsed) return false;

@@ -3586,3 +3586,163 @@ test("selection collapse reacquires fresh authority before immediate structural 
   harness.tick(70);
   assert.ok(harness.events.some(event => event.name === "structure-commit"));
 }, { typewriter: false, ripple: false }));
+
+// A following sibling whose rect the harness can move between capture and attach.
+function layoutSibling(key: string, top: number, editor: PaintElement): PaintElement {
+  const element = new PaintElement();
+  element.dataset.nodeId = key;
+  element.parentElement = editor;
+  Object.assign(element, { closest: (selector: string) =>
+    selector === ".protyle-wysiwyg" ? editor : selector === "[data-node-id]" ? element : null });
+  paintRect(element, 0, top);
+  return element;
+}
+
+test("Enter arms flow continuity, attaches inside delivery, and converges on the Session frame", () => withSessionHarness(harness => {
+  harness.setReducedMotion(false);
+  const anchor = harness.editable;
+  anchor.dataset.nodeId = "anchor";
+  const following = layoutSibling("following", 130, harness.editor);
+  anchor.nextElementSibling = following; following.previousElementSibling = anchor;
+  harness.editor.children = [anchor, following];
+  // The frame must be admitted before the key so the caret origin and the block
+  // identity the engine reads are the ones the user was actually on.
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, block: anchor as unknown as HTMLElement,
+    editable: anchor as unknown as HTMLElement, range: textRange(anchor, "abcdef", 3),
+    viewport: { top: 0, bottom: 600, left: 0, right: 800 },
+    caret: { x: 42, y: 100, height: 20 } });
+  harness.tick(0);
+
+  paintRect(anchor, 0, 100);
+  paintRect(following, 0, 130);
+  harness.dispatch(20, "keydown", { key: "Enter", defaultPrevented: false });
+  assert.ok(harness.events.some(event => event.name === "layout-continuity-capture" && event.payload.intent === "enter"));
+
+  // Host commit: the split inserted a new focused block and pushed the following
+  // block down. The added node is what makes this delivery structural.
+  const opened = layoutSibling("opened", 130, harness.editor);
+  paintRect(opened, 4, 130);
+  paintRect(following, 0, 160);
+  harness.editor.children = [anchor, opened, following];
+  anchor.nextElementSibling = opened; opened.previousElementSibling = anchor;
+  opened.nextElementSibling = following; following.previousElementSibling = opened;
+  harness.setSelection("caret", opened as unknown as Node);
+  harness.mutate(24, [{ type: "childList", target: harness.editor,
+    addedNodes: [opened], removedNodes: [] } as unknown as MutationRecord]);
+
+  // It presents its old position from inside the mutation delivery, before any frame.
+  const begin = harness.events.find(event => event.name === "layout-continuity-begin");
+  assert.ok(begin, "flow continuity must attach in the delivery");
+  assert.ok(Number(begin.payload.attached) >= 2, String(begin.payload.attached));
+  assert.equal(following.style.transform, "translate(0px, -30px)", "the following block yields");
+  // The split continuation moves from the pre-edit caret origin, and it advances on
+  // the first Session frame instead of holding for a zero-motion frame.
+  assert.equal(opened.style.transform, "translate(38px, -30px)");
+  const held = opened.style.transform;
+
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, block: opened as unknown as HTMLElement,
+    editable: opened as unknown as HTMLElement, range: textRange(opened, "abcdef", 3),
+    viewport: { top: 0, bottom: 600, left: 0, right: 800 },
+    caret: { x: 42, y: 100, height: 20 } });
+  harness.tick(40);
+  assert.notEqual(opened.style.transform, held, "the split continuation advances immediately");
+
+  for (let at = 56; at <= 1400; at += 16) harness.tick(at);
+  assert.equal(following.style.transform, "");
+  assert.equal(opened.style.transform, "");
+}, { typewriter: false, ripple: false }));
+
+test("a proven ordinary interior Backspace arms no flow capture", () => withSessionHarness(harness => {
+  harness.setReducedMotion(false);
+  const anchor = harness.editable;
+  anchor.dataset.nodeId = "anchor";
+  // Interior position with a character on both sides: an ordinary text delete.
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, selection: "caret", caretless: false,
+    block: anchor as unknown as HTMLElement, editable: anchor as unknown as HTMLElement,
+    range: textRange(anchor, "abcdef", 3), caret: { x: 120, y: 540, height: 20 } });
+  harness.tick(0);
+
+  harness.dispatch(20, "keydown", { key: "Backspace", defaultPrevented: false });
+  assert.equal(harness.events.some(event => event.name === "layout-continuity-capture"), false,
+    "the ordinary text fast path must not pay layout geometry capture");
+}, { typewriter: false, ripple: false }));
+
+test("a boundary Backspace arms flow continuity and animates the survivor", () => withSessionHarness(harness => {
+  harness.setReducedMotion(false);
+  const anchor = harness.editable;
+  anchor.dataset.nodeId = "anchor";
+  const removed = layoutSibling("removed", 130, harness.editor);
+  const following = layoutSibling("following", 160, harness.editor);
+  anchor.nextElementSibling = removed; removed.previousElementSibling = anchor;
+  removed.nextElementSibling = following; following.previousElementSibling = removed;
+  harness.editor.children = [anchor, removed, following];
+  // Offset 0 is a boundary delete: merging can change layout, so it must capture.
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, selection: "caret", caretless: false,
+    block: anchor as unknown as HTMLElement, editable: anchor as unknown as HTMLElement,
+    range: textRange(anchor, "abcdef", 0), caret: { x: 120, y: 540, height: 20 },
+    viewport: { top: 0, bottom: 600, left: 0, right: 800 } });
+  harness.tick(0);
+
+  paintRect(anchor, 0, 100);
+  harness.dispatch(20, "keydown", { key: "Backspace", defaultPrevented: false });
+  assert.ok(harness.events.some(event => event.name === "layout-continuity-capture" && event.payload.intent === "backspace"));
+
+  // The merge removed the middle block; the survivor closes the gap.
+  removed.isConnected = false;
+  harness.editor.children = [anchor, following];
+  anchor.nextElementSibling = following; following.previousElementSibling = anchor;
+  paintRect(following, 0, 130);
+  harness.mutate(24, [{ type: "childList", target: harness.editor,
+    addedNodes: [], removedNodes: [removed] } as unknown as MutationRecord]);
+  assert.equal(following.style.transform, "translate(0px, 30px)", "the survivor reclaims its place");
+  assert.equal(anchor.style.transform, "", "the caret's own block is not displaced");
+
+  for (let at = 40; at <= 1400; at += 16) harness.tick(at);
+  assert.equal(following.style.transform, "");
+}, { typewriter: false, ripple: false }));
+
+test("Tab keeps the single-item presentation path and arms no flow capture", () => withSessionHarness(harness => {
+  harness.setReducedMotion(false);
+  const anchor = harness.editable;
+  anchor.dataset.nodeId = "anchor";
+  paintRect(anchor, 0, 100);
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, selection: "caret", caretless: false,
+    block: anchor as unknown as HTMLElement, editable: anchor as unknown as HTMLElement,
+    range: textRange(anchor, "abcdef", 3), caret: { x: 120, y: 540, height: 20 } });
+  harness.tick(0);
+
+  harness.dispatch(20, "keydown", { key: "Tab", defaultPrevented: false });
+  assert.equal(harness.events.some(event => event.name === "layout-continuity-capture"), false,
+    "Tab must not use the document flow engine");
+}, { typewriter: false, ripple: false }));
+
+test("a suspended lifecycle releases both geometry presentations", () => withSessionHarness(harness => {
+  harness.setReducedMotion(false);
+  const anchor = harness.editable;
+  anchor.dataset.nodeId = "anchor";
+  const following = layoutSibling("following", 130, harness.editor);
+  anchor.nextElementSibling = following; following.previousElementSibling = anchor;
+  harness.editor.children = [anchor, following];
+  harness.setFrame({ ...harness.getFrame(), reducedMotion: false, block: anchor as unknown as HTMLElement,
+    editable: anchor as unknown as HTMLElement, range: textRange(anchor, "abcdef", 3),
+    viewport: { top: 0, bottom: 600, left: 0, right: 800 },
+    caret: { x: 120, y: 540, height: 20 } });
+  harness.tick(0);
+  paintRect(anchor, 0, 100);
+  harness.dispatch(20, "keydown", { key: "Enter", defaultPrevented: false });
+
+  const opened = layoutSibling("opened", 160, harness.editor);
+  paintRect(opened, 0, 160);
+  paintRect(following, 0, 190);
+  harness.editor.children = [anchor, opened, following];
+  anchor.nextElementSibling = opened; opened.nextElementSibling = following;
+  harness.mutate(24, [{ type: "childList", target: harness.editor,
+    addedNodes: [opened], removedNodes: [] } as unknown as MutationRecord]);
+  assert.notEqual(following.style.transform, "");
+
+  // A lifecycle suspension must give both geometry owners back synchronously.
+  harness.session.suspend();
+  assert.equal(following.style.transform, "");
+  assert.equal(opened.style.transform, "");
+  assert.equal(harness.timerCount(), 0);
+}, { typewriter: false, ripple: false }));

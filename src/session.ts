@@ -5,8 +5,9 @@ import { createCursor, type CursorIntent } from "./modules/cursor";
 import { createTypewriter } from "./modules/typewriter";
 import { createRipple } from "./modules/ripple";
 import { createStructurePresentation } from "./modules/structurePresentation";
+import { createLayoutContinuity } from "./modules/layoutContinuity";
 import type { DebugRecorder } from "./debug/types";
-import { classifyMutations, createStructureGate, semanticBlockKey, STRUCTURE_LIMITS } from "./structure";
+import { classifyMutations, createStructureGate, hasSafeOrdinaryTextPosition, semanticBlockKey, STRUCTURE_LIMITS } from "./structure";
 
 type SelectionMode = "unknown" | "caret" | "range";
 interface SelectionHandoff {
@@ -31,6 +32,10 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
   // The one presentation owner of a structural displacement. Ripple keeps
   // owning alpha; this owns geometry, and the Cursor consumes the same offset.
   const presentation = createStructurePresentation(debug);
+  // Enter/Delete/Backspace document flow. Tab/Shift+Tab deliberately stay on the
+  // validated single-item `presentation` owner; only one of the two can present a
+  // given structural generation, so their offsets never add.
+  const layout = createLayoutContinuity(debug);
   const structure = createStructureGate(debug);
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
   const listeners = new AbortController();
@@ -177,6 +182,10 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         // the Structural Contract generation that classified this very delivery.
         if (changes.kind === "structural" && authority) {
           presentation.attach(authority.generation, now, reducedMotion.matches);
+          // Flow continuity commits inside the same mutation delivery, so no frame
+          // can paint the Host's new layout before the survivors' transform exists.
+          // It is a no-op unless Enter/Delete/Backspace armed it for this generation.
+          layout.attach(authority.generation, now, reducedMotion.matches, changes.added, focused?.block ?? null);
         }
       }
     }
@@ -252,6 +261,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     // A blocked Session stops advancing frames, so a displacement nobody will
     // finish must give the Host element back immediately.
     presentation.cancel();
+    layout.cancel();
     frame = null;
     observe(null);
   }
@@ -275,6 +285,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     if (document.hidden) ripple.clear();
     else releaseRipple();
     presentation.cancel();
+    layout.cancel();
     cleanClones();
     frame = null;
     observe(null);
@@ -307,9 +318,14 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
       }
       let sampled = false;
       let authoritativeTarget = false;
-      // The one structural displacement is advanced once per Session frame,
-      // before any path below consumes the caret it carries.
-      const offset = presentation.step(now, reducedMotion.matches);
+      // Two geometry consumers advance on this one Session frame. Their modes are
+      // mutually exclusive per structural generation, so at most one draws an offset
+      // at the focused block. Neither owns a clock.
+      const reparentOffset = presentation.step(now, reducedMotion.matches);
+      const flowMoving = layout.step(now, reducedMotion.matches);
+      // A displaced following sibling is not the caret's block, so the carry is
+      // resolved against the focused block while `flowMoving` keeps the frame alive.
+      let offset = layout.offsetFor(frame?.block ?? null) ?? reparentOffset;
       // A typewriter frame only moves the container: the frame already transports
       // the caret and the cursor by that displacement, so re-reading host geometry
       // every frame of a comfort scroll is redundant work.
@@ -320,6 +336,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         // The caret rect includes the transform on screen. Remove it here so the
         // Structural Contract and every stored frame keep consuming untransformed
         // Host truth.
+        offset = layout.offsetFor(next?.block ?? null) ?? reparentOffset;
         if (offset && next?.caret) {
           next.caret = { ...next.caret, x: next.caret.x - offset.x, y: next.caret.y - offset.y };
         }
@@ -363,7 +380,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           if (intent === "structural" && cursor.isTargetSettled() && !settling) cursorTargetIntent = "navigation";
           geometryDirty = true;
           cleanClones();
-          if (cursorMoving || settling || structure.needsFrameSampling() || offset) queue();
+          if (cursorMoving || settling || structure.needsFrameSampling() || offset || flowMoving) queue();
           return;
         }
         if (decision === "wait") {
@@ -386,7 +403,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
             // all presentation and await fresh activity instead of animating a guess.
             targetAuthorityPending = false;
             cursor.hide(); cursorTargetIntent = "navigation";
-            ripple.clear(); stopWriting(); cleanClones(); presentation.abandon();
+            ripple.clear(); stopWriting(); cleanClones(); presentation.abandon(); layout.cancel();
             frame = next;
             observe(next);
             ZENTYPE_DEBUG: debug?.record("session", "structure-release", { now, reason: decision });
@@ -405,7 +422,9 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
             fromBlockKey: handoff?.fromBlockKey ?? null, toBlockKey: handoff?.toBlockKey ?? null,
           });
         }
-        if (decision === "ordinary") presentation.abandon();
+        // A non-structural outcome abandons the armed capture: no frame may animate
+        // a displacement the Host never committed.
+        if (decision === "ordinary") { presentation.abandon(); layout.abandon(); }
         if (decision === "ordinary" && next?.caret && (targetAuthorityPending || frame === null)) {
           authoritativeTarget = true;
           targetAuthorityPending = false;
@@ -432,6 +451,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           cursorTargetIntent = "navigation";
           ripple.clear();
           presentation.abandon();
+          layout.cancel();
           typewriter.cancel();
           frame = null;
           observe(null);
@@ -445,6 +465,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
           targetAuthorityPending = true;
           ripple.clear();
           presentation.cancel();
+          layout.cancel();
           typewriter.cancel();
           if (writingEditor !== next.editor) writingEditor = null;
           if (composingEditor !== next.editor) composingEditor = null;
@@ -526,7 +547,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
         typewriterMoving: typewriter.isMoving(),
         settling,
       });
-      if (cursorMoving || typewriter.isMoving() || rippleMoving || settling || offset) queue();
+      if (cursorMoving || typewriter.isMoving() || rippleMoving || settling || offset || flowMoving) queue();
       else if ((wake === null || !frame.caret) && !composing) {
         // Recovery, typing pauses and cursor breathing share the idle wake.
         const cursorDelay = reducedMotion.matches ? Infinity : cursor.wakeDelay(now) ?? Infinity;
@@ -617,11 +638,23 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
             : key.key === "Tab" ? key.shiftKey ? "outdent" : "indent" : "other";
           const editor = editable.closest<HTMLElement>(".protyle-wysiwyg")!;
           const generation = structure.intent(editor, now, intent, blockKeyForStructuralIntent(editable, editor), "keydown");
-          // A list indent reparents Host DOM, so the position the user is looking
-          // at has to be read before the mutation. This is the only geometry read
-          // the structural presentation adds, and it is bounded to one list item.
+          // A list indent/outdent reparents Host DOM, so the position the user is
+          // looking at has to be read before the mutation. This is the validated
+          // single-NodeListItem owner and it stays exactly as it was.
           if (intent === "indent" || intent === "outdent") {
             presentation.capture(generation, structuralMoveRoot(captureCollapsedSelection()?.block ?? null), now);
+          } else {
+            // Enter/Delete/Backspace change document flow instead of reparenting.
+            // The engine is viewport-bounded, so it is only armed for edits that can
+            // actually move layout: Enter, and a delete the frame cannot prove is an
+            // ordinary interior text delete. A proven fast-path delete pays nothing.
+            const flowIntent = key.key === "Enter" ? "enter" : intent === "backspace" ? "backspace" : "delete";
+            const ordinaryDelete = flowIntent !== "enter" && hasSafeOrdinaryTextPosition(frame, intent);
+            if (!ordinaryDelete) {
+              layout.capture(generation, flowIntent, captureCollapsedSelection()?.block ?? null, editor,
+                frame?.viewport ?? null, now,
+                flowIntent === "enter" && frame?.caret ? { x: frame.caret.x, y: frame.caret.y } : null);
+            }
           }
         }
         break;
@@ -732,7 +765,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
     configure(next) {
       features = { ...next };
       structure.cancel("configure");
-      if (!features.ripple) { ripple.clear(); presentation.cancel(); }
+      if (!features.ripple) { ripple.clear(); presentation.cancel(); layout.cancel(); }
       if (!features.typewriter) typewriter.cancel();
       refresh();
     },
@@ -748,6 +781,7 @@ export function createWritingSession(initial: Features, debug?: DebugRecorder): 
       if (pending !== null) cancelAnimationFrame(pending);
       typewriter.cancel();
       presentation.cancel();
+      layout.cancel();
       ripple.destroy();
       cursor.destroy();
     },
