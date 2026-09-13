@@ -7,7 +7,7 @@ import { build } from "esbuild";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outdir = mkdtempSync(path.join(root, ".tmp-tests-"));
 try {
-  const entries = ["remake.test.ts", "layoutContinuity.test.ts"];
+  const entries = ["remake.test.ts", "layoutContinuity.test.ts", "rippleStructuralFocus.test.ts"];
   const outputs = [];
   for (const entry of entries) {
     const outfile = path.join(outdir, entry.replace(/\.ts$/, ".mjs"));
